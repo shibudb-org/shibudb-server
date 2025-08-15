@@ -56,7 +56,4 @@ for temp_dir in /tmp/test-server-* /tmp/shibudb-server-*; do
     fi
 done
 
-rm shibudb-server
-rm -rf cmd/test-server
-
 echo -e "${GREEN}Cleanup complete${NC}"

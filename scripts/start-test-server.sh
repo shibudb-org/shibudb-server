@@ -23,6 +23,31 @@ ARCH=$(uname -m)
 
 echo -e "${YELLOW}📋 Detected OS: $OS, Architecture: $ARCH${NC}"
 
+# Function to check if port is listening
+check_port() {
+    local port=$1
+    local timeout=$2
+    
+    # Try different methods to check if port is listening
+    if command -v nc >/dev/null 2>&1; then
+        # Use netcat if available
+        nc -z localhost $port 2>/dev/null
+        return $?
+    elif command -v ss >/dev/null 2>&1; then
+        # Use ss (socket statistics) if available
+        ss -tuln | grep -q ":$port "
+        return $?
+    elif command -v lsof >/dev/null 2>&1; then
+        # Use lsof if available
+        lsof -i :$port >/dev/null 2>&1
+        return $?
+    else
+        # Fallback: try to connect with /dev/tcp
+        timeout $timeout bash -c "</dev/tcp/localhost/$port" 2>/dev/null
+        return $?
+    fi
+}
+
 # Setup FAISS libraries based on OS
 setup_faiss_libraries() {
     if [[ "$OS" == "Darwin" ]]; then
@@ -139,7 +164,7 @@ echo -e "${YELLOW}Waiting for server to start on port 4444...${NC}"
 timeout=30
 counter=0
 
-while ! nc -z localhost 4444 && [ $counter -lt $timeout ]; do
+while ! check_port 4444 1 && [ $counter -lt $timeout ]; do
     sleep 1
     counter=$((counter + 1))
     echo -n "."
