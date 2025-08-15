@@ -37,3 +37,6 @@ metadata.json
 
 #testdata for dev server
 cmd/server/testdata/
+
+# Test data directory for E2E tests
+test-data/

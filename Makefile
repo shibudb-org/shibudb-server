@@ -1,7 +1,7 @@
 # ShibuDb Makefile
 # This file provides common development and build tasks
 
-.PHONY: help build test clean install uninstall lint format check-fmt vet coverage benchmark e2e-test build-all release
+.PHONY: help build test clean install uninstall lint format check-fmt vet coverage benchmark e2e-test test-all build-all release
 
 # Variables
 BINARY_NAME=shibudb
@@ -27,6 +27,18 @@ test: ## Run all tests (excluding benchmarks and E2E)
 	else \
 		./scripts/test_with_rpath.sh --exclude-benchmark --exclude-e2e; \
 	fi
+
+test-all: ## Run all tests including E2E tests (starts server automatically)
+	@echo "Running all tests including E2E tests..."
+	@echo "Starting test server..."
+	@./scripts/start-test-server.sh
+	@echo "Running unit tests..."
+	@$(MAKE) test
+	@echo "Running E2E tests..."
+	@$(MAKE) e2e-test
+	@echo "Stopping test server..."
+	@./scripts/stop-test-server.sh
+	@echo "All tests completed!"
 
 coverage: ## Run tests with coverage report
 	@echo "Running tests with coverage..."
