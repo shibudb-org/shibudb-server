@@ -147,8 +147,9 @@ SERVER_BINARY="$TEMP_DIR/test-server"
 if [[ "$OS" == "Darwin" ]]; then
     # macOS: use -lc++
     CGO_ENABLED=1 \
-    CGO_CXXFLAGS="-I/usr/local/include" \
-    CGO_LDFLAGS="-L/usr/local/lib -lfaiss -lfaiss_c -lc++" \
+    CGO_CFLAGS="-I$PROJECT_ROOT/resources/lib/include" \
+    CGO_CXXFLAGS="-I$PROJECT_ROOT/resources/lib/include" \
+    CGO_LDFLAGS="-L$PROJECT_ROOT/resources/lib/mac/apple_silicon -lfaiss -lfaiss_c -lc++" \
     go build -o "$SERVER_BINARY" ./cmd/test_server
     
     # Add RPATH to the server binary
@@ -156,9 +157,20 @@ if [[ "$OS" == "Darwin" ]]; then
     install_name_tool -add_rpath "/usr/local/lib" "$SERVER_BINARY"
 elif [[ "$OS" == "Linux" ]]; then
     # Linux: use -lstdc++
+    # Detect architecture for Linux
+    if [[ "$ARCH" == "x86_64" ]]; then
+        LIB_DIR="amd64"
+    elif [[ "$ARCH" == "aarch64" ]]; then
+        LIB_DIR="arm64"
+    else
+        echo -e "${RED}❌ Unsupported architecture: $ARCH${NC}"
+        exit 1
+    fi
+    
     CGO_ENABLED=1 \
-    CGO_CXXFLAGS="-I/usr/local/include" \
-    CGO_LDFLAGS="-L/usr/local/lib -lfaiss -lfaiss_c -lstdc++ -lm -lgomp -lopenblas" \
+    CGO_CFLAGS="-I$PROJECT_ROOT/resources/lib/include" \
+    CGO_CXXFLAGS="-I$PROJECT_ROOT/resources/lib/include" \
+    CGO_LDFLAGS="-L$PROJECT_ROOT/resources/lib/linux/$LIB_DIR -lfaiss -lfaiss_c -lstdc++ -lm -lgomp -lopenblas" \
     go build -o "$SERVER_BINARY" ./cmd/test_server
     
     # Add RPATH to the server binary if patchelf is available
@@ -175,11 +187,24 @@ echo -e "${GREEN}Test server binary built successfully${NC}"
 
 # Start server in background
 echo -e "${GREEN}Starting server on port 4444...${NC}"
-if [[ "$OS" == "Linux" && ! -f "$(command -v patchelf)" ]]; then
-    # Use LD_LIBRARY_PATH for Linux when patchelf is not available
-    LD_LIBRARY_PATH="/usr/local/lib:$LD_LIBRARY_PATH" "$SERVER_BINARY" > server.log 2>&1 &
-else
-    "$SERVER_BINARY" > server.log 2>&1 &
+if [[ "$OS" == "Darwin" ]]; then
+    # macOS: use the library path from our resources
+    DYLD_LIBRARY_PATH="$PROJECT_ROOT/resources/lib/mac/apple_silicon:$DYLD_LIBRARY_PATH" "$SERVER_BINARY" > server.log 2>&1 &
+elif [[ "$OS" == "Linux" ]]; then
+    # Linux: use the library path from our resources
+    if [[ "$ARCH" == "x86_64" ]]; then
+        LIB_DIR="amd64"
+    elif [[ "$ARCH" == "aarch64" ]]; then
+        LIB_DIR="arm64"
+    fi
+    
+    if command -v patchelf >/dev/null 2>&1; then
+        # Use RPATH if patchelf is available
+        "$SERVER_BINARY" > server.log 2>&1 &
+    else
+        # Use LD_LIBRARY_PATH for Linux when patchelf is not available
+        LD_LIBRARY_PATH="$PROJECT_ROOT/resources/lib/linux/$LIB_DIR:$LD_LIBRARY_PATH" "$SERVER_BINARY" > server.log 2>&1 &
+    fi
 fi
 
 SERVER_PID=$!
