@@ -124,8 +124,8 @@ clean: ## Clean build artifacts
 	rm -f coverage.out coverage.html
 	rm -f *.db *.dat *.faiss
 	rm -f *.test
-	rm shibudb-server
-    rm -rf cmd/test-server
+	rm -f shibudb-server
+	rm -rf cmd/test-server
 	@echo "Cleanup complete."
 
 start-local-server: ## Start local development server
