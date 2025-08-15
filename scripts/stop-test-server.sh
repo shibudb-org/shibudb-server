@@ -56,4 +56,8 @@ for temp_dir in /tmp/test-server-* /tmp/shibudb-server-*; do
     fi
 done
 
+# Clean up any generated server binaries
+rm -f shibudb-server
+rm -rf cmd/test_server
+
 echo -e "${GREEN}Cleanup complete${NC}"

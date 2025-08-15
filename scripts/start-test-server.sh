@@ -92,6 +92,34 @@ DATA_DIR="$PROJECT_ROOT/test-data"
 
 mkdir -p "$TESTDATA_DIR"
 mkdir -p "$DATA_DIR"
+mkdir -p "$PROJECT_ROOT/cmd/test_server"
+
+# Create the test server main.go file
+cat > "$PROJECT_ROOT/cmd/test_server/main.go" << 'EOF'
+package main
+
+import (
+	"os"
+	"path/filepath"
+
+	"github.com/Podcopic-Labs/ShibuDb/cmd/server"
+)
+
+func main() {
+	// Get the current directory (project root)
+	currentDir, err := os.Getwd()
+	if err != nil {
+		panic("Error getting current directory: " + err.Error())
+	}
+
+	// Use local paths for testing
+	configPath := filepath.Join(currentDir, "cmd/server/testdata/config.json")
+	dataPath := filepath.Join(currentDir, "test-data")
+
+	// Start server on port 4444 with 100 max connections
+	server.StartServer("4444", configPath, 100, dataPath)
+}
+EOF
 
 # Create config file with admin user data
 cat > "$CONFIG_FILE" << 'EOF'
@@ -121,7 +149,7 @@ if [[ "$OS" == "Darwin" ]]; then
     CGO_ENABLED=1 \
     CGO_CXXFLAGS="-I/usr/local/include" \
     CGO_LDFLAGS="-L/usr/local/lib -lfaiss -lfaiss_c -lc++" \
-    go build -o "$SERVER_BINARY" cmd/test_server/main.go
+    go build -o "$SERVER_BINARY" ./cmd/test_server
     
     # Add RPATH to the server binary
     echo -e "${YELLOW}🔧 Adding RPATH to server binary (macOS)...${NC}"
@@ -131,7 +159,7 @@ elif [[ "$OS" == "Linux" ]]; then
     CGO_ENABLED=1 \
     CGO_CXXFLAGS="-I/usr/local/include" \
     CGO_LDFLAGS="-L/usr/local/lib -lfaiss -lfaiss_c -lstdc++ -lm -lgomp -lopenblas" \
-    go build -o "$SERVER_BINARY" cmd/test_server/main.go
+    go build -o "$SERVER_BINARY" ./cmd/test_server
     
     # Add RPATH to the server binary if patchelf is available
     if command -v patchelf >/dev/null 2>&1; then
