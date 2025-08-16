@@ -18,7 +18,7 @@ var allowedIndexTypes = []string{"Flat", "HNSW", "IVF", "PQ"}
 var allowedMetrics = []string{"L2", "InnerProduct", "L1", "Lp", "Canberra", "BrayCurtis", "JensenShannon", "Linf"}
 
 func isPowerOf2InRange(n int) bool {
-	if n < 2 || n > 512 {
+	if n < 2 || n > 256 {
 		return false
 	}
 	return (n & (n - 1)) == 0
@@ -27,6 +27,11 @@ func isPowerOf2InRange(n int) bool {
 func isAllowedIndexType(indexType string) bool {
 	parts := strings.Split(indexType, ",")
 	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			return false
+		}
+		
 		// e.g. HNSW32, IVF32, PQ4, Flat
 		var base string
 		num := -1
@@ -43,6 +48,7 @@ func isAllowedIndexType(indexType string) bool {
 			base = part
 		}
 
+		// Check if base type is allowed
 		allowed := false
 		for _, t := range allowedIndexTypes {
 			if t == base {
@@ -53,10 +59,20 @@ func isAllowedIndexType(indexType string) bool {
 		if !allowed {
 			return false
 		}
+		
+		// For HNSW, IVF, and PQ, number suffix is required and must be power of 2 in range 2-256
 		if base == "HNSW" || base == "IVF" || base == "PQ" {
-			if num == -1 || !isPowerOf2InRange(num) {
-				return false
+			if num == -1 {
+				return false // Number suffix is required
 			}
+			if !isPowerOf2InRange(num) {
+				return false // Must be power of 2 in range 2-256
+			}
+		}
+		
+		// For Flat, no number suffix should be present
+		if base == "Flat" && num != -1 {
+			return false
 		}
 	}
 	return true
