@@ -126,6 +126,17 @@ clean: ## Clean build artifacts
 	rm -f *.test
 	rm -f shibudb-server
 	rm -rf cmd/test_server
+	@echo "Cleaning test files from internal directory..."
+	find internal -name "*.db" -delete
+	find internal -name "*.dat" -delete
+	find internal -name "*.faiss" -delete
+	find internal -name "*.test" -delete
+	find internal -name "*.prof" -delete
+	find internal -name "*.trace" -delete
+	find internal -name "*.cpu" -delete
+	find internal -name "*.mem" -delete
+	find internal -name "*.block" -delete
+	find internal -name "*.mutex" -delete
 	@echo "Cleanup complete."
 
 start-local-server: ## Start local development server
