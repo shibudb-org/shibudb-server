@@ -149,11 +149,19 @@ run_all_tests() {
         fi
         
         # Check if the package has tests
+        # First try the standard way
         if go test -list . "$package" 2>/dev/null | grep -q "Test"; then
             echo -e "${YELLOW}📦 Testing package: $package${NC}"
             run_tests_with_rpath "$package" "${additional_args[@]}"
         else
-            echo -e "${YELLOW}⏭️  Skipping $package (no tests found)${NC}"
+            # If that fails, check if there are test files in the package directory
+            package_path=$(echo "$package" | sed 's|github.com/Podcopic-Labs/ShibuDb/||')
+            if [ -d "$package_path" ] && find "$package_path" -name "*_test.go" -type f | grep -q .; then
+                echo -e "${YELLOW}📦 Testing package: $package (found test files)${NC}"
+                run_tests_with_rpath "$package" "${additional_args[@]}"
+            else
+                echo -e "${YELLOW}⏭️  Skipping $package (no tests found)${NC}"
+            fi
         fi
     done
 }
