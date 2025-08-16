@@ -53,6 +53,7 @@ run_tests() {
 run_all_tests() {
     local exclude_benchmark=false
     local exclude_e2e=false
+    local exclude_dev_server=false
     local additional_args=()
     
     # Check for exclusion flags
@@ -64,6 +65,10 @@ run_all_tests() {
                 ;;
             --exclude-e2e)
                 exclude_e2e=true
+                shift
+                ;;
+            --exclude-dev-server)
+                exclude_dev_server=true
                 shift
                 ;;
             *)
@@ -91,6 +96,12 @@ run_all_tests() {
             continue
         fi
         
+        # Skip dev-server test if exclude flag is set
+        if [[ "$exclude_dev_server" == "true" && "$package" == *"/cmd/server" ]]; then
+            echo -e "${YELLOW}⏭️  Skipping $package (dev-server test excluded)${NC}"
+            continue
+        fi
+        
         # Check if the package has tests
         if go test -list . "$package" 2>/dev/null | grep -q "Test"; then
             echo -e "${YELLOW}📦 Testing package: $package${NC}"
@@ -105,7 +116,7 @@ run_all_tests() {
 if [ $# -eq 0 ]; then
     # Run all tests
     run_all_tests
-elif [[ "$1" == "--exclude-benchmark" ]] || [[ "$1" == "--exclude-e2e" ]]; then
+elif [[ "$1" == "--exclude-benchmark" ]] || [[ "$1" == "--exclude-e2e" ]] || [[ "$1" == "--exclude-dev-server" ]]; then
     # Run all tests with exclusion flags
     run_all_tests "$@"
 elif [[ "$1" == "./benchmark/" ]]; then
