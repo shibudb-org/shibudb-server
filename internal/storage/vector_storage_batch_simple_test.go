@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"os"
 	"testing"
 )
 
@@ -16,6 +17,14 @@ func TestVectorEngineBatching(t *testing.T) {
 	maxVectorSize := 128
 	indexDesc := "Flat"
 	metric := 0 // L2 metric
+
+	// Clean up any existing files
+	os.Remove(dataPath)
+	os.Remove(indexPath)
+	os.Remove(walPath)
+
+	// Ensure testdata directory exists
+	os.MkdirAll("testdata", 0755)
 
 	// Test that the engine can be created with batching fields
 	ve, err := NewVectorEngine(dataPath, indexPath, walPath, maxVectorSize, indexDesc, metric)

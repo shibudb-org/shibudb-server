@@ -151,6 +151,13 @@ func (ve *VectorEngineImpl) replayWAL() error {
 }
 
 func (ve *VectorEngineImpl) InsertVector(id int64, vector []float32) error {
+	// Check if engine is closed
+	select {
+	case <-ve.quitChan:
+		return fmt.Errorf("vector engine is closed")
+	default:
+	}
+
 	if len(vector) != ve.maxVectorSize {
 		return fmt.Errorf("vector length mismatch: expected %d", ve.maxVectorSize)
 	}
@@ -161,7 +168,7 @@ func (ve *VectorEngineImpl) InsertVector(id int64, vector []float32) error {
 	ve.batchLock.Unlock()
 
 	// Insert into FAISS index immediately for search functionality
-	if err := ve.insertInternal(id, vector, false); err != nil {
+	if err := ve.insertInternal(id, vector, true); err != nil {
 		return err
 	}
 
@@ -169,6 +176,11 @@ func (ve *VectorEngineImpl) InsertVector(id int64, vector []float32) error {
 }
 
 func (ve *VectorEngineImpl) requiredTrainCount() int {
+	// For Flat indices, no training is required
+	if ve.indexType == "Flat" {
+		return 0
+	}
+
 	nlist := 1
 	pqCodebook := 1
 	n := 0 // for Sscanf
@@ -207,6 +219,27 @@ func (ve *VectorEngineImpl) insertInternal(id int64, vector []float32, persist b
 	defer ve.lock.Unlock()
 
 	if !ve.faissIndex.IsTrained() {
+		// For Flat indices, no training is required, so we can add directly
+		if ve.requiredTrainCount() == 0 {
+			if err := ve.faissIndex.Add(vector); err != nil {
+				return err
+			}
+			ve.idMap = append(ve.idMap, id)
+			if persist {
+				buf := make([]byte, 8+len(vector)*4)
+				binary.LittleEndian.PutUint64(buf[0:8], uint64(id))
+				for i, v := range vector {
+					binary.LittleEndian.PutUint32(buf[8+i*4:], math.Float32bits(v))
+				}
+				_, err := ve.dataFile.Write(buf)
+				if err != nil {
+					return err
+				}
+				ve.dataFile.Sync()
+			}
+			return nil
+		}
+
 		ve.pendingTrainVectors = append(ve.pendingTrainVectors, vector)
 		ve.pendingTrainIDs = append(ve.pendingTrainIDs, id)
 		if len(ve.pendingTrainVectors) >= ve.requiredTrainCount() {
@@ -253,12 +286,18 @@ func (ve *VectorEngineImpl) insertInternal(id int64, vector []float32, persist b
 	ve.idMap = append(ve.idMap, id)
 
 	if persist {
+		// Seek to end of file to append
+		_, err := ve.dataFile.Seek(0, 2) // Seek to end
+		if err != nil {
+			return fmt.Errorf("failed to seek to end of data file: %w", err)
+		}
+
 		buf := make([]byte, 8+len(vector)*4)
 		binary.LittleEndian.PutUint64(buf[0:8], uint64(id))
 		for i, v := range vector {
 			binary.LittleEndian.PutUint32(buf[8+i*4:], math.Float32bits(v))
 		}
-		_, err := ve.dataFile.Write(buf)
+		_, err = ve.dataFile.Write(buf)
 		if err != nil {
 			return err
 		}

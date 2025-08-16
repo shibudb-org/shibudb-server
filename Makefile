@@ -126,6 +126,7 @@ clean: ## Clean build artifacts
 	rm -f *.test
 	rm -f shibudb-server
 	rm -rf cmd/test_server
+	rm -rf testdata
 	@echo "Cleaning test files from internal directory..."
 	find internal -name "*.db" -delete
 	find internal -name "*.dat" -delete
