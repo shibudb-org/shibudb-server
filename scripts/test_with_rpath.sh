@@ -197,7 +197,7 @@ elif [[ "$1" == "./E2ETests/" ]]; then
     run_tests_with_rpath "./E2ETests/" "$@"
 else
     # Run specific test package
-    local package="$1"
+    package="$1"
     shift  # Remove the package name
     echo -e "${GREEN}🧪 Running tests for: $package${NC}"
     run_tests_with_rpath "$package" "$@"
