@@ -172,11 +172,11 @@ func (ve *VectorEngineImpl) InsertVector(id int64, vector []float32) error {
 
 	// Add to in-memory batch (like key-value storage)
 	ve.batchLock.Lock()
-	ve.batch[id] = vector
+	//ve.batch[id] = vector
 	ve.batchLock.Unlock()
 
 	// Insert into FAISS index immediately for search functionality
-	if err := ve.insertInternal(id, vector, false); err != nil {
+	if err := ve.insertInternal(id, vector, true); err != nil {
 		return err
 	}
 

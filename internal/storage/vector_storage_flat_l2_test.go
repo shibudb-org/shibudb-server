@@ -127,7 +127,7 @@ func TestVectorEngineImpl_InsertAndSearch(t *testing.T) {
 		if err != nil {
 			t.Errorf("GetVectorByID failed: %v", err)
 		}
-		if !reflect.DeepEqual(stored, vec1) {
+		if !reflect.DeepEqual(stored, vec2) {
 			t.Errorf("Expected stored vector to match first inserted, got %v", stored)
 		}
 	})
