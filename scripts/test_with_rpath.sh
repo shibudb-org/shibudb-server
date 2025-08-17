@@ -66,13 +66,13 @@ run_tests_with_rpath() {
     if [[ "$OS" == "Darwin" ]]; then
         # macOS: use -lc++
         CGO_ENABLED=1 \
-        CGO_CXXFLAGS="-I/usr/local/include" \
+        CGO_CXXFLAGS="-I$(pwd)/resources/lib/include" \
         CGO_LDFLAGS="-L/usr/local/lib -lfaiss -lfaiss_c -lc++" \
         go test -c "$test_package" -o "$test_binary"
     elif [[ "$OS" == "Linux" ]]; then
         # Linux: use -lstdc++
         CGO_ENABLED=1 \
-        CGO_CXXFLAGS="-I/usr/local/include" \
+        CGO_CXXFLAGS="-I$(pwd)/resources/lib/include" \
         CGO_LDFLAGS="-L/usr/local/lib -lfaiss -lfaiss_c -lstdc++ -lm -lgomp -lopenblas" \
         go test -c "$test_package" -o "$test_binary"
     fi
