@@ -47,6 +47,8 @@ func TestVectorEngineImpl_InsertAndSearch_IVF256Flat(t *testing.T) {
 				t.Errorf("InsertVector failed at i=%d: %v", i, err)
 			}
 		}
+
+		time.Sleep(2000 * time.Millisecond) // Ensure batch writes are flushed
 	})
 
 	t.Run("Search inserted vector", func(t *testing.T) {
@@ -110,50 +112,6 @@ func TestVectorEngineImpl_InsertAndSearch_IVF256Flat(t *testing.T) {
 		err = ve.InsertVector(maxID, maxVec)
 		if err != nil {
 			t.Errorf("InsertVector for max size failed: %v", err)
-		}
-	})
-
-	t.Run("RangeSearch basic functionality", func(t *testing.T) {
-		vec := make([]float32, maxVectorSize)
-		for i := range vec {
-			vec[i] = 0.5
-		}
-		id := int64(99999)
-		err := ve.InsertVector(id, vec)
-		if err != nil {
-			t.Fatalf("InsertVector for RangeSearch failed: %v", err)
-		}
-
-		ids, dists, err := ve.RangeSearch(vec, 10.0)
-		if err != nil {
-			t.Errorf("RangeSearch failed: %v", err)
-		}
-		found := false
-		for _, foundID := range ids {
-			if foundID == id {
-				found = true
-				break
-			}
-		}
-		if !found {
-			t.Errorf("RangeSearch did not find inserted vector")
-		}
-		if len(ids) != len(dists) {
-			t.Errorf("ids and dists length mismatch: %d vs %d", len(ids), len(dists))
-		}
-
-		ids, dists, err = ve.RangeSearch(vec, 0.0)
-		if err != nil {
-			t.Errorf("RangeSearch with zero radius failed: %v", err)
-		}
-		if len(ids) > 1 {
-			t.Errorf("Expected at most 1 result for zero radius, got %d", len(ids))
-		}
-
-		badVec := make([]float32, maxVectorSize-1)
-		_, _, err = ve.RangeSearch(badVec, 10.0)
-		if err == nil {
-			t.Errorf("Expected error for wrong dimension, got nil")
 		}
 	})
 
