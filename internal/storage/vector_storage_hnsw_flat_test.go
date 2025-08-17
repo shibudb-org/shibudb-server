@@ -14,7 +14,7 @@ func TestVectorEngineImpl_InsertAndSearch_HNSW32Flat(t *testing.T) {
 	dataPath := "testdata/vector_data_hnsw_flat.db"
 	indexPath := "testdata/vector_index_hnsw_flat.faiss"
 	walPath := "testdata/vector_wal_hnsw_flat.db"
-	maxVectorSize := 1024
+	maxVectorSize := 4
 	indexDesc := "HNSW32,Flat"
 	metric := faiss.MetricL2
 

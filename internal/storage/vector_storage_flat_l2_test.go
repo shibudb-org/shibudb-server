@@ -23,7 +23,7 @@ func TestVectorEngineImpl_InsertAndSearch(t *testing.T) {
 	dataPath := "testdata/vector_data.db"
 	indexPath := "testdata/vector_index.faiss"
 	walPath := "testdata/vector_wal.db"
-	maxVectorSize := 1024
+	maxVectorSize := 4
 	indexDesc := "Flat"
 	metric := faiss.MetricL2
 

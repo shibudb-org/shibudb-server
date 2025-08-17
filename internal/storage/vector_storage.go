@@ -172,11 +172,11 @@ func (ve *VectorEngineImpl) InsertVector(id int64, vector []float32) error {
 
 	// Add to in-memory batch (like key-value storage)
 	ve.batchLock.Lock()
-	//ve.batch[id] = vector
+	ve.batch[id] = vector
 	ve.batchLock.Unlock()
 
 	// Insert into FAISS index immediately for search functionality
-	if err := ve.insertInternal(id, vector, true); err != nil {
+	if err := ve.insertInternal(id, vector, false); err != nil {
 		return err
 	}
 
@@ -443,6 +443,11 @@ func (ve *VectorEngineImpl) GetVectorByID(id int64) ([]float32, error) {
 
 	faissIndex, exists := ve.idMap[id]
 	if !exists {
+		// check if it's in batch to process and not flushed yet.
+		if _, exists := ve.batch[id]; exists {
+			return ve.batch[id], nil
+		}
+
 		return nil, fmt.Errorf("ID %d not found", id)
 	}
 
@@ -542,8 +547,6 @@ func (ve *VectorEngineImpl) flushBatch() error {
 
 	ve.lock.Lock()
 	defer ve.lock.Unlock()
-
-	log.Println("Flushing batch: ", batchCopy)
 
 	// Write all vectors to WAL in batch
 	for id, vector := range batchCopy {

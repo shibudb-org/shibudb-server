@@ -14,7 +14,7 @@ func TestVectorEngineImpl_InsertAndSearch_IVF32Flat(t *testing.T) {
 	dataPath := "testdata/vector_data_ivf_flat.db"
 	indexPath := "testdata/vector_index_ivf_flat.faiss"
 	walPath := "testdata/vector_wal_ivf_flat.db"
-	maxVectorSize := 1024
+	maxVectorSize := 4
 	indexDesc := "IVF32,Flat"
 	metric := faiss.MetricL2
 

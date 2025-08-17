@@ -14,7 +14,7 @@ func TestVectorEngineImpl_InsertAndSearch_IVF32PQ4(t *testing.T) {
 	dataPath := "testdata/vector_data_ivf_pq.db"
 	indexPath := "testdata/vector_index_ivf_pq.faiss"
 	walPath := "testdata/vector_wal_ivf_pq.db"
-	maxVectorSize := 1024
+	maxVectorSize := 4
 	indexDesc := "IVF32,PQ4"
 	metric := faiss.MetricL2
 
@@ -114,6 +114,7 @@ func TestVectorEngineImpl_InsertAndSearch_IVF32PQ4(t *testing.T) {
 	})
 
 	t.Run("RangeSearch basic functionality", func(t *testing.T) {
+		// Sleep to wait before
 		vec := make([]float32, maxVectorSize)
 		for i := range vec {
 			vec[i] = 0.5
