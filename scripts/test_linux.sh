@@ -44,6 +44,7 @@ run_tests() {
     # Run tests with LD_LIBRARY_PATH set
     LD_LIBRARY_PATH="/usr/local/lib:$LD_LIBRARY_PATH" \
     CGO_ENABLED=1 \
+    CGO_CFLAGS="-I$(pwd)/resources/lib/include" \
     CGO_CXXFLAGS="-I$(pwd)/resources/lib/include" \
     CGO_LDFLAGS="-L/usr/local/lib -lfaiss -lfaiss_c -lstdc++ -lm -lgomp -lopenblas" \
     go test -v "$test_package" "${test_args[@]}"
