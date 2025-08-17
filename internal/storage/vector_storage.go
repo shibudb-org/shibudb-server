@@ -24,9 +24,11 @@ type VectorEngineImpl struct {
 	wal           *wal.WAL
 	maxVectorSize int
 
-	faissIndex faiss.Index
-	idMap      []int64 // maps FAISS internal index → your custom ID
-	lock       sync.RWMutex
+	faissIndex   faiss.Index
+	idMap        map[int64]int64 // maps custom ID → FAISS internal index for O(1) lookup
+	reverseIdMap map[int64]int64 // maps FAISS internal index → custom ID for reverse lookup
+	currentIndex int64           // tracks the next available FAISS index
+	lock         sync.RWMutex
 
 	indexType string
 	metric    int
@@ -85,7 +87,9 @@ func NewVectorEngine(dataPath, indexPath, walPath string, maxVectorSize int, ind
 		wal:           w,
 		maxVectorSize: maxVectorSize,
 		faissIndex:    faissIndex,
-		idMap:         make([]int64, 0),
+		idMap:         make(map[int64]int64),
+		reverseIdMap:  make(map[int64]int64),
+		currentIndex:  0, // Initialize currentIndex
 		indexType:     indexDesc,
 		metric:        metric,
 		quitChan:      make(chan struct{}),
@@ -97,6 +101,9 @@ func NewVectorEngine(dataPath, indexPath, walPath string, maxVectorSize int, ind
 		if err := e.rebuildIdMapFromDataFile(); err != nil {
 			return nil, fmt.Errorf("failed to rebuild idMap: %w", err)
 		}
+		// Set currentIndex to the next available index after rebuilding
+		// We need to count ALL entries in data file, not just distinct IDs
+		e.currentIndex = e.countDataFileEntries()
 	}
 
 	if err := e.replayWAL(); err != nil {
@@ -227,7 +234,17 @@ func (ve *VectorEngineImpl) insertInternal(id int64, vector []float32, persist b
 	needsTraining := (nTrain > 0) && !ve.faissIndex.IsTrained()
 
 	if persist {
-		ve.idMap = append(ve.idMap, id)
+		// Check if ID already exists - if so, update the mapping to point to latest insertion
+		if existingIndex, exists := ve.idMap[id]; exists {
+			// Remove the old reverse mapping
+			delete(ve.reverseIdMap, existingIndex)
+		}
+
+		// Assign a new FAISS index for the new ID (latest insertion)
+		faissIndex := ve.currentIndex
+		ve.idMap[id] = faissIndex
+		ve.reverseIdMap[faissIndex] = id
+		ve.currentIndex++
 
 		if _, err := ve.dataFile.Seek(0, io.SeekEnd); err != nil {
 			return fmt.Errorf("seek end: %w", err)
@@ -282,6 +299,33 @@ func (ve *VectorEngineImpl) insertInternal(id int64, vector []float32, persist b
 	return nil
 }
 
+func (ve *VectorEngineImpl) countDataFileEntries() int64 {
+	// Seek to beginning of data file
+	_, err := ve.dataFile.Seek(0, 0)
+	if err != nil {
+		log.Printf("Failed to seek to beginning of data file: %v", err)
+		return 0
+	}
+
+	recordSize := 8 + 4*ve.maxVectorSize // 8 bytes for ID + 4 bytes per float32
+	count := int64(0)
+
+	for {
+		buf := make([]byte, recordSize)
+		_, err := ve.dataFile.Read(buf)
+		if err != nil {
+			if err.Error() == "EOF" {
+				break // End of file
+			}
+			log.Printf("Failed to read from data file: %v", err)
+			return count
+		}
+		count++
+	}
+
+	return count
+}
+
 func (ve *VectorEngineImpl) rebuildIdMapFromDataFile() error {
 	// Seek to beginning of data file
 	_, err := ve.dataFile.Seek(0, 0)
@@ -289,8 +333,10 @@ func (ve *VectorEngineImpl) rebuildIdMapFromDataFile() error {
 		return fmt.Errorf("failed to seek to beginning of data file: %w", err)
 	}
 
-	recordSize := 8 + 4*ve.maxVectorSize // 8 bytes for ID + 4 bytes per float32
-	ve.idMap = make([]int64, 0)
+	recordSize := 8 + 4*ve.maxVectorSize    // 8 bytes for ID + 4 bytes per float32
+	ve.idMap = make(map[int64]int64)        // Clear existing map
+	ve.reverseIdMap = make(map[int64]int64) // Clear existing reverse map
+	ve.currentIndex = 0                     // Reset currentIndex
 
 	for {
 		buf := make([]byte, recordSize)
@@ -304,7 +350,10 @@ func (ve *VectorEngineImpl) rebuildIdMapFromDataFile() error {
 
 		// Extract ID from the record
 		id := int64(binary.LittleEndian.Uint64(buf[0:8]))
-		ve.idMap = append(ve.idMap, id)
+		faissIndex := ve.currentIndex
+		ve.idMap[id] = faissIndex
+		ve.reverseIdMap[faissIndex] = id
+		ve.currentIndex++
 	}
 
 	log.Printf("Rebuilt idMap with %d entries from data file", len(ve.idMap))
@@ -345,13 +394,13 @@ func (ve *VectorEngineImpl) RangeSearch(query []float32, radius float32) ([]int6
 
 	for i := start; i < end; i++ {
 		idx := labels[i]
-		if int(idx) < len(ve.idMap) {
-			ids[i-start] = ve.idMap[idx]
-			dists[i-start] = distances[i]
+		// Use reverse map for O(1) lookup
+		if customID, exists := ve.reverseIdMap[idx]; exists {
+			ids[i-start] = customID
 		} else {
 			ids[i-start] = -1
-			dists[i-start] = distances[i]
 		}
+		dists[i-start] = distances[i]
 	}
 
 	return ids, dists, nil
@@ -372,11 +421,11 @@ func (ve *VectorEngineImpl) SearchTopK(query []float32, k int) ([]int64, []float
 
 	ids := make([]int64, len(indexes))
 	for i, idx := range indexes {
-		// Handle negative or very large indices that FAISS might return
-		if idx < 0 || idx >= int64(len(ve.idMap)) {
-			ids[i] = -1
+		// Use reverse map for O(1) lookup
+		if customID, exists := ve.reverseIdMap[idx]; exists {
+			ids[i] = customID
 		} else {
-			ids[i] = ve.idMap[idx]
+			ids[i] = -1
 		}
 	}
 
@@ -392,26 +441,14 @@ func (ve *VectorEngineImpl) GetVectorByID(id int64) ([]float32, error) {
 	ve.lock.RLock()
 	defer ve.lock.RUnlock()
 
-	index := -1
-	// TODO: looks very inefficient, can we do better?
-	for i, storedID := range ve.idMap {
-		if storedID == id {
-			index = i
-			break
-		}
-	}
-
-	log.Println("Checking index: ", index)
-	log.Println("Current Batch: ", ve.batch)
-	log.Println("Current idMap: ", ve.idMap)
-
-	if index == -1 {
+	faissIndex, exists := ve.idMap[id]
+	if !exists {
 		return nil, fmt.Errorf("ID %d not found", id)
 	}
 
 	// Calculate offset: each record = 8 (id) + 4 * vector size
 	recordSize := 8 + 4*ve.maxVectorSize
-	offset := int64(index * recordSize)
+	offset := faissIndex * int64(recordSize)
 
 	buf := make([]byte, recordSize)
 	_, err := ve.dataFile.ReadAt(buf, offset)
@@ -520,7 +557,18 @@ func (ve *VectorEngineImpl) flushBatch() error {
 
 	// Write all vectors to data file in batch
 	for id, vector := range batchCopy {
-		ve.idMap = append(ve.idMap, id)
+		// Check if ID already exists - if so, update the mapping to point to latest insertion
+		if existingIndex, exists := ve.idMap[id]; exists {
+			// Remove the old reverse mapping
+			delete(ve.reverseIdMap, existingIndex)
+		}
+
+		// Assign a new FAISS index for the new ID (latest insertion)
+		faissIndex := ve.currentIndex
+		ve.idMap[id] = faissIndex
+		ve.reverseIdMap[faissIndex] = id
+		ve.currentIndex++
+
 		buf := make([]byte, 8+len(vector)*4)
 		binary.LittleEndian.PutUint64(buf[0:8], uint64(id))
 		for i, v := range vector {
