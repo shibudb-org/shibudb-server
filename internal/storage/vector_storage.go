@@ -144,6 +144,7 @@ func (ve *VectorEngineImpl) requiredTrainCount() int {
 	if needsPQ && minTrain < 256 {
 		minTrain = 256
 	}
+	
 	return minTrain
 }
 
@@ -231,12 +232,28 @@ func (ve *VectorEngineImpl) SearchTopK(query []float32, k int) ([]int64, []float
 	ve.lock.RLock()
 	defer ve.lock.RUnlock()
 
-	dists, labels, err := ve.idMapIndex.Search(query, int64(k))
+	// Search more results than needed to account for filtered out removed vectors
+	searchK := k * 2
+	dists, labels, err := ve.idMapIndex.Search(query, int64(searchK))
 	if err != nil {
 		return nil, nil, err
 	}
-	// labels are your external IDs
-	return labels, dists, nil
+
+	// Filter out vectors that have been removed (not in fileOffsets)
+	var filteredLabels []int64
+	var filteredDists []float32
+
+	for i, label := range labels {
+		if _, exists := ve.fileOffsets[label]; exists {
+			filteredLabels = append(filteredLabels, label)
+			filteredDists = append(filteredDists, dists[i])
+			if len(filteredLabels) >= k {
+				break
+			}
+		}
+	}
+
+	return filteredLabels, filteredDists, nil
 }
 
 func (ve *VectorEngineImpl) RangeSearch(query []float32, radius float32) ([]int64, []float32, error) {
@@ -268,23 +285,28 @@ func (ve *VectorEngineImpl) RangeSearch(query []float32, radius float32) ([]int6
 			start, end, len(labels), len(dists))
 	}
 
-	n := end - start
-	outIDs := make([]int64, n)
-	outD := make([]float32, n)
-	copy(outIDs, labels[start:end])
-	copy(outD, dists[start:end])
+	// Filter out vectors that have been removed (not in fileOffsets)
+	var outIDs []int64
+	var outD []float32
+
+	for i := start; i < end; i++ {
+		if _, exists := ve.fileOffsets[labels[i]]; exists {
+			outIDs = append(outIDs, labels[i])
+			outD = append(outD, dists[i])
+		}
+	}
 
 	// OPTIONAL: sort by ascending distance (stable)
 	type pair struct {
 		id  int64
 		dst float32
 	}
-	ps := make([]pair, n)
-	for i := 0; i < n; i++ {
+	ps := make([]pair, len(outIDs))
+	for i := 0; i < len(outIDs); i++ {
 		ps[i] = pair{outIDs[i], outD[i]}
 	}
 	sort.Slice(ps, func(i, j int) bool { return ps[i].dst < ps[j].dst })
-	for i := 0; i < n; i++ {
+	for i := 0; i < len(outIDs); i++ {
 		outIDs[i], outD[i] = ps[i].id, ps[i].dst
 	}
 
@@ -305,6 +327,51 @@ func (ve *VectorEngineImpl) GetVectorByID(id int64) ([]float32, error) {
 		return nil, fmt.Errorf("read vector at offset %d: %w", offset, err)
 	}
 	return bytesToFloat32Array(buf[8:])
+}
+
+func (ve *VectorEngineImpl) RemoveVector(id int64) error {
+	// 1) WAL first - log the deletion
+	key := make([]byte, 8)
+	binary.LittleEndian.PutUint64(key, uint64(id))
+	// Use empty value to indicate deletion
+	if err := ve.wal.WriteEntry(string(key), ""); err != nil {
+		return err
+	}
+
+	// 2) Remove from FAISS index and tracking
+	if err := ve.removeAfterWAL(id); err != nil {
+		return err
+	}
+	return ve.wal.MarkCommitted()
+}
+
+// removeAfterWAL performs the removal without writing to WAL (used by RemoveVector and WAL replay).
+func (ve *VectorEngineImpl) removeAfterWAL(id int64) error {
+	ve.lock.Lock()
+	defer ve.lock.Unlock()
+
+	// Remove from FAISS index
+	sel, err := faiss.NewIDSelectorBatch([]int64{id})
+	if err != nil {
+		return fmt.Errorf("create ID selector: %w", err)
+	}
+	defer sel.Delete()
+
+	_, err = ve.idMapIndex.RemoveIDs(sel)
+	if err != nil {
+		// Some index types (like HNSW) don't support remove_ids
+		// In this case, we'll just remove from tracking but keep the index as-is
+		// The vector will be effectively "removed" from searches since it's not in fileOffsets
+		log.Printf("Warning: RemoveIDs failed for index type %s: %v", ve.indexType, err)
+	}
+
+	// Remove from pending additions if it exists there
+	delete(ve.pendingAdd, id)
+
+	// Remove from file offsets tracking
+	delete(ve.fileOffsets, id)
+
+	return nil
 }
 
 func (ve *VectorEngineImpl) Close() error {
@@ -382,6 +449,16 @@ func (ve *VectorEngineImpl) replayWAL() error {
 			return fmt.Errorf("invalid WAL key length: expected 8, got %d", len(keyBytes))
 		}
 		id := int64(binary.LittleEndian.Uint64(keyBytes))
+
+		// Check if this is a deletion (empty value)
+		if len(entry[1]) == 0 {
+			// IMPORTANT: do not write to WAL here again — just remove.
+			if err := ve.removeAfterWAL(id); err != nil {
+				return fmt.Errorf("replay remove id=%d: %w", id, err)
+			}
+			continue
+		}
+
 		vec, err := bytesToFloat32Array([]byte(entry[1]))
 		if err != nil {
 			return fmt.Errorf("WAL decode: %w", err)
