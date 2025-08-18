@@ -125,6 +125,7 @@ func TestVectorEngineImpl_InsertAndSearch(t *testing.T) {
 		}
 		// TODO: Currently, GetVectorByID returns the first inserted vector for duplicate IDs.
 		// If the logic changes to return the latest, update this test accordingly.
+		time.Sleep(100 * time.Millisecond) // Ensure batch writes are flushed
 		stored, err := cleanVe.GetVectorByID(id)
 		if err != nil {
 			t.Errorf("GetVectorByID failed: %v", err)

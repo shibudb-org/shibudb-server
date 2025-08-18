@@ -91,6 +91,7 @@ func TestVectorEngineImpl_InsertAndSearch_IVF32Flat(t *testing.T) {
 		if err != nil {
 			t.Errorf("InsertVector (duplicate) failed: %v", err)
 		}
+		time.Sleep(100 * time.Millisecond) // Ensure batch writes are flushed
 		stored, err := ve.GetVectorByID(id)
 		if err != nil {
 			t.Errorf("GetVectorByID failed: %v", err)

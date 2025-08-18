@@ -24,10 +24,9 @@ type VectorEngineImpl struct {
 	wal           *wal.WAL
 	maxVectorSize int
 
-	// FAISS indices:
-	// baseIndex needs Train (for IVF*/PQ*), and is wrapped by idMapIndex so we can use external IDs.
+	// FAISS indices (ID-mapped)
 	baseIndex  faiss.Index
-	idMapIndex faiss.Index // = faiss.NewIndexIDMap(baseIndex)
+	idMapIndex faiss.Index
 
 	indexType string
 	metric    int
@@ -45,29 +44,35 @@ type VectorEngineImpl struct {
 	closeOnce    sync.Once
 
 	lock sync.RWMutex
+
+	// --- batching for data file ---
+	persistMu  sync.Mutex
+	persistBuf []struct {
+		id  int64
+		vec []float32
+	}
+	maxBatch int
+	maxDelay time.Duration
+	flushCh  chan struct{}
 }
 
 var _ VectorEngine = (*VectorEngineImpl)(nil)
 
 // NewVectorEngine builds/loads the ID-mapped FAISS index and opens data + WAL files.
-// If an old non-IDMap index exists, delete it once so we can persist the ID-mapped index going forward.
 func NewVectorEngine(dataPath, indexPath, walPath string, maxVectorSize int, indexDesc string, metric int) (*VectorEngineImpl, error) {
 	df, err := os.OpenFile(dataPath, os.O_RDWR|os.O_CREATE, 0666)
 	if err != nil {
 		return nil, fmt.Errorf("open data file: %w", err)
 	}
 
-	// Create (or read) the base index
+	// Create (or read) the ID-mapped index
 	var idmap faiss.Index
 	if _, err := os.Stat(indexPath); err == nil {
-		// load whatever was persisted (likely already IDMap-wrapped)
 		idmap, err = faiss.ReadIndex(indexPath, 0)
 		if err != nil {
 			return nil, fmt.Errorf("failed to read FAISS index from file: %w", err)
 		}
 	} else {
-		// IMPORTANT: prefix your description with "IDMap," so the factory wraps the base index
-		// e.g. indexDesc = "IVF1024,Flat" -> "IDMap,IVF1024,Flat"
 		idmap, err = faiss.IndexFactory(maxVectorSize, "IDMap,"+indexDesc, metric)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create FAISS index: %w", err)
@@ -92,26 +97,31 @@ func NewVectorEngine(dataPath, indexPath, walPath string, maxVectorSize int, ind
 		pendingAdd:    make(map[int64][]float32),
 		fileOffsets:   make(map[int64]int64),
 		quitChan:      make(chan struct{}),
+
+		// batching defaults
+		maxBatch: 1024,
+		maxDelay: 50 * time.Millisecond,
+		flushCh:  make(chan struct{}, 1),
 	}
 
-	// Rebuild fileOffsets from data file (fast linear scan over fixed-size records).
+	// Rebuild fileOffsets from data file.
 	if err := e.rebuildOffsetsFromDataFile(); err != nil {
 		return nil, fmt.Errorf("rebuildOffsetsFromDataFile: %w", err)
 	}
 
-	// Replay WAL (idempotent), which will train (if needed) and add pending vectors.
+	// Replay WAL, which will train (if needed) and add pending vectors.
 	if err := e.replayWAL(); err != nil {
 		return nil, fmt.Errorf("WAL replay failed: %w", err)
 	}
 
-	// Auto-checkpoint FAISS index to disk
+	// Background maintenance
 	go e.autoCheckpoint()
+	go e.autoFlushData()
 
 	return e, nil
 }
 
-// requiredTrainCount returns a conservative minimum to *allow* training.
-// You can/should make this configurable; these are safe defaults.
+// requiredTrainCount returns a conservative minimum to allow training.
 func (ve *VectorEngineImpl) requiredTrainCount() int {
 	// Flat/HNSW need no training
 	if ve.indexType == "Flat" || strings.HasPrefix(ve.indexType, "HNSW") {
@@ -138,7 +148,6 @@ func (ve *VectorEngineImpl) requiredTrainCount() int {
 }
 
 func (ve *VectorEngineImpl) InsertVector(id int64, vector []float32) error {
-	// sanity
 	if len(vector) != ve.maxVectorSize {
 		return fmt.Errorf("vector length mismatch: expected %d", ve.maxVectorSize)
 	}
@@ -150,7 +159,7 @@ func (ve *VectorEngineImpl) InsertVector(id int64, vector []float32) error {
 		return err
 	}
 
-	// 2) Do the actual ingestion (train if needed, add to FAISS, persist), then mark committed.
+	// 2) Ingest (train if needed, add to FAISS, enqueue persistence), then mark committed.
 	if err := ve.insertAfterWAL(id, vector); err != nil {
 		return err
 	}
@@ -170,13 +179,12 @@ func (ve *VectorEngineImpl) insertAfterWAL(id int64, vector []float32) error {
 		sel, _ := faiss.NewIDSelectorBatch([]int64{id})
 		_, _ = ve.idMapIndex.RemoveIDs(sel)
 		sel.Delete()
+
 		if err := ve.idMapIndex.AddWithIDs(vector, []int64{id}); err != nil {
 			return err
 		}
-		// Append to data file and update offset
-		if err := ve.appendToDataFile(id, vector); err != nil {
-			return err
-		}
+		// Enqueue to persist (batched)
+		ve.enqueuePersist(id, vector)
 		return nil
 	}
 
@@ -205,14 +213,9 @@ func (ve *VectorEngineImpl) insertAfterWAL(id int64, vector []float32) error {
 			return err
 		}
 
-		// Persist all pending additions and clear buffers
+		// Enqueue all pending for persistence; background flusher will fsync once
 		for pid, pv := range ve.pendingAdd {
-			if err := ve.appendToDataFile(pid, pv); err != nil {
-				return err
-			}
-		}
-		if err := ve.dataFile.Sync(); err != nil {
-			return err
+			ve.enqueuePersist(pid, pv)
 		}
 		ve.pendingAdd = make(map[int64][]float32)
 		ve.trainPool = nil
@@ -232,7 +235,7 @@ func (ve *VectorEngineImpl) SearchTopK(query []float32, k int) ([]int64, []float
 	if err != nil {
 		return nil, nil, err
 	}
-	// labels already are your external IDs (thanks to IndexIDMap)
+	// labels are your external IDs
 	return labels, dists, nil
 }
 
@@ -250,8 +253,8 @@ func (ve *VectorEngineImpl) RangeSearch(query []float32, radius float32) ([]int6
 	}
 	defer res.Delete()
 
-	labels, distances := res.Labels() // []int64
-	lims := res.Lims()                // []int64 (len == nq+1)
+	labels, dists := res.Labels() // []int64,[]float32
+	lims := res.Lims()            // []int64 (len == nq+1)
 
 	// enforce single query for this API
 	if len(lims) != 2 {
@@ -260,19 +263,18 @@ func (ve *VectorEngineImpl) RangeSearch(query []float32, radius float32) ([]int6
 
 	start := int(lims[0])
 	end := int(lims[1])
-	if start < 0 || end < start || end > len(labels) || end > len(distances) {
+	if start < 0 || end < start || end > len(labels) || end > len(dists) {
 		return nil, nil, fmt.Errorf("invalid lims: [%d,%d) over labels=%d dists=%d",
-			start, end, len(labels), len(distances))
+			start, end, len(labels), len(dists))
 	}
 
 	n := end - start
 	outIDs := make([]int64, n)
 	outD := make([]float32, n)
 	copy(outIDs, labels[start:end])
-	copy(outD, distances[start:end])
+	copy(outD, dists[start:end])
 
 	// OPTIONAL: sort by ascending distance (stable)
-	// Comment out if you prefer FAISS's native order.
 	type pair struct {
 		id  int64
 		dst float32
@@ -309,6 +311,9 @@ func (ve *VectorEngineImpl) Close() error {
 	ve.closeOnce.Do(func() {
 		log.Println("Closing vector engine...")
 		close(ve.quitChan)
+
+		// Final flush of any pending data-file writes
+		ve.flushData(true)
 
 		// Final checkpoint
 		if err := ve.checkpoint(); err != nil {
@@ -444,6 +449,69 @@ func (ve *VectorEngineImpl) rebuildOffsetsFromDataFile() error {
 		offset += int64(recordSize)
 	}
 	return nil
+}
+
+// --- batched persistence ---
+
+func (ve *VectorEngineImpl) enqueuePersist(id int64, vec []float32) {
+	ve.persistMu.Lock()
+	ve.persistBuf = append(ve.persistBuf, struct {
+		id  int64
+		vec []float32
+	}{id: id, vec: vec})
+	needKick := len(ve.persistBuf) >= ve.maxBatch
+	ve.persistMu.Unlock()
+
+	if needKick {
+		select {
+		case ve.flushCh <- struct{}{}:
+		default:
+		}
+	}
+}
+
+func (ve *VectorEngineImpl) autoFlushData() {
+	ticker := time.NewTicker(ve.maxDelay)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ve.quitChan:
+			ve.flushData(true) // final flush
+			return
+		case <-ve.flushCh:
+			ve.flushData(false)
+		case <-ticker.C:
+			ve.flushData(false)
+		}
+	}
+}
+
+func (ve *VectorEngineImpl) flushData(force bool) {
+	ve.persistMu.Lock()
+	buf := ve.persistBuf
+	if !force && len(buf) == 0 {
+		ve.persistMu.Unlock()
+		return
+	}
+	ve.persistBuf = nil
+	ve.persistMu.Unlock()
+
+	if len(buf) == 0 {
+		return
+	}
+
+	// single locked append to file + single fsync
+	ve.lock.Lock()
+	defer ve.lock.Unlock()
+
+	for _, it := range buf {
+		if err := ve.appendToDataFile(it.id, it.vec); err != nil {
+			log.Printf("appendToDataFile failed for id=%d: %v", it.id, err)
+		}
+	}
+	if err := ve.dataFile.Sync(); err != nil {
+		log.Printf("data file sync failed: %v", err)
+	}
 }
 
 func float32ArrayToBytes(arr []float32) []byte {
