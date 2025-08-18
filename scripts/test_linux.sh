@@ -44,7 +44,8 @@ run_tests() {
     # Run tests with LD_LIBRARY_PATH set
     LD_LIBRARY_PATH="/usr/local/lib:$LD_LIBRARY_PATH" \
     CGO_ENABLED=1 \
-    CGO_CXXFLAGS="-I/usr/local/include" \
+    CGO_CFLAGS="-I$(pwd)/resources/lib/include" \
+    CGO_CXXFLAGS="-I$(pwd)/resources/lib/include" \
     CGO_LDFLAGS="-L/usr/local/lib -lfaiss -lfaiss_c -lstdc++ -lm -lgomp -lopenblas" \
     go test -v "$test_package" "${test_args[@]}"
 }
@@ -53,6 +54,7 @@ run_tests() {
 run_all_tests() {
     local exclude_benchmark=false
     local exclude_e2e=false
+    local exclude_dev_server=false
     local additional_args=()
     
     # Check for exclusion flags
@@ -64,6 +66,10 @@ run_all_tests() {
                 ;;
             --exclude-e2e)
                 exclude_e2e=true
+                shift
+                ;;
+            --exclude-dev-server)
+                exclude_dev_server=true
                 shift
                 ;;
             *)
@@ -91,12 +97,26 @@ run_all_tests() {
             continue
         fi
         
+        # Skip dev-server test if exclude flag is set
+        if [[ "$exclude_dev_server" == "true" && "$package" == *"/cmd/server" ]]; then
+            echo -e "${YELLOW}⏭️  Skipping $package (dev-server test excluded)${NC}"
+            continue
+        fi
+        
         # Check if the package has tests
+        # First try the standard way
         if go test -list . "$package" 2>/dev/null | grep -q "Test"; then
             echo -e "${YELLOW}📦 Testing package: $package${NC}"
             run_tests "$package" "${additional_args[@]}"
         else
-            echo -e "${YELLOW}⏭️  Skipping $package (no tests found)${NC}"
+            # If that fails, check if there are test files in the package directory
+            package_path=$(echo "$package" | sed 's|github.com/Podcopic-Labs/ShibuDb/||')
+            if [ -d "$package_path" ] && find "$package_path" -name "*_test.go" -type f | grep -q .; then
+                echo -e "${YELLOW}📦 Testing package: $package (found test files)${NC}"
+                run_tests "$package" "${additional_args[@]}"
+            else
+                echo -e "${YELLOW}⏭️  Skipping $package (no tests found)${NC}"
+            fi
         fi
     done
 }
@@ -105,7 +125,7 @@ run_all_tests() {
 if [ $# -eq 0 ]; then
     # Run all tests
     run_all_tests
-elif [[ "$1" == "--exclude-benchmark" ]] || [[ "$1" == "--exclude-e2e" ]]; then
+elif [[ "$1" == "--exclude-benchmark" ]] || [[ "$1" == "--exclude-e2e" ]] || [[ "$1" == "--exclude-dev-server" ]]; then
     # Run all tests with exclusion flags
     run_all_tests "$@"
 elif [[ "$1" == "./benchmark/" ]]; then

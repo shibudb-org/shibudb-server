@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Podcopic-Labs/ShibuDb/internal/models"
 )
@@ -42,6 +43,9 @@ func TestVectorIVF32PQ4E2E(t *testing.T) {
 		q := models.Query{Type: models.TypeInsertVector, Space: space, Key: formatID(id), Value: vecStr}
 		SendQuery(q, conn, reader)
 	}
+
+	// wait for autoflush data
+	time.Sleep(2000 * time.Millisecond)
 
 	// Search for [50,51,52,53] (should match id 1050)
 	searchVec := "50,51,52,53"

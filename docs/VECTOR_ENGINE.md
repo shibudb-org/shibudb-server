@@ -55,6 +55,25 @@ CREATE-SPACE image_vectors --engine vector --dimension 512 --index-type HNSW32 -
 
 # Create with custom parameters
 CREATE-SPACE text_embeddings --engine vector --dimension 768 --index-type IVF32 --metric InnerProduct
+
+# Create with different HNSW configurations
+CREATE-SPACE fast_search --engine vector --dimension 128 --index-type HNSW64 --metric L2
+CREATE-SPACE ultra_fast --engine vector --dimension 128 --index-type HNSW256 --metric L2
+
+# Create with different IVF configurations
+CREATE-SPACE large_dataset --engine vector --dimension 128 --index-type IVF64 --metric L2
+CREATE-SPACE huge_dataset --engine vector --dimension 128 --index-type IVF256 --metric L2
+
+# Create with different PQ configurations
+CREATE-SPACE memory_efficient --engine vector --dimension 128 --index-type PQ8 --metric L2
+CREATE-SPACE ultra_efficient --engine vector --dimension 128 --index-type PQ32 --metric L2
+
+# Create with composite indices
+CREATE-SPACE accurate_large --engine vector --dimension 128 --index-type IVF32,Flat --metric L2
+CREATE-SPACE fast_accurate --engine vector --dimension 128 --index-type HNSW64,Flat --metric L2
+CREATE-SPACE efficient_accurate --engine vector --dimension 128 --index-type PQ8,Flat --metric L2
+CREATE-SPACE balanced_large --engine vector --dimension 128 --index-type IVF64,PQ16 --metric L2
+CREATE-SPACE fast_efficient --engine vector --dimension 128 --index-type HNSW128,PQ32 --metric L2
 ```
 
 **Parameters:**
@@ -63,14 +82,89 @@ CREATE-SPACE text_embeddings --engine vector --dimension 768 --index-type IVF32 
 - `--index-type TYPE`: FAISS index type (default: Flat)
 - `--metric METRIC`: Distance metric (default: L2)
 
+### Minimum Vector Requirements
+
+Different index types have different minimum vector requirements before search operations become available:
+
+- **Flat**: No minimum required (search available immediately)
+- **HNSW{n}**: No minimum required (search available immediately)
+- **IVF{n}**: Minimum n vectors required (n = number of clusters)
+- **PQ{n}**: Minimum 256 vectors required (for training)
+- **Composite indices**: Follow the higher requirement of their components
+
+**Examples:**
+```bash
+# HNSW32 - search available immediately
+CREATE-SPACE hnsw_space --engine vector --dimension 128 --index-type HNSW32
+USE hnsw_space
+INSERT-VECTOR 1 1.0,2.0,3.0,4.0,5.0,6.0,7.0,8.0
+SEARCH-TOPK 1.0,2.0,3.0,4.0,5.0,6.0,7.0,8.0 5  # Works immediately
+
+# IVF32 - search available after 32 vectors
+CREATE-SPACE ivf_space --engine vector --dimension 128 --index-type IVF32
+USE ivf_space
+# Need to insert at least 32 vectors before search works
+INSERT-VECTOR 1 1.0,2.0,3.0,4.0,5.0,6.0,7.0,8.0
+# ... insert 31 more vectors ...
+INSERT-VECTOR 32 1.0,2.0,3.0,4.0,5.0,6.0,7.0,8.0
+SEARCH-TOPK 1.0,2.0,3.0,4.0,5.0,6.0,7.0,8.0 5  # Now works
+
+# PQ8 - search available after 256 vectors
+CREATE-SPACE pq_space --engine vector --dimension 128 --index-type PQ8
+USE pq_space
+# Need to insert at least 256 vectors before search works
+# ... insert 256 vectors ...
+SEARCH-TOPK 1.0,2.0,3.0,4.0,5.0,6.0,7.0,8.0 5  # Now works
+```
+
 ### Supported Index Types
 
-| Index Type | Description | Use Case | Memory | Speed |
-|------------|-------------|----------|--------|-------|
-| `Flat` | Exact search | Small datasets, high accuracy | High | Slow |
-| `HNSW32` | Approximate search | Fast similarity search | Medium | Fast |
-| `IVF32` | Inverted file index | Large datasets | Low | Medium |
-| `PQ4` | Product quantization | Very large datasets | Very Low | Fast |
+ShibuDb supports various FAISS index types with hardcoded configurations and composite indices for different use cases.
+
+#### Single Index Types
+
+| Index Type | Description | Use Case | Memory | Speed | Min Vectors Required |
+|------------|-------------|----------|--------|-------|---------------------|
+| `Flat` | Exact search | Small datasets, high accuracy | High | Slow | 0 |
+| `HNSW{n}` | Hierarchical Navigable Small World | Fast similarity search | Medium | Fast | 0 |
+| `IVF{n}` | Inverted file index | Large datasets | Low | Medium | n |
+| `PQ{n}` | Product quantization | Very large datasets | Very Low | Fast | 256 |
+
+#### Hardcoded Index Variants
+
+**HNSW Indices**: `HNSW{n}` where n is a power of 2 from 2 to 256
+- Examples: `HNSW2`, `HNSW4`, `HNSW8`, `HNSW16`, `HNSW32`, `HNSW64`, `HNSW128`, `HNSW256`
+- **Minimum vectors required**: 0 (search enabled immediately)
+- **Use case**: Fast approximate similarity search with configurable neighbor count
+
+**IVF Indices**: `IVF{n}` where n is a power of 2 from 2 to 256
+- Examples: `IVF2`, `IVF4`, `IVF8`, `IVF16`, `IVF32`, `IVF64`, `IVF128`, `IVF256`
+- **Minimum vectors required**: n (number of clusters)
+- **Use case**: Large dataset indexing with configurable cluster count
+
+**PQ Indices**: `PQ{n}` where n is a power of 2 from 2 to 256
+- Examples: `PQ2`, `PQ4`, `PQ8`, `PQ16`, `PQ32`, `PQ64`, `PQ128`, `PQ256`
+- **Minimum vectors required**: 256 (always required for PQ training)
+- **Use case**: Memory-efficient indexing for very large datasets
+
+#### Composite Index Types
+
+Composite indices combine multiple index types for enhanced performance and functionality:
+
+| Composite Index | Description | Min Vectors Required | Use Case |
+|-----------------|-------------|---------------------|----------|
+| `IVF{n},Flat` | IVF clustering with exact search refinement | max(n, 1) | Large datasets with high accuracy |
+| `HNSW{n},Flat` | HNSW search with exact search refinement | 0 | Fast search with high accuracy |
+| `PQ{n},Flat` | PQ quantization with exact search refinement | 256 | Memory-efficient with high accuracy |
+| `IVF{n},PQ{m}` | IVF clustering with PQ quantization | max(n, 256) | Very large datasets with balanced performance |
+| `HNSW{n},PQ{m}` | HNSW search with PQ quantization | 256 | Fast search with memory efficiency |
+
+**Composite Index Examples:**
+- `IVF32,Flat`: 32 clusters with exact search refinement (min 32 vectors)
+- `HNSW64,Flat`: 64 neighbors with exact search refinement (min 0 vectors)
+- `PQ8,Flat`: 8-bit quantization with exact search refinement (min 256 vectors)
+- `IVF64,PQ16`: 64 clusters with 16-bit quantization (min 256 vectors)
+- `HNSW128,PQ32`: 128 neighbors with 32-bit quantization (min 256 vectors)
 
 ### Using a Vector Space
 
@@ -128,12 +222,26 @@ INSERT-VECTOR 3 9.0,8.0,7.0,6.0,5.0,4.0,3.0,2.0
 SEARCH-TOPK 1.0,2.0,3.0,4.0,5.0,6.0,7.0,8.0 5
 ```
 
+**Available HNSW Variants:**
+```bash
+# Different neighbor configurations (power of 2 from 2 to 256)
+CREATE-SPACE hnsw2 --engine vector --dimension 128 --index-type HNSW2   # 2 neighbors
+CREATE-SPACE hnsw4 --engine vector --dimension 128 --index-type HNSW4   # 4 neighbors
+CREATE-SPACE hnsw8 --engine vector --dimension 128 --index-type HNSW8   # 8 neighbors
+CREATE-SPACE hnsw16 --engine vector --dimension 128 --index-type HNSW16 # 16 neighbors
+CREATE-SPACE hnsw32 --engine vector --dimension 128 --index-type HNSW32 # 32 neighbors
+CREATE-SPACE hnsw64 --engine vector --dimension 128 --index-type HNSW64 # 64 neighbors
+CREATE-SPACE hnsw128 --engine vector --dimension 128 --index-type HNSW128 # 128 neighbors
+CREATE-SPACE hnsw256 --engine vector --dimension 128 --index-type HNSW256 # 256 neighbors
+```
+
 **Characteristics:**
 - Very fast search
 - Good accuracy
 - Medium memory usage
 - No training required
-- Number suffix (e.g., HNSW32) indicates number of neighbors
+- Search available immediately (no minimum vectors required)
+- Number suffix indicates number of neighbors (higher = more accurate but slower)
 
 ### 3. IVF Index (Inverted File Index)
 
@@ -153,11 +261,25 @@ INSERT-VECTOR 2 1.1,2.1,3.1,4.1,5.1,6.1,7.1,8.1
 SEARCH-TOPK 1.0,2.0,3.0,4.0,5.0,6.0,7.0,8.0 10
 ```
 
+**Available IVF Variants:**
+```bash
+# Different cluster configurations (power of 2 from 2 to 256)
+CREATE-SPACE ivf2 --engine vector --dimension 128 --index-type IVF2   # 2 clusters
+CREATE-SPACE ivf4 --engine vector --dimension 128 --index-type IVF4   # 4 clusters
+CREATE-SPACE ivf8 --engine vector --dimension 128 --index-type IVF8   # 8 clusters
+CREATE-SPACE ivf16 --engine vector --dimension 128 --index-type IVF16 # 16 clusters
+CREATE-SPACE ivf32 --engine vector --dimension 128 --index-type IVF32 # 32 clusters
+CREATE-SPACE ivf64 --engine vector --dimension 128 --index-type IVF64 # 64 clusters
+CREATE-SPACE ivf128 --engine vector --dimension 128 --index-type IVF128 # 128 clusters
+CREATE-SPACE ivf256 --engine vector --dimension 128 --index-type IVF256 # 256 clusters
+```
+
 **Characteristics:**
 - Good for large datasets
 - Requires training (automatic)
 - Lower memory usage
-- Number suffix indicates number of clusters
+- Minimum vectors required = number of clusters (n)
+- Number suffix indicates number of clusters (higher = more clusters, better for larger datasets)
 
 ### 4. PQ Index (Product Quantization)
 
@@ -176,12 +298,143 @@ INSERT-VECTOR 1 1.0,2.0,3.0,4.0,5.0,6.0,7.0,8.0
 SEARCH-TOPK 1.0,2.0,3.0,4.0,5.0,6.0,7.0,8.0 20
 ```
 
+**Available PQ Variants:**
+```bash
+# Different quantization levels (power of 2 from 2 to 256)
+CREATE-SPACE pq2 --engine vector --dimension 128 --index-type PQ2   # 2 bits per sub-vector
+CREATE-SPACE pq4 --engine vector --dimension 128 --index-type PQ4   # 4 bits per sub-vector
+CREATE-SPACE pq8 --engine vector --dimension 128 --index-type PQ8   # 8 bits per sub-vector
+CREATE-SPACE pq16 --engine vector --dimension 128 --index-type PQ16 # 16 bits per sub-vector
+CREATE-SPACE pq32 --engine vector --dimension 128 --index-type PQ32 # 32 bits per sub-vector
+CREATE-SPACE pq64 --engine vector --dimension 128 --index-type PQ64 # 64 bits per sub-vector
+CREATE-SPACE pq128 --engine vector --dimension 128 --index-type PQ128 # 128 bits per sub-vector
+CREATE-SPACE pq256 --engine vector --dimension 128 --index-type PQ256 # 256 bits per sub-vector
+```
+
 **Characteristics:**
 - Very low memory usage
 - Fast search
 - Lower accuracy
 - Requires training (automatic)
-- Number suffix indicates bits per sub-vector
+- Minimum 256 vectors required for training
+- Number suffix indicates bits per sub-vector (higher = more accurate but more memory)
+
+### 5. Composite Indices
+
+Composite indices combine multiple index types to achieve better performance characteristics than single indices alone.
+
+#### IVF{n},Flat - Clustering with Exact Refinement
+
+**Best for**: Large datasets requiring high accuracy
+
+```bash
+# Create IVF32,Flat index
+CREATE-SPACE accurate_large --engine vector --dimension 128 --index-type IVF32,Flat --metric L2
+USE accurate_large
+
+# Insert vectors (minimum 32 required)
+INSERT-VECTOR 1 1.0,2.0,3.0,4.0,5.0,6.0,7.0,8.0
+# ... insert at least 31 more vectors ...
+INSERT-VECTOR 32 1.0,2.0,3.0,4.0,5.0,6.0,7.0,8.0
+
+# Search with high accuracy
+SEARCH-TOPK 1.0,2.0,3.0,4.0,5.0,6.0,7.0,8.0 10
+```
+
+**Characteristics:**
+- IVF clustering for fast candidate selection
+- Flat index for exact distance computation
+- Higher accuracy than IVF alone
+- Minimum vectors required = max(n, 1) where n is number of clusters
+
+#### HNSW{n},Flat - Fast Search with Exact Refinement
+
+**Best for**: Fast search with high accuracy
+
+```bash
+# Create HNSW64,Flat index
+CREATE-SPACE fast_accurate --engine vector --dimension 128 --index-type HNSW64,Flat --metric L2
+USE fast_accurate
+
+# Insert vectors (no minimum required)
+INSERT-VECTOR 1 1.0,2.0,3.0,4.0,5.0,6.0,7.0,8.0
+INSERT-VECTOR 2 1.1,2.1,3.1,4.1,5.1,6.1,7.1,8.1
+
+# Fast search with high accuracy
+SEARCH-TOPK 1.0,2.0,3.0,4.0,5.0,6.0,7.0,8.0 10
+```
+
+**Characteristics:**
+- HNSW for fast candidate selection
+- Flat index for exact distance computation
+- Very fast search with high accuracy
+- No minimum vectors required
+
+#### PQ{n},Flat - Memory Efficient with Exact Refinement
+
+**Best for**: Memory-constrained environments requiring high accuracy
+
+```bash
+# Create PQ8,Flat index
+CREATE-SPACE efficient_accurate --engine vector --dimension 128 --index-type PQ8,Flat --metric L2
+USE efficient_accurate
+
+# Insert vectors (minimum 256 required)
+# ... insert at least 256 vectors ...
+
+# Memory-efficient search with high accuracy
+SEARCH-TOPK 1.0,2.0,3.0,4.0,5.0,6.0,7.0,8.0 10
+```
+
+**Characteristics:**
+- PQ for memory-efficient candidate selection
+- Flat index for exact distance computation
+- Low memory usage with high accuracy
+- Minimum 256 vectors required
+
+#### IVF{n},PQ{m} - Balanced Performance for Very Large Datasets
+
+**Best for**: Very large datasets with balanced performance
+
+```bash
+# Create IVF64,PQ16 index
+CREATE-SPACE balanced_large --engine vector --dimension 128 --index-type IVF64,PQ16 --metric L2
+USE balanced_large
+
+# Insert vectors (minimum 256 required)
+# ... insert at least 256 vectors ...
+
+# Balanced search performance
+SEARCH-TOPK 1.0,2.0,3.0,4.0,5.0,6.0,7.0,8.0 10
+```
+
+**Characteristics:**
+- IVF clustering for fast candidate selection
+- PQ for memory-efficient distance computation
+- Good balance of speed and memory usage
+- Minimum vectors required = max(n, 256) where n is number of clusters
+
+#### HNSW{n},PQ{m} - Fast Search with Memory Efficiency
+
+**Best for**: Fast search in memory-constrained environments
+
+```bash
+# Create HNSW128,PQ32 index
+CREATE-SPACE fast_efficient --engine vector --dimension 128 --index-type HNSW128,PQ32 --metric L2
+USE fast_efficient
+
+# Insert vectors (minimum 256 required)
+# ... insert at least 256 vectors ...
+
+# Fast and memory-efficient search
+SEARCH-TOPK 1.0,2.0,3.0,4.0,5.0,6.0,7.0,8.0 10
+```
+
+**Characteristics:**
+- HNSW for fast candidate selection
+- PQ for memory-efficient distance computation
+- Fast search with low memory usage
+- Minimum 256 vectors required
 
 ## Basic Vector Operations
 
@@ -306,25 +559,66 @@ CREATE-SPACE robust --engine vector --dimension 128 --metric L1
 ```bash
 # Use Flat index for exact search
 CREATE-SPACE small_dataset --engine vector --dimension 128 --index-type Flat
+
+# Or use HNSW for faster approximate search
+CREATE-SPACE small_fast --engine vector --dimension 128 --index-type HNSW16
 ```
 
 #### Medium Datasets (100K - 1M vectors)
 ```bash
 # Use HNSW for fast approximate search
 CREATE-SPACE medium_dataset --engine vector --dimension 128 --index-type HNSW32
+
+# For higher accuracy, use HNSW64 or HNSW128
+CREATE-SPACE medium_accurate --engine vector --dimension 128 --index-type HNSW64
+
+# For very high accuracy with exact refinement
+CREATE-SPACE medium_exact --engine vector --dimension 128 --index-type HNSW32,Flat
 ```
 
 #### Large Datasets (1M - 10M vectors)
 ```bash
 # Use IVF for balanced performance
 CREATE-SPACE large_dataset --engine vector --dimension 128 --index-type IVF32
+
+# For larger datasets, use more clusters
+CREATE-SPACE large_many_clusters --engine vector --dimension 128 --index-type IVF64
+
+# For high accuracy with exact refinement
+CREATE-SPACE large_accurate --engine vector --dimension 128 --index-type IVF32,Flat
 ```
 
 #### Very Large Datasets (> 10M vectors)
 ```bash
 # Use PQ for memory efficiency
-CREATE-SPACE huge_dataset --engine vector --dimension 128 --index-type PQ4
+CREATE-SPACE huge_dataset --engine vector --dimension 128 --index-type PQ8
+
+# For better accuracy, use higher PQ bits
+CREATE-SPACE huge_accurate --engine vector --dimension 128 --index-type PQ16
+
+# For balanced performance with clustering
+CREATE-SPACE huge_balanced --engine vector --dimension 128 --index-type IVF64,PQ16
+
+# For fast search with memory efficiency
+CREATE-SPACE huge_fast --engine vector --dimension 128 --index-type HNSW128,PQ32
 ```
+
+#### Index Variant Selection Guidelines
+
+**HNSW Variants:**
+- `HNSW2-HNSW16`: Very fast, lower accuracy, good for real-time applications
+- `HNSW32-HNSW64`: Balanced speed and accuracy, good for most applications
+- `HNSW128-HNSW256`: Higher accuracy, slower, good for precision-critical applications
+
+**IVF Variants:**
+- `IVF2-IVF16`: Good for smaller large datasets (1M-5M vectors)
+- `IVF32-IVF64`: Good for medium large datasets (5M-20M vectors)
+- `IVF128-IVF256`: Good for very large datasets (20M+ vectors)
+
+**PQ Variants:**
+- `PQ2-PQ8`: Very memory efficient, lower accuracy
+- `PQ16-PQ32`: Balanced memory and accuracy
+- `PQ64-PQ256`: Higher accuracy, more memory usage
 
 ### Memory Usage Optimization
 
@@ -342,14 +636,24 @@ CREATE-SPACE high_dim --engine vector --dimension 1024 --index-type HNSW32
 # Flat: Highest memory usage
 CREATE-SPACE flat_index --engine vector --dimension 128 --index-type Flat
 
-# HNSW: Medium memory usage
-CREATE-SPACE hnsw_index --engine vector --dimension 128 --index-type HNSW32
+# HNSW: Medium memory usage (varies by neighbor count)
+CREATE-SPACE hnsw_small --engine vector --dimension 128 --index-type HNSW16
+CREATE-SPACE hnsw_medium --engine vector --dimension 128 --index-type HNSW32
+CREATE-SPACE hnsw_large --engine vector --dimension 128 --index-type HNSW64
 
-# IVF: Lower memory usage
-CREATE-SPACE ivf_index --engine vector --dimension 128 --index-type IVF32
+# IVF: Lower memory usage (varies by cluster count)
+CREATE-SPACE ivf_small --engine vector --dimension 128 --index-type IVF16
+CREATE-SPACE ivf_medium --engine vector --dimension 128 --index-type IVF32
+CREATE-SPACE ivf_large --engine vector --dimension 128 --index-type IVF64
 
-# PQ: Lowest memory usage
-CREATE-SPACE pq_index --engine vector --dimension 128 --index-type PQ4
+# PQ: Lowest memory usage (varies by quantization bits)
+CREATE-SPACE pq_small --engine vector --dimension 128 --index-type PQ4
+CREATE-SPACE pq_medium --engine vector --dimension 128 --index-type PQ8
+CREATE-SPACE pq_large --engine vector --dimension 128 --index-type PQ16
+
+# Composite indices: Memory usage depends on components
+CREATE-SPACE composite_accurate --engine vector --dimension 128 --index-type IVF32,Flat
+CREATE-SPACE composite_efficient --engine vector --dimension 128 --index-type HNSW64,PQ16
 ```
 
 ### Search Performance Tuning
@@ -456,9 +760,17 @@ INSERT-VECTOR 2 1.0,NaN,3.0,4.0,5.0
 ### 1. Recommendation System
 
 ```bash
-# Create user embedding space
-CREATE-SPACE user_embeddings --engine vector --dimension 128 --index-type HNSW32 --metric InnerProduct
-USE user_embeddings
+# Create user embedding space with different configurations
+# For small user base (fast search)
+CREATE-SPACE user_embeddings_fast --engine vector --dimension 128 --index-type HNSW16 --metric InnerProduct
+
+# For medium user base (balanced)
+CREATE-SPACE user_embeddings_balanced --engine vector --dimension 128 --index-type HNSW32 --metric InnerProduct
+
+# For large user base (high accuracy)
+CREATE-SPACE user_embeddings_accurate --engine vector --dimension 128 --index-type HNSW64,Flat --metric InnerProduct
+
+USE user_embeddings_balanced
 
 # Store user embeddings
 INSERT-VECTOR 1 0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8
@@ -472,9 +784,17 @@ SEARCH-TOPK 0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8 5
 ### 2. Image Search
 
 ```bash
-# Create image embedding space
-CREATE-SPACE image_embeddings --engine vector --dimension 512 --index-type IVF32 --metric L2
-USE image_embeddings
+# Create image embedding space with different configurations
+# For small image collection (balanced)
+CREATE-SPACE image_embeddings_balanced --engine vector --dimension 512 --index-type IVF32 --metric L2
+
+# For large image collection (high accuracy)
+CREATE-SPACE image_embeddings_accurate --engine vector --dimension 512 --index-type IVF64,Flat --metric L2
+
+# For very large image collection (memory efficient)
+CREATE-SPACE image_embeddings_efficient --engine vector --dimension 512 --index-type IVF128,PQ16 --metric L2
+
+USE image_embeddings_balanced
 
 # Store image embeddings
 INSERT-VECTOR 1 0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8
@@ -488,14 +808,22 @@ SEARCH-TOPK 0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8 10
 ### 3. Text Similarity Search
 
 ```bash
-# Create text embedding space
-CREATE-SPACE text_embeddings --engine vector --dimension 768 --index-type HNSW32 --metric InnerProduct
-USE text_embeddings
+# Create text embedding space with different configurations
+# For real-time search (very fast)
+CREATE-SPACE text_embeddings_fast --engine vector --dimension 768 --index-type HNSW16 --metric InnerProduct
+
+# For balanced performance
+CREATE-SPACE text_embeddings_balanced --engine vector --dimension 768 --index-type HNSW32 --metric InnerProduct
+
+# For high accuracy with exact refinement
+CREATE-SPACE text_embeddings_accurate --engine vector --dimension 768 --index-type HNSW64,Flat --metric InnerProduct
+
+USE text_embeddings_balanced
 
 # Store document embeddings
 INSERT-VECTOR 1 0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8
 INSERT-VECTOR 2 0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9
-INSERT-VECTOR 2 0.9,0.8,0.7,0.6,0.5,0.4,0.3,0.2
+INSERT-VECTOR 3 0.9,0.8,0.7,0.6,0.5,0.4,0.3,0.2
 
 # Find similar documents
 SEARCH-TOPK 0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8 5

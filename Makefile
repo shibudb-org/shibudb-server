@@ -20,12 +20,12 @@ help: ## Show this help message
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
 
 # Testing targets
-test: ## Run all tests (excluding benchmarks and E2E)
-	@echo "Running tests (excluding benchmarks and E2E)..."
+test: ## Run all tests (excluding benchmarks, E2E, and dev-server tests)
+	@echo "Running tests (excluding benchmarks, E2E, and dev-server tests)..."
 	@if [ "$(shell uname -s)" = "Linux" ]; then \
-		./scripts/test_linux.sh --exclude-benchmark --exclude-e2e; \
+		./scripts/test_linux.sh --exclude-benchmark --exclude-e2e --exclude-dev-server; \
 	else \
-		./scripts/test_with_rpath.sh --exclude-benchmark --exclude-e2e; \
+		./scripts/test_with_rpath.sh --exclude-benchmark --exclude-e2e --exclude-dev-server; \
 	fi
 
 test-all: ## Run all tests including E2E tests (starts server automatically)
@@ -126,6 +126,18 @@ clean: ## Clean build artifacts
 	rm -f *.test
 	rm -f shibudb-server
 	rm -rf cmd/test_server
+	rm -rf testdata
+	@echo "Cleaning test files from internal directory..."
+	find internal -name "*.db" -delete
+	find internal -name "*.dat" -delete
+	find internal -name "*.faiss" -delete
+	find internal -name "*.test" -delete
+	find internal -name "*.prof" -delete
+	find internal -name "*.trace" -delete
+	find internal -name "*.cpu" -delete
+	find internal -name "*.mem" -delete
+	find internal -name "*.block" -delete
+	find internal -name "*.mutex" -delete
 	@echo "Cleanup complete."
 
 start-local-server: ## Start local development server

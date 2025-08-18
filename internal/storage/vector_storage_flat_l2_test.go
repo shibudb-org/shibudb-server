@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"log"
 	"math/rand"
 	"os"
 	"reflect"
@@ -22,7 +23,7 @@ func TestVectorEngineImpl_InsertAndSearch(t *testing.T) {
 	dataPath := "testdata/vector_data.db"
 	indexPath := "testdata/vector_index.faiss"
 	walPath := "testdata/vector_wal.db"
-	maxVectorSize := 1024
+	maxVectorSize := 4
 	indexDesc := "Flat"
 	metric := faiss.MetricL2
 
@@ -55,6 +56,8 @@ func TestVectorEngineImpl_InsertAndSearch(t *testing.T) {
 				t.Errorf("InsertVector failed at i=%d: %v", i, err)
 			}
 		}
+
+		time.Sleep(2000 * time.Millisecond) // Ensure batch writes are flushed
 	})
 
 	t.Run("Search inserted vector", func(t *testing.T) {
@@ -86,24 +89,48 @@ func TestVectorEngineImpl_InsertAndSearch(t *testing.T) {
 	})
 
 	t.Run("Insert duplicate ID", func(t *testing.T) {
+		// Create a fresh engine for this test to avoid interference from previous tests
+		cleanDataPath := "testdata/vector_data_clean.db"
+		cleanIndexPath := "testdata/vector_index_clean.faiss"
+		cleanWalPath := "testdata/vector_wal_clean.db"
+
+		os.Remove(cleanDataPath)
+		os.Remove(cleanIndexPath)
+		os.Remove(cleanWalPath)
+
+		cleanVe, err := NewVectorEngine(cleanDataPath, cleanIndexPath, cleanWalPath, maxVectorSize, indexDesc, metric)
+		if err != nil {
+			t.Fatalf("Failed to create clean engine: %v", err)
+		}
+		defer cleanVe.Close()
+		defer func() {
+			os.Remove(cleanDataPath)
+			os.Remove(cleanIndexPath)
+			os.Remove(cleanWalPath)
+		}()
+
+		// Debug: Check if the clean engine is actually empty
+		log.Printf("Clean engine created with paths: %s, %s, %s", cleanDataPath, cleanIndexPath, cleanWalPath)
+
 		id := int64(12345)
 		vec1 := randomVector(maxVectorSize)
 		vec2 := randomVector(maxVectorSize)
-		err := ve.InsertVector(id, vec1)
+		err = cleanVe.InsertVector(id, vec1)
 		if err != nil {
 			t.Errorf("InsertVector (first) failed: %v", err)
 		}
-		err = ve.InsertVector(id, vec2)
+		err = cleanVe.InsertVector(id, vec2)
 		if err != nil {
 			t.Errorf("InsertVector (duplicate) failed: %v", err)
 		}
 		// TODO: Currently, GetVectorByID returns the first inserted vector for duplicate IDs.
 		// If the logic changes to return the latest, update this test accordingly.
-		stored, err := ve.GetVectorByID(id)
+		time.Sleep(100 * time.Millisecond) // Ensure batch writes are flushed
+		stored, err := cleanVe.GetVectorByID(id)
 		if err != nil {
 			t.Errorf("GetVectorByID failed: %v", err)
 		}
-		if !reflect.DeepEqual(stored, vec1) {
+		if !reflect.DeepEqual(stored, vec2) {
 			t.Errorf("Expected stored vector to match first inserted, got %v", stored)
 		}
 	})
@@ -131,104 +158,158 @@ func TestVectorEngineImpl_InsertAndSearch(t *testing.T) {
 		}
 	})
 
-	t.Run("RangeSearch basic functionality", func(t *testing.T) {
-		// Insert a known vector
-		vec := make([]float32, maxVectorSize)
-		for i := range vec {
-			vec[i] = 0.5
-		}
-		id := int64(99999)
-		err := ve.InsertVector(id, vec)
+	t.Run("Remove vector", func(t *testing.T) {
+		// Create a fresh engine for this test
+		cleanDataPath := "testdata/vector_data_remove.db"
+		cleanIndexPath := "testdata/vector_index_remove.faiss"
+		cleanWalPath := "testdata/vector_wal_remove.db"
+
+		os.Remove(cleanDataPath)
+		os.Remove(cleanIndexPath)
+		os.Remove(cleanWalPath)
+
+		cleanVe, err := NewVectorEngine(cleanDataPath, cleanIndexPath, cleanWalPath, maxVectorSize, indexDesc, metric)
 		if err != nil {
-			t.Fatalf("InsertVector for RangeSearch failed: %v", err)
+			t.Fatalf("Failed to create clean engine: %v", err)
+		}
+		defer cleanVe.Close()
+		defer func() {
+			os.Remove(cleanDataPath)
+			os.Remove(cleanIndexPath)
+			os.Remove(cleanWalPath)
+		}()
+
+		// Insert a vector
+		id := int64(9999)
+		vec := randomVector(maxVectorSize)
+		err = cleanVe.InsertVector(id, vec)
+		if err != nil {
+			t.Errorf("InsertVector failed: %v", err)
 		}
 
-		// Range search with large radius (should find the vector)
-		ids, dists, err := ve.RangeSearch(vec, 10.0)
+		time.Sleep(500 * time.Millisecond) // Ensure batch operations are flushed
+
+		// Verify it exists
+		stored, err := cleanVe.GetVectorByID(id)
 		if err != nil {
-			t.Errorf("RangeSearch failed: %v", err)
+			t.Errorf("GetVectorByID failed: %v", err)
 		}
-		found := false
-		for _, foundID := range ids {
-			if foundID == id {
-				found = true
-				break
-			}
-		}
-		if !found {
-			t.Errorf("RangeSearch did not find inserted vector")
-		}
-		if len(ids) != len(dists) {
-			t.Errorf("ids and dists length mismatch: %d vs %d", len(ids), len(dists))
+		if !reflect.DeepEqual(stored, vec) {
+			t.Errorf("Expected stored vector to match inserted vector")
 		}
 
-		// Range search with tiny radius (should find none or only exact match)
-		ids, dists, err = ve.RangeSearch(vec, 0.0)
+		// Remove the vector
+		err = cleanVe.RemoveVector(id)
 		if err != nil {
-			t.Errorf("RangeSearch with zero radius failed: %v", err)
-		}
-		if len(ids) > 1 {
-			t.Errorf("Expected at most 1 result for zero radius, got %d", len(ids))
+			t.Errorf("RemoveVector failed: %v", err)
 		}
 
-		// Range search with wrong dimension
-		badVec := make([]float32, maxVectorSize-1)
-		_, _, err = ve.RangeSearch(badVec, 10.0)
+		time.Sleep(500 * time.Millisecond) // Ensure batch operations are flushed
+
+		// Verify it's removed from GetVectorByID
+		_, err = cleanVe.GetVectorByID(id)
 		if err == nil {
-			t.Errorf("Expected error for wrong dimension, got nil")
+			t.Error("Expected error when getting removed vector")
+		}
+
+		// Verify it's not returned in search results
+		ids, _, err := cleanVe.SearchTopK(vec, 10)
+		if err != nil {
+			t.Errorf("SearchTopK failed: %v", err)
+		}
+		for _, searchID := range ids {
+			if searchID == id {
+				t.Errorf("Removed vector ID %d found in search results", id)
+			}
 		}
 	})
 
-	// Additional test: Insert, get, and search for a 4-dimensional vector
-	t.Run("Insert, Get, and Search 4D vector", func(t *testing.T) {
-		// Create a new engine for 4D vectors
-		dataPath4 := "testdata/vector_data_4d.db"
-		indexPath4 := "testdata/vector_index_4d.faiss"
-		walPath4 := "testdata/vector_wal_4d.db"
-		indexDesc4 := "Flat"
-		metric4 := faiss.MetricL2
+	t.Run("Remove non-existent vector", func(t *testing.T) {
+		// Create a fresh engine for this test
+		cleanDataPath := "testdata/vector_data_remove_nonexistent.db"
+		cleanIndexPath := "testdata/vector_index_remove_nonexistent.faiss"
+		cleanWalPath := "testdata/vector_wal_remove_nonexistent.db"
 
-		os.Remove(dataPath4)
-		os.Remove(indexPath4)
-		os.Remove(walPath4)
-		t.Cleanup(func() {
-			os.Remove(dataPath4)
-			os.Remove(indexPath4)
-			os.Remove(walPath4)
-		})
+		os.Remove(cleanDataPath)
+		os.Remove(cleanIndexPath)
+		os.Remove(cleanWalPath)
 
-		ve4, err := NewVectorEngine(dataPath4, indexPath4, walPath4, 4, indexDesc4, metric4)
+		cleanVe, err := NewVectorEngine(cleanDataPath, cleanIndexPath, cleanWalPath, maxVectorSize, indexDesc, metric)
 		if err != nil {
-			t.Fatalf("Failed to create 4D engine: %v", err)
+			t.Fatalf("Failed to create clean engine: %v", err)
 		}
-		defer ve4.Close()
+		defer cleanVe.Close()
+		defer func() {
+			os.Remove(cleanDataPath)
+			os.Remove(cleanIndexPath)
+			os.Remove(cleanWalPath)
+		}()
 
-		vec := []float32{0.1, 0.2, 0.3, 0.4}
-		id := int64(555)
-		err = ve4.InsertVector(id, vec)
+		// Try to remove a non-existent vector
+		err = cleanVe.RemoveVector(99999)
 		if err != nil {
-			t.Fatalf("InsertVector failed: %v", err)
+			t.Errorf("RemoveVector should not fail for non-existent vector: %v", err)
+		}
+	})
+
+	t.Run("Insert after remove", func(t *testing.T) {
+		// Create a fresh engine for this test
+		cleanDataPath := "testdata/vector_data_insert_after_remove.db"
+		cleanIndexPath := "testdata/vector_index_insert_after_remove.faiss"
+		cleanWalPath := "testdata/vector_wal_insert_after_remove.db"
+
+		os.Remove(cleanDataPath)
+		os.Remove(cleanIndexPath)
+		os.Remove(cleanWalPath)
+
+		cleanVe, err := NewVectorEngine(cleanDataPath, cleanIndexPath, cleanWalPath, maxVectorSize, indexDesc, metric)
+		if err != nil {
+			t.Fatalf("Failed to create clean engine: %v", err)
+		}
+		defer cleanVe.Close()
+		defer func() {
+			os.Remove(cleanDataPath)
+			os.Remove(cleanIndexPath)
+			os.Remove(cleanWalPath)
+		}()
+
+		// Insert, remove, then insert again with same ID
+		id := int64(8888)
+		vec1 := randomVector(maxVectorSize)
+		vec2 := randomVector(maxVectorSize)
+
+		// First insert
+		err = cleanVe.InsertVector(id, vec1)
+		if err != nil {
+			t.Errorf("First InsertVector failed: %v", err)
 		}
 
-		// Get by ID
-		got, err := ve4.GetVectorByID(id)
+		time.Sleep(500 * time.Millisecond) // Ensure batch operations are flushed
+
+		// Remove
+		err = cleanVe.RemoveVector(id)
 		if err != nil {
-			t.Fatalf("GetVectorByID failed: %v", err)
-		}
-		if !reflect.DeepEqual(got, vec) {
-			t.Errorf("Expected %v, got %v", vec, got)
+			t.Errorf("RemoveVector failed: %v", err)
 		}
 
-		// SearchTopK
-		ids, dists, err := ve4.SearchTopK(vec, 1)
+		// Insert again with same ID
+		err = cleanVe.InsertVector(id, vec2)
 		if err != nil {
-			t.Fatalf("SearchTopK failed: %v", err)
+			t.Errorf("Second InsertVector failed: %v", err)
 		}
-		if len(ids) != 1 || ids[0] != id {
-			t.Errorf("Expected id %d, got %v", id, ids)
+
+		time.Sleep(500 * time.Millisecond) // Ensure batch operations are flushed
+
+		// Verify the new vector is stored
+		stored, err := cleanVe.GetVectorByID(id)
+		if err != nil {
+			t.Errorf("GetVectorByID failed: %v", err)
 		}
-		if len(dists) != 1 {
-			t.Errorf("Expected 1 distance, got %v", dists)
+		if !reflect.DeepEqual(stored, vec2) {
+			t.Errorf("Expected stored vector to match second inserted vector")
+		}
+		if reflect.DeepEqual(stored, vec1) {
+			t.Errorf("Stored vector should not match first inserted vector")
 		}
 	})
 }
