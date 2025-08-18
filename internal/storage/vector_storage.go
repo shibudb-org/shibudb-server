@@ -8,14 +8,14 @@ import (
 	"log"
 	"math"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/Podcopic-Labs/ShibuDb/internal/wal"
-
 	"github.com/DataIntelligenceCrew/go-faiss"
+	"github.com/Podcopic-Labs/ShibuDb/internal/wal"
 )
 
 type VectorEngineImpl struct {
@@ -24,53 +24,51 @@ type VectorEngineImpl struct {
 	wal           *wal.WAL
 	maxVectorSize int
 
-	faissIndex   faiss.Index
-	idMap        map[int64]int64 // maps custom ID → FAISS internal index for O(1) lookup
-	reverseIdMap map[int64]int64 // maps FAISS internal index → custom ID for reverse lookup
-	currentIndex int64           // tracks the next available FAISS index
-	lock         sync.RWMutex
+	// FAISS indices:
+	// baseIndex needs Train (for IVF*/PQ*), and is wrapped by idMapIndex so we can use external IDs.
+	baseIndex  faiss.Index
+	idMapIndex faiss.Index // = faiss.NewIndexIDMap(baseIndex)
 
 	indexType string
 	metric    int
 
-	pendingTrainVectors [][]float32 // buffer for training
-	pendingTrainIDs     []int64     // buffer for IDs
+	// For training-aware ingestion
+	trainPool  [][]float32         // vectors for training only
+	pendingAdd map[int64][]float32 // id -> vector waiting to be AddWithIDs after training
 
-	// Auto-flush mechanism similar to key-value storage
+	// For fast GetVectorByID from append-only data file
+	fileOffsets map[int64]int64 // id -> byte offset in data file
+
+	// Lifecycle / checkpointing
 	quitChan     chan struct{}
 	flushRunning int32
 	closeOnce    sync.Once
 
-	// Batching mechanism like key-value storage
-	batchLock sync.Mutex
-	batch     map[int64][]float32 // In-memory batch buffer
-}
-
-type vectorEntry struct {
-	ID   int64
-	Data []float32
+	lock sync.RWMutex
 }
 
 var _ VectorEngine = (*VectorEngineImpl)(nil)
 
-var _ VectorEngine = (*VectorEngineImpl)(nil)
-
+// NewVectorEngine builds/loads the ID-mapped FAISS index and opens data + WAL files.
+// If an old non-IDMap index exists, delete it once so we can persist the ID-mapped index going forward.
 func NewVectorEngine(dataPath, indexPath, walPath string, maxVectorSize int, indexDesc string, metric int) (*VectorEngineImpl, error) {
-	dataFile, err := os.OpenFile(dataPath, os.O_RDWR|os.O_CREATE, 0666)
+	df, err := os.OpenFile(dataPath, os.O_RDWR|os.O_CREATE, 0666)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("open data file: %w", err)
 	}
 
-	var faissIndex faiss.Index
-	indexExists := false
+	// Create (or read) the base index
+	var idmap faiss.Index
 	if _, err := os.Stat(indexPath); err == nil {
-		faissIndex, err = faiss.ReadIndex(indexPath, 0)
+		// load whatever was persisted (likely already IDMap-wrapped)
+		idmap, err = faiss.ReadIndex(indexPath, 0)
 		if err != nil {
 			return nil, fmt.Errorf("failed to read FAISS index from file: %w", err)
 		}
-		indexExists = true
 	} else {
-		faissIndex, err = faiss.IndexFactory(maxVectorSize, indexDesc, metric)
+		// IMPORTANT: prefix your description with "IDMap," so the factory wraps the base index
+		// e.g. indexDesc = "IVF1024,Flat" -> "IDMap,IVF1024,Flat"
+		idmap, err = faiss.IndexFactory(maxVectorSize, "IDMap,"+indexDesc, metric)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create FAISS index: %w", err)
 		}
@@ -78,286 +76,164 @@ func NewVectorEngine(dataPath, indexPath, walPath string, maxVectorSize int, ind
 
 	w, err := wal.OpenWAL(walPath)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("open WAL: %w", err)
 	}
 
 	e := &VectorEngineImpl{
-		dataFile:      dataFile,
+		dataFile:      df,
 		indexFile:     indexPath,
 		wal:           w,
 		maxVectorSize: maxVectorSize,
-		faissIndex:    faissIndex,
-		idMap:         make(map[int64]int64),
-		reverseIdMap:  make(map[int64]int64),
-		currentIndex:  0, // Initialize currentIndex
+		baseIndex:     idmap,
+		idMapIndex:    idmap,
 		indexType:     indexDesc,
 		metric:        metric,
+		trainPool:     make([][]float32, 0, 1024),
+		pendingAdd:    make(map[int64][]float32),
+		fileOffsets:   make(map[int64]int64),
 		quitChan:      make(chan struct{}),
-		batch:         make(map[int64][]float32),
 	}
 
-	// If we loaded an existing index, rebuild the idMap from data file
-	if indexExists {
-		if err := e.rebuildIdMapFromDataFile(); err != nil {
-			return nil, fmt.Errorf("failed to rebuild idMap: %w", err)
-		}
-		// Set currentIndex to the next available index after rebuilding
-		// We need to count ALL entries in data file, not just distinct IDs
-		e.currentIndex = e.countDataFileEntries()
+	// Rebuild fileOffsets from data file (fast linear scan over fixed-size records).
+	if err := e.rebuildOffsetsFromDataFile(); err != nil {
+		return nil, fmt.Errorf("rebuildOffsetsFromDataFile: %w", err)
 	}
 
+	// Replay WAL (idempotent), which will train (if needed) and add pending vectors.
 	if err := e.replayWAL(); err != nil {
 		return nil, fmt.Errorf("WAL replay failed: %w", err)
 	}
 
-	// Start auto-checkpointing similar to key-value storage
+	// Auto-checkpoint FAISS index to disk
 	go e.autoCheckpoint()
-
-	// Start auto-flush batch like key-value storage
-	go e.autoFlushBatch()
 
 	return e, nil
 }
 
-func (ve *VectorEngineImpl) replayWAL() error {
-	records, err := ve.wal.Replay()
-	if err != nil {
-		return err
+// requiredTrainCount returns a conservative minimum to *allow* training.
+// You can/should make this configurable; these are safe defaults.
+func (ve *VectorEngineImpl) requiredTrainCount() int {
+	// Flat/HNSW need no training
+	if ve.indexType == "Flat" || strings.HasPrefix(ve.indexType, "HNSW") {
+		return 0
 	}
 
-	// Track successful replays to ensure we don't clear WAL if replay fails
-	successfulReplays := 0
-
-	for _, entry := range records {
-		keyBytes := []byte(entry[0])
-		if len(keyBytes) != 8 {
-			return fmt.Errorf("invalid WAL key length: expected 8 bytes, got %d", len(keyBytes))
-		}
-		id := int64(binary.LittleEndian.Uint64(keyBytes))
-		valBytes := []byte(entry[1])
-		vector, err := bytesToFloat32Array(valBytes)
-		if err != nil {
-			return err
-		}
-		// During replay, we need to persist to data file to maintain consistency
-		err = ve.insertInternal(id, vector, true)
-		if err != nil {
-			return fmt.Errorf("failed to replay vector with ID %d: %w", id, err)
-		}
-		successfulReplays++
+	// IVF*n* → need at least nlist (practically 4–10× nlist)
+	nlist := 0
+	if strings.HasPrefix(ve.indexType, "IVF") {
+		fmt.Sscanf(ve.indexType, "IVF%d", &nlist)
 	}
 
-	// Only checkpoint and clear WAL if all replays were successful
-	if successfulReplays > 0 {
-		// Immediately checkpoint after successful replay (similar to key-value storage)
-		if err := ve.checkpoint(); err != nil {
-			return fmt.Errorf("failed to checkpoint after WAL replay: %w", err)
-		}
-		ve.wal.Clear()
+	// PQ present? require >= 256 samples minimally
+	needsPQ := strings.Contains(ve.indexType, "PQ")
+
+	minTrain := 0
+	if nlist > 0 {
+		minTrain = nlist
 	}
-	return nil
+	if needsPQ && minTrain < 256 {
+		minTrain = 256
+	}
+	return minTrain
 }
 
 func (ve *VectorEngineImpl) InsertVector(id int64, vector []float32) error {
-	// Check if engine is closed
-	select {
-	case <-ve.quitChan:
-		return fmt.Errorf("vector engine is closed")
-	default:
-	}
-
+	// sanity
 	if len(vector) != ve.maxVectorSize {
 		return fmt.Errorf("vector length mismatch: expected %d", ve.maxVectorSize)
 	}
 
-	// Add to in-memory batch (like key-value storage)
-	ve.batchLock.Lock()
-	ve.batch[id] = vector
-	ve.batchLock.Unlock()
-
-	// Insert into FAISS index immediately for search functionality
-	if err := ve.insertInternal(id, vector, false); err != nil {
+	// 1) WAL first
+	key := make([]byte, 8)
+	binary.LittleEndian.PutUint64(key, uint64(id))
+	if err := ve.wal.WriteEntry(string(key), string(float32ArrayToBytes(vector))); err != nil {
 		return err
 	}
 
-	return nil
+	// 2) Do the actual ingestion (train if needed, add to FAISS, persist), then mark committed.
+	if err := ve.insertAfterWAL(id, vector); err != nil {
+		return err
+	}
+	return ve.wal.MarkCommitted()
 }
 
-func (ve *VectorEngineImpl) requiredTrainCount() int {
-	// For Flat indices, no training is required
-	if ve.indexType == "Flat" {
-		return 0
-	}
-
-	nlist := 1
-	pqCodebook := 1
-	n := 0 // for Sscanf
-
-	// Parse IVF cluster count
-	if len(ve.indexType) >= 3 && ve.indexType[:3] == "IVF" {
-		n, _ = fmt.Sscanf(ve.indexType, "IVF%d", &nlist)
-		if n != 1 || nlist <= 0 {
-			nlist = 32 // fallback
-		}
-	}
-
-	// Parse PQ codebook size (e.g., PQ4x4 means 4 centroids, PQ4 means 256 centroids)
-	if idx := strings.Index(ve.indexType, "PQ"); idx != -1 {
-		pqPart := ve.indexType[idx+2:]
-		if xIdx := strings.Index(pqPart, "x"); xIdx != -1 {
-			// e.g., PQ4x4
-			var codebook int
-			n, _ = fmt.Sscanf(pqPart[xIdx:], "x%d", &codebook)
-			if n == 1 && codebook > 0 {
-				pqCodebook = codebook
-			}
-		} else {
-			pqCodebook = 256 // default for PQ4, PQ8, etc.
-		}
-	}
-
-	if nlist > pqCodebook {
-		return nlist
-	}
-	return pqCodebook
-}
-
-func (ve *VectorEngineImpl) insertInternal(id int64, vector []float32, persist bool) error {
+// insertAfterWAL performs the ingest without writing to WAL (used by InsertVector and WAL replay).
+func (ve *VectorEngineImpl) insertAfterWAL(id int64, vector []float32) error {
 	ve.lock.Lock()
 	defer ve.lock.Unlock()
 
-	if vector == nil || len(vector) == 0 {
-		return fmt.Errorf("empty vector for id=%d", id)
+	nTrain := ve.requiredTrainCount()
+	trained := (nTrain == 0) || ve.baseIndex.IsTrained()
+
+	if trained {
+		// Replace duplicate id if exists
+		sel, _ := faiss.NewIDSelectorBatch([]int64{id})
+		_, _ = ve.idMapIndex.RemoveIDs(sel)
+		sel.Delete()
+		if err := ve.idMapIndex.AddWithIDs(vector, []int64{id}); err != nil {
+			return err
+		}
+		// Append to data file and update offset
+		if err := ve.appendToDataFile(id, vector); err != nil {
+			return err
+		}
+		return nil
 	}
 
-	nTrain := ve.requiredTrainCount()
-	needsTraining := (nTrain > 0) && !ve.faissIndex.IsTrained()
+	// Not trained yet: stage for training + later AddWithIDs
+	ve.pendingAdd[id] = vector
+	ve.trainPool = append(ve.trainPool, vector)
 
-	if persist {
-		// Check if ID already exists - if so, update the mapping to point to latest insertion
-		if existingIndex, exists := ve.idMap[id]; exists {
-			// Remove the old reverse mapping
-			delete(ve.reverseIdMap, existingIndex)
+	// If we crossed training threshold, train and flush pendingAdd in bulk
+	if len(ve.trainPool) >= nTrain {
+		train := make([]float32, 0, len(ve.trainPool)*ve.maxVectorSize)
+		for _, v := range ve.trainPool {
+			train = append(train, v...)
+		}
+		if err := ve.baseIndex.Train(train); err != nil {
+			return fmt.Errorf("index training failed: %w", err)
 		}
 
-		// Assign a new FAISS index for the new ID (latest insertion)
-		faissIndex := ve.currentIndex
-		ve.idMap[id] = faissIndex
-		ve.reverseIdMap[faissIndex] = id
-		ve.currentIndex++
-
-		if _, err := ve.dataFile.Seek(0, io.SeekEnd); err != nil {
-			return fmt.Errorf("seek end: %w", err)
+		// Bulk add IDs
+		ids := make([]int64, 0, len(ve.pendingAdd))
+		data := make([]float32, 0, len(ve.pendingAdd)*ve.maxVectorSize)
+		for pid, pv := range ve.pendingAdd {
+			ids = append(ids, pid)
+			data = append(data, pv...)
 		}
-		buf := make([]byte, 8+len(vector)*4)
-		binary.LittleEndian.PutUint64(buf[0:8], uint64(id))
-		for i, v := range vector {
-			binary.LittleEndian.PutUint32(buf[8+i*4:], math.Float32bits(v))
-		}
-		if _, err := ve.dataFile.Write(buf); err != nil {
+		if err := ve.idMapIndex.AddWithIDs(data, ids); err != nil {
 			return err
+		}
+
+		// Persist all pending additions and clear buffers
+		for pid, pv := range ve.pendingAdd {
+			if err := ve.appendToDataFile(pid, pv); err != nil {
+				return err
+			}
 		}
 		if err := ve.dataFile.Sync(); err != nil {
 			return err
 		}
+		ve.pendingAdd = make(map[int64][]float32)
+		ve.trainPool = nil
 	}
 
-	if !needsTraining {
-		if err := ve.faissIndex.Add(vector); err != nil {
-			return err
-		}
-		return nil
-	}
-
-	ve.pendingTrainVectors = append(ve.pendingTrainVectors, vector)
-	ve.pendingTrainIDs = append(ve.pendingTrainIDs, id)
-
-	// Not enough to train yet — just buffer.
-	if len(ve.pendingTrainVectors) < nTrain {
-		return nil
-	}
-
-	// Enough buffered — train on all pending.
-	trainData := make([]float32, 0, len(ve.pendingTrainVectors)*len(vector))
-	for _, v := range ve.pendingTrainVectors {
-		trainData = append(trainData, v...)
-	}
-
-	if err := ve.faissIndex.Train(trainData); err != nil {
-		return fmt.Errorf("index training failed: %w", err)
-	}
-
-	for _, v := range ve.pendingTrainVectors {
-		if err := ve.faissIndex.Add(v); err != nil {
-			return err
-		}
-	}
-
-	// Clear buffers now that they are in the index.
-	ve.pendingTrainVectors = nil
-	ve.pendingTrainIDs = nil
 	return nil
 }
 
-func (ve *VectorEngineImpl) countDataFileEntries() int64 {
-	// Seek to beginning of data file
-	_, err := ve.dataFile.Seek(0, 0)
+func (ve *VectorEngineImpl) SearchTopK(query []float32, k int) ([]int64, []float32, error) {
+	if len(query) != ve.maxVectorSize {
+		return nil, nil, errors.New("invalid query size")
+	}
+	ve.lock.RLock()
+	defer ve.lock.RUnlock()
+
+	dists, labels, err := ve.idMapIndex.Search(query, int64(k))
 	if err != nil {
-		log.Printf("Failed to seek to beginning of data file: %v", err)
-		return 0
+		return nil, nil, err
 	}
-
-	recordSize := 8 + 4*ve.maxVectorSize // 8 bytes for ID + 4 bytes per float32
-	count := int64(0)
-
-	for {
-		buf := make([]byte, recordSize)
-		_, err := ve.dataFile.Read(buf)
-		if err != nil {
-			if err.Error() == "EOF" {
-				break // End of file
-			}
-			log.Printf("Failed to read from data file: %v", err)
-			return count
-		}
-		count++
-	}
-
-	return count
-}
-
-func (ve *VectorEngineImpl) rebuildIdMapFromDataFile() error {
-	// Seek to beginning of data file
-	_, err := ve.dataFile.Seek(0, 0)
-	if err != nil {
-		return fmt.Errorf("failed to seek to beginning of data file: %w", err)
-	}
-
-	recordSize := 8 + 4*ve.maxVectorSize    // 8 bytes for ID + 4 bytes per float32
-	ve.idMap = make(map[int64]int64)        // Clear existing map
-	ve.reverseIdMap = make(map[int64]int64) // Clear existing reverse map
-	ve.currentIndex = 0                     // Reset currentIndex
-
-	for {
-		buf := make([]byte, recordSize)
-		_, err := ve.dataFile.Read(buf)
-		if err != nil {
-			if err.Error() == "EOF" {
-				break // End of file
-			}
-			return fmt.Errorf("failed to read from data file: %w", err)
-		}
-
-		// Extract ID from the record
-		id := int64(binary.LittleEndian.Uint64(buf[0:8]))
-		faissIndex := ve.currentIndex
-		ve.idMap[id] = faissIndex
-		ve.reverseIdMap[faissIndex] = id
-		ve.currentIndex++
-	}
-
-	log.Printf("Rebuilt idMap with %d entries from data file", len(ve.idMap))
-	return nil
+	// labels already are your external IDs (thanks to IndexIDMap)
+	return labels, dists, nil
 }
 
 func (ve *VectorEngineImpl) RangeSearch(query []float32, radius float32) ([]int64, []float32, error) {
@@ -368,99 +244,64 @@ func (ve *VectorEngineImpl) RangeSearch(query []float32, radius float32) ([]int6
 	ve.lock.RLock()
 	defer ve.lock.RUnlock()
 
-	// FAISS range search (single query)
-	res, err := ve.faissIndex.RangeSearch(query, radius)
+	res, err := ve.idMapIndex.RangeSearch(query, radius)
 	if err != nil {
 		return nil, nil, err
 	}
 	defer res.Delete()
 
-	labels, distances := res.Labels()
-	lims := res.Lims()
-	nq := res.Nq()
+	labels, distances := res.Labels() // []int64
+	lims := res.Lims()                // []int64 (len == nq+1)
 
-	if nq != 1 {
-		return nil, nil, fmt.Errorf("expected 1 query, got %d", nq)
+	// enforce single query for this API
+	if len(lims) != 2 {
+		return nil, nil, fmt.Errorf("expected 1 query, got %d", len(lims)-1)
 	}
 
-	if len(lims) < 2 {
-		return []int64{}, []float32{}, nil
+	start := int(lims[0])
+	end := int(lims[1])
+	if start < 0 || end < start || end > len(labels) || end > len(distances) {
+		return nil, nil, fmt.Errorf("invalid lims: [%d,%d) over labels=%d dists=%d",
+			start, end, len(labels), len(distances))
 	}
 
-	start, end := lims[0], lims[1]
-	count := end - start
-	ids := make([]int64, count)
-	dists := make([]float32, count)
+	n := end - start
+	outIDs := make([]int64, n)
+	outD := make([]float32, n)
+	copy(outIDs, labels[start:end])
+	copy(outD, distances[start:end])
 
-	for i := start; i < end; i++ {
-		idx := labels[i]
-		// Use reverse map for O(1) lookup
-		if customID, exists := ve.reverseIdMap[idx]; exists {
-			ids[i-start] = customID
-		} else {
-			ids[i-start] = -1
-		}
-		dists[i-start] = distances[i]
+	// OPTIONAL: sort by ascending distance (stable)
+	// Comment out if you prefer FAISS's native order.
+	type pair struct {
+		id  int64
+		dst float32
+	}
+	ps := make([]pair, n)
+	for i := 0; i < n; i++ {
+		ps[i] = pair{outIDs[i], outD[i]}
+	}
+	sort.Slice(ps, func(i, j int) bool { return ps[i].dst < ps[j].dst })
+	for i := 0; i < n; i++ {
+		outIDs[i], outD[i] = ps[i].id, ps[i].dst
 	}
 
-	return ids, dists, nil
-}
-
-func (ve *VectorEngineImpl) SearchTopK(query []float32, k int) ([]int64, []float32, error) {
-	if len(query) != ve.maxVectorSize {
-		return nil, nil, errors.New("invalid query size")
-	}
-
-	ve.lock.RLock()
-	defer ve.lock.RUnlock()
-
-	distances, indexes, err := ve.faissIndex.Search(query, int64(k))
-	if err != nil {
-		return nil, nil, err
-	}
-
-	ids := make([]int64, len(indexes))
-	for i, idx := range indexes {
-		// Use reverse map for O(1) lookup
-		if customID, exists := ve.reverseIdMap[idx]; exists {
-			ids[i] = customID
-		} else {
-			ids[i] = -1
-		}
-	}
-
-	// Log the search results (only for small k to avoid excessive output)
-	if k <= 10 {
-		log.Printf("SearchTopK: ids=%v, dists=%v", ids, distances)
-	}
-
-	return ids, distances, nil
+	return outIDs, outD, nil
 }
 
 func (ve *VectorEngineImpl) GetVectorByID(id int64) ([]float32, error) {
 	ve.lock.RLock()
-	defer ve.lock.RUnlock()
-
-	faissIndex, exists := ve.idMap[id]
-	if !exists {
-		// check if it's in batch to process and not flushed yet.
-		if _, exists := ve.batch[id]; exists {
-			return ve.batch[id], nil
-		}
-
+	offset, ok := ve.fileOffsets[id]
+	ve.lock.RUnlock()
+	if !ok {
 		return nil, fmt.Errorf("ID %d not found", id)
 	}
 
-	// Calculate offset: each record = 8 (id) + 4 * vector size
 	recordSize := 8 + 4*ve.maxVectorSize
-	offset := faissIndex * int64(recordSize)
-
 	buf := make([]byte, recordSize)
-	_, err := ve.dataFile.ReadAt(buf, offset)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read vector at offset %d: %w", offset, err)
+	if _, err := ve.dataFile.ReadAt(buf, offset); err != nil {
+		return nil, fmt.Errorf("read vector at offset %d: %w", offset, err)
 	}
-
 	return bytesToFloat32Array(buf[8:])
 }
 
@@ -469,25 +310,22 @@ func (ve *VectorEngineImpl) Close() error {
 		log.Println("Closing vector engine...")
 		close(ve.quitChan)
 
-		// Flush any pending batch before closing
-		if err := ve.flushBatch(); err != nil {
-			log.Printf("Final batch flush failed: %v", err)
-		}
-
-		// Final checkpoint before closing
+		// Final checkpoint
 		if err := ve.checkpoint(); err != nil {
 			log.Printf("Final checkpoint failed: %v", err)
 		}
 
 		ve.wal.Close()
 		ve.dataFile.Close()
-		ve.faissIndex.Delete()
+		ve.idMapIndex.Delete()
 	})
 	return nil
 }
 
+// === Internals ===
+
 func (ve *VectorEngineImpl) autoCheckpoint() {
-	ticker := time.NewTicker(30 * time.Second) // Checkpoint every 30 seconds
+	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 
 	for {
@@ -499,117 +337,112 @@ func (ve *VectorEngineImpl) autoCheckpoint() {
 			if err := ve.checkpoint(); err != nil {
 				log.Printf("Checkpoint failed: %v", err)
 			}
-
-			// Reset flag AFTER checkpoint fully completes
 			atomic.StoreInt32(&ve.flushRunning, 0)
-
 		case <-ve.quitChan:
 			return
 		}
 	}
-}
-
-func (ve *VectorEngineImpl) autoFlushBatch() {
-	ticker := time.NewTicker(1 * time.Second) // Flush every 1 second like key-value storage
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ticker.C:
-			if !atomic.CompareAndSwapInt32(&ve.flushRunning, 0, 1) {
-				continue
-			}
-			if err := ve.flushBatch(); err != nil {
-				log.Printf("FlushBatch failed: %v", err)
-			}
-
-			// Reset flag AFTER flush fully completes
-			atomic.StoreInt32(&ve.flushRunning, 0)
-
-		case <-ve.quitChan:
-			return
-		}
-	}
-}
-
-func (ve *VectorEngineImpl) flushBatch() error {
-	ve.batchLock.Lock()
-	batchCopy := make(map[int64][]float32, len(ve.batch))
-	for k, v := range ve.batch {
-		batchCopy[k] = v
-	}
-	ve.batch = make(map[int64][]float32)
-	ve.batchLock.Unlock()
-
-	if len(batchCopy) == 0 {
-		return nil
-	}
-
-	ve.lock.Lock()
-	defer ve.lock.Unlock()
-
-	// Write all vectors to WAL in batch
-	for id, vector := range batchCopy {
-		key := make([]byte, 8)
-		binary.LittleEndian.PutUint64(key, uint64(id))
-		val := float32ArrayToBytes(vector)
-		if err := ve.wal.WriteEntry(string(key), string(val)); err != nil {
-			return err
-		}
-	}
-
-	// Write all vectors to data file in batch
-	for id, vector := range batchCopy {
-		// Check if ID already exists - if so, update the mapping to point to latest insertion
-		if existingIndex, exists := ve.idMap[id]; exists {
-			// Remove the old reverse mapping
-			delete(ve.reverseIdMap, existingIndex)
-		}
-
-		// Assign a new FAISS index for the new ID (latest insertion)
-		faissIndex := ve.currentIndex
-		ve.idMap[id] = faissIndex
-		ve.reverseIdMap[faissIndex] = id
-		ve.currentIndex++
-
-		buf := make([]byte, 8+len(vector)*4)
-		binary.LittleEndian.PutUint64(buf[0:8], uint64(id))
-		for i, v := range vector {
-			binary.LittleEndian.PutUint32(buf[8+i*4:], math.Float32bits(v))
-		}
-		_, err := ve.dataFile.Write(buf)
-		if err != nil {
-			return err
-		}
-	}
-
-	// Single sync for entire batch
-	if err := ve.dataFile.Sync(); err != nil {
-		return err
-	}
-
-	// Single commit for entire batch
-	if err := ve.wal.MarkCommitted(); err != nil {
-		return err
-	}
-
-	return nil
 }
 
 func (ve *VectorEngineImpl) checkpoint() error {
 	ve.lock.Lock()
 	defer ve.lock.Unlock()
 
-	// Write index to disk
-	if err := faiss.WriteIndex(ve.faissIndex, ve.indexFile); err != nil {
-		return fmt.Errorf("failed to write index during checkpoint: %w", err)
+	// Persist the (ID-mapped) index
+	if err := faiss.WriteIndex(ve.idMapIndex, ve.indexFile); err != nil {
+		return fmt.Errorf("write index: %w", err)
 	}
-
-	// Sync data file to ensure all data is persisted
+	// Ensure data file flushed
 	if err := ve.dataFile.Sync(); err != nil {
-		return fmt.Errorf("failed to sync data file during checkpoint: %w", err)
+		return fmt.Errorf("sync data file: %w", err)
+	}
+	return nil
+}
+
+func (ve *VectorEngineImpl) replayWAL() error {
+	records, err := ve.wal.Replay()
+	if err != nil {
+		return err
+	}
+	if len(records) == 0 {
+		return nil
 	}
 
+	for _, entry := range records {
+		if len(entry) != 2 {
+			continue
+		}
+		keyBytes := []byte(entry[0])
+		if len(keyBytes) != 8 {
+			return fmt.Errorf("invalid WAL key length: expected 8, got %d", len(keyBytes))
+		}
+		id := int64(binary.LittleEndian.Uint64(keyBytes))
+		vec, err := bytesToFloat32Array([]byte(entry[1]))
+		if err != nil {
+			return fmt.Errorf("WAL decode: %w", err)
+		}
+
+		// IMPORTANT: do not write to WAL here again — just ingest.
+		if err := ve.insertAfterWAL(id, vec); err != nil {
+			return fmt.Errorf("replay insert id=%d: %w", id, err)
+		}
+	}
+
+	// After successful replay, checkpoint and clear WAL
+	if err := ve.checkpoint(); err != nil {
+		return fmt.Errorf("checkpoint after replay: %w", err)
+	}
+	ve.wal.Clear()
+	return nil
+}
+
+func (ve *VectorEngineImpl) appendToDataFile(id int64, vector []float32) error {
+	// Seek end, remember offset for GetVectorByID
+	pos, err := ve.dataFile.Seek(0, io.SeekEnd)
+	if err != nil {
+		return err
+	}
+	buf := make([]byte, 8+len(vector)*4)
+	binary.LittleEndian.PutUint64(buf[0:8], uint64(id))
+	for i, v := range vector {
+		binary.LittleEndian.PutUint32(buf[8+i*4:], math.Float32bits(v))
+	}
+	if _, err := ve.dataFile.Write(buf); err != nil {
+		return err
+	}
+	ve.fileOffsets[id] = pos
+	return nil
+}
+
+func (ve *VectorEngineImpl) rebuildOffsetsFromDataFile() error {
+	// Walk the file and record the last offset for each ID (latest write wins).
+	if _, err := ve.dataFile.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+	recordSize := 8 + 4*ve.maxVectorSize
+	offset := int64(0)
+
+	for {
+		buf := make([]byte, recordSize)
+		n, err := ve.dataFile.Read(buf)
+		if err != nil {
+			if err == io.EOF || (err == io.ErrUnexpectedEOF && n == 0) {
+				break
+			}
+			if err == io.ErrUnexpectedEOF && n > 0 {
+				// Truncated tail — ignore the last partial record
+				break
+			}
+			return fmt.Errorf("read data file: %w", err)
+		}
+		if n < recordSize {
+			// Partial/truncated record — ignore
+			break
+		}
+		id := int64(binary.LittleEndian.Uint64(buf[0:8]))
+		ve.fileOffsets[id] = offset
+		offset += int64(recordSize)
+	}
 	return nil
 }
 
