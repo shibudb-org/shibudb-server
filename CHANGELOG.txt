@@ -4,6 +4,8 @@
 
 ### 1.0.1 - 2025-08-17
 - Improved vector engine performance
+- Added delete operation in vector storage
+- Added synchronous wal in vector for durability
 
 ### 1.0.0 - 2025-08-13
 - Initial release
