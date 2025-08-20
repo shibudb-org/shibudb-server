@@ -70,7 +70,7 @@ func RunSingleSpace(t *testing.T) {
 			for j := 0; j < FirstPhaseOps; j++ {
 				key := fmt.Sprintf("key-%d-p1-%d", clientID, j)
 				val := fmt.Sprintf("value-%d-p1-%d", clientID, j)
-				if err := SendQuery(Query{Type: "PUT", Key: key, Value: val, Space: tableSpace}, conn, reader); err == nil {
+				if err := SendQuery(models.Query{Type: "PUT", Key: key, Value: val, Space: tableSpace}, conn, reader); err == nil {
 					m.putOps++
 					localExpected[key] = val
 				} else {
@@ -81,7 +81,7 @@ func RunSingleSpace(t *testing.T) {
 			for j := 0; j < SecondPhaseOps; j++ {
 				key := fmt.Sprintf("key-%d-p2-%d", clientID, j)
 				val := fmt.Sprintf("value-%d-p2-%d", clientID, j)
-				if err := SendQuery(Query{Type: "PUT", Key: key, Value: val, Space: tableSpace}, conn, reader); err == nil {
+				if err := SendQuery(models.Query{Type: "PUT", Key: key, Value: val, Space: tableSpace}, conn, reader); err == nil {
 					m.putOps++
 					localExpected[key] = val
 				} else {
@@ -93,7 +93,7 @@ func RunSingleSpace(t *testing.T) {
 			// GET Phase
 			getStart := time.Now()
 			for key, expected := range localExpected {
-				query := Query{Type: "GET", Key: key, Space: tableSpace}
+				query := models.Query{Type: "GET", Key: key, Space: tableSpace}
 				data, _ := json.Marshal(query)
 
 				if _, err := conn.Write(append(data, '\n')); err != nil {
@@ -178,7 +178,7 @@ func createBenchmarkSpace() error {
 
 	Login(conn, reader)
 
-	query := Query{Type: "CREATE_SPACE", Space: tableSpace}
+	query := models.Query{Type: "CREATE_SPACE", Space: tableSpace, EnableWAL: true}
 	data, _ := json.Marshal(query)
 	_, err = conn.Write(append(data, '\n'))
 	if err != nil {
@@ -189,7 +189,7 @@ func createBenchmarkSpace() error {
 	return err
 }
 
-func SendQuery(q Query, conn net.Conn, reader *bufio.Reader) error {
+func SendQuery(q models.Query, conn net.Conn, reader *bufio.Reader) error {
 	data, _ := json.Marshal(q)
 	_, err := conn.Write(append(data, '\n'))
 	if err != nil {

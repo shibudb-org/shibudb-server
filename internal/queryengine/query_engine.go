@@ -189,7 +189,7 @@ func (qe *QueryEngine) Execute(query models.Query) (string, error) {
 			}
 		}
 
-		_, err = qe.spaceManager.CreateSpace(query.Space, query.EngineType, query.Dimension, indexType, metric)
+		_, err = qe.spaceManager.CreateSpaceWithWAL(query.Space, query.EngineType, query.Dimension, indexType, metric, query.EnableWAL)
 		if err != nil {
 			return "", err
 		}

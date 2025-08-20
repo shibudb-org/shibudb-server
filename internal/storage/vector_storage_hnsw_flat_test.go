@@ -29,7 +29,7 @@ func TestVectorEngineImpl_InsertAndSearch_HNSW32Flat(t *testing.T) {
 		os.Remove(walPath)
 	})
 
-	ve, err := NewVectorEngine(dataPath, indexPath, walPath, maxVectorSize, indexDesc, metric)
+	ve, err := NewVectorEngine(dataPath, indexPath, walPath, maxVectorSize, indexDesc, metric, true)
 	if err != nil {
 		t.Skipf("Failed to create engine: %v", err)
 	}
@@ -134,7 +134,7 @@ func TestVectorEngineImpl_InsertAndSearch_HNSW32Flat(t *testing.T) {
 		os.Remove(cleanIndexPath)
 		os.Remove(cleanWalPath)
 
-		cleanVe, err := NewVectorEngine(cleanDataPath, cleanIndexPath, cleanWalPath, maxVectorSize, indexDesc, metric)
+		cleanVe, err := NewVectorEngine(cleanDataPath, cleanIndexPath, cleanWalPath, maxVectorSize, indexDesc, metric, true)
 		if err != nil {
 			t.Skipf("Failed to create clean engine: %v", err)
 		}
@@ -200,7 +200,7 @@ func TestVectorEngineImpl_InsertAndSearch_HNSW32Flat(t *testing.T) {
 		os.Remove(cleanIndexPath)
 		os.Remove(cleanWalPath)
 
-		cleanVe, err := NewVectorEngine(cleanDataPath, cleanIndexPath, cleanWalPath, maxVectorSize, indexDesc, metric)
+		cleanVe, err := NewVectorEngine(cleanDataPath, cleanIndexPath, cleanWalPath, maxVectorSize, indexDesc, metric, true)
 		if err != nil {
 			t.Skipf("Failed to create clean engine: %v", err)
 		}
@@ -228,7 +228,7 @@ func TestVectorEngineImpl_InsertAndSearch_HNSW32Flat(t *testing.T) {
 		os.Remove(cleanIndexPath)
 		os.Remove(cleanWalPath)
 
-		cleanVe, err := NewVectorEngine(cleanDataPath, cleanIndexPath, cleanWalPath, maxVectorSize, indexDesc, metric)
+		cleanVe, err := NewVectorEngine(cleanDataPath, cleanIndexPath, cleanWalPath, maxVectorSize, indexDesc, metric, true)
 		if err != nil {
 			t.Skipf("Failed to create clean engine: %v", err)
 		}

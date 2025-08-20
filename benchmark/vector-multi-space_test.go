@@ -8,6 +8,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/Podcopic-Labs/ShibuDb/internal/models"
 )
 
 const (
@@ -71,7 +73,7 @@ func runVectorMultiSpace() {
 			for j := 0; j < firstPhaseOps; j++ {
 				vectorID := fmt.Sprintf("%d", clientID*1000+j)
 				vectorData := generateRandomVector(vectorDimension)
-				if err := sendVectorQuery(VectorQuery{Type: "INSERT_VECTOR", Key: vectorID, Value: vectorData, Space: space}, conn, reader); err == nil {
+				if err := sendVectorQuery(models.Query{Type: "INSERT_VECTOR", Key: vectorID, Value: vectorData, Space: space}, conn, reader); err == nil {
 					m.insertOps++
 					localExpected[vectorID] = vectorData
 				} else {
@@ -82,7 +84,7 @@ func runVectorMultiSpace() {
 			for j := 0; j < secondPhaseOps; j++ {
 				vectorID := fmt.Sprintf("%d", clientID*1000+j+firstPhaseOps)
 				vectorData := generateRandomVector(vectorDimension)
-				if err := sendVectorQuery(VectorQuery{Type: "INSERT_VECTOR", Key: vectorID, Value: vectorData, Space: space}, conn, reader); err == nil {
+				if err := sendVectorQuery(models.Query{Type: "INSERT_VECTOR", Key: vectorID, Value: vectorData, Space: space}, conn, reader); err == nil {
 					m.insertOps++
 					localExpected[vectorID] = vectorData
 				} else {
@@ -95,7 +97,7 @@ func runVectorMultiSpace() {
 			searchStart := time.Now()
 			for j := 0; j < 5; j++ {
 				queryVector := generateRandomVector(vectorDimension)
-				if err := sendVectorQuery(VectorQuery{Type: "SEARCH_TOPK", Value: queryVector, Space: space, Dimension: 10}, conn, reader); err == nil {
+				if err := sendVectorQuery(models.Query{Type: "SEARCH_TOPK", Value: queryVector, Space: space, Dimension: 10}, conn, reader); err == nil {
 					m.searchOps++
 				} else {
 					m.failures++
@@ -106,7 +108,7 @@ func runVectorMultiSpace() {
 			// GET Phase
 			getStart := time.Now()
 			for vectorID := range localExpected {
-				query := VectorQuery{Type: "GET_VECTOR", Key: vectorID, Space: space}
+				query := models.Query{Type: "GET_VECTOR", Key: vectorID, Space: space}
 				data, _ := json.Marshal(query)
 				if _, err := conn.Write(append(data, '\n')); err != nil {
 					m.failures++
@@ -195,7 +197,7 @@ func createVectorSpace(space string) error {
 
 	login(conn, reader)
 
-	query := VectorQuery{Type: "CREATE_SPACE", Space: space, EngineType: "vector", Dimension: vectorDimension}
+	query := models.Query{Type: "CREATE_SPACE", Space: space, EngineType: "vector", Dimension: vectorDimension, EnableWAL: true}
 	data, _ := json.Marshal(query)
 	_, err = conn.Write(append(data, '\n'))
 	if err != nil {
@@ -206,7 +208,7 @@ func createVectorSpace(space string) error {
 	return err
 }
 
-func sendVectorQuery(q VectorQuery, conn net.Conn, reader *bufio.Reader) error {
+func sendVectorQuery(q models.Query, conn net.Conn, reader *bufio.Reader) error {
 	data, _ := json.Marshal(q)
 	_, err := conn.Write(append(data, '\n'))
 	if err != nil {

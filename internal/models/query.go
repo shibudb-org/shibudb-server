@@ -34,4 +34,5 @@ type Query struct {
 	IndexType  string  `json:"index_type,omitempty"`
 	Metric     string  `json:"metric,omitempty"`
 	Radius     float32 `json:"radius,omitempty"`
+	EnableWAL  bool    `json:"enable_wal,omitempty"`
 }

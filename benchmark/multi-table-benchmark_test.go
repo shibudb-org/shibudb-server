@@ -13,12 +13,7 @@ import (
 	"github.com/Podcopic-Labs/ShibuDb/internal/models"
 )
 
-type Query struct {
-	Type  string `json:"type"`
-	Key   string `json:"key"`
-	Value string `json:"value,omitempty"`
-	Space string `json:"space"`
-}
+// Using models.Query instead of local Query type
 
 const (
 	serverAddr         = "localhost:4444"
@@ -83,7 +78,7 @@ func runMultiSpace() {
 			for j := 0; j < firstPhaseOps; j++ {
 				key := fmt.Sprintf("c%d-f1-%d", clientID, j)
 				val := fmt.Sprintf("v%d-f1-%d", clientID, j)
-				if err := sendQuery(Query{Type: "PUT", Key: key, Value: val, Space: space}, conn, reader); err == nil {
+				if err := sendQuery(models.Query{Type: "PUT", Key: key, Value: val, Space: space}, conn, reader); err == nil {
 					m.putOps++
 					localExpected[key] = val
 				} else {
@@ -94,7 +89,7 @@ func runMultiSpace() {
 			for j := 0; j < secondPhaseOps; j++ {
 				key := fmt.Sprintf("c%d-f2-%d", clientID, j)
 				val := fmt.Sprintf("v%d-f2-%d", clientID, j)
-				if err := sendQuery(Query{Type: "PUT", Key: key, Value: val, Space: space}, conn, reader); err == nil {
+				if err := sendQuery(models.Query{Type: "PUT", Key: key, Value: val, Space: space}, conn, reader); err == nil {
 					m.putOps++
 					localExpected[key] = val
 				} else {
@@ -106,7 +101,7 @@ func runMultiSpace() {
 			// GET Phase
 			getStart := time.Now()
 			for key, expected := range localExpected {
-				query := Query{Type: "GET", Key: key, Space: space}
+				query := models.Query{Type: "GET", Key: key, Space: space}
 				data, _ := json.Marshal(query)
 				if _, err := conn.Write(append(data, '\n')); err != nil {
 					m.failures++
@@ -188,7 +183,7 @@ func createSpace(space string) error {
 
 	login(conn, reader)
 
-	query := Query{Type: "CREATE_SPACE", Space: space}
+	query := models.Query{Type: "CREATE_SPACE", Space: space, EnableWAL: true}
 	data, _ := json.Marshal(query)
 	_, err = conn.Write(append(data, '\n'))
 	if err != nil {
@@ -199,7 +194,7 @@ func createSpace(space string) error {
 	return err
 }
 
-func sendQuery(q Query, conn net.Conn, reader *bufio.Reader) error {
+func sendQuery(q models.Query, conn net.Conn, reader *bufio.Reader) error {
 	data, _ := json.Marshal(q)
 	_, err := conn.Write(append(data, '\n'))
 	if err != nil {

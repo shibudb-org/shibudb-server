@@ -59,7 +59,7 @@ type VectorEngineImpl struct {
 var _ VectorEngine = (*VectorEngineImpl)(nil)
 
 // NewVectorEngine builds/loads the ID-mapped FAISS index and opens data + WAL files.
-func NewVectorEngine(dataPath, indexPath, walPath string, maxVectorSize int, indexDesc string, metric int) (*VectorEngineImpl, error) {
+func NewVectorEngine(dataPath, indexPath, walPath string, maxVectorSize int, indexDesc string, metric int, enableWAL bool) (*VectorEngineImpl, error) {
 	df, err := os.OpenFile(dataPath, os.O_RDWR|os.O_CREATE, 0666)
 	if err != nil {
 		return nil, fmt.Errorf("open data file: %w", err)
@@ -79,9 +79,12 @@ func NewVectorEngine(dataPath, indexPath, walPath string, maxVectorSize int, ind
 		}
 	}
 
-	w, err := wal.OpenWAL(walPath)
-	if err != nil {
-		return nil, fmt.Errorf("open WAL: %w", err)
+	var w *wal.WAL
+	if enableWAL {
+		w, err = wal.OpenWAL(walPath)
+		if err != nil {
+			return nil, fmt.Errorf("open WAL: %w", err)
+		}
 	}
 
 	e := &VectorEngineImpl{
@@ -109,9 +112,11 @@ func NewVectorEngine(dataPath, indexPath, walPath string, maxVectorSize int, ind
 		return nil, fmt.Errorf("rebuildOffsetsFromDataFile: %w", err)
 	}
 
-	// Replay WAL, which will train (if needed) and add pending vectors.
-	if err := e.replayWAL(); err != nil {
-		return nil, fmt.Errorf("WAL replay failed: %w", err)
+	// Replay WAL if enabled, which will train (if needed) and add pending vectors.
+	if enableWAL {
+		if err := e.replayWAL(); err != nil {
+			return nil, fmt.Errorf("WAL replay failed: %w", err)
+		}
 	}
 
 	// Background maintenance
@@ -144,7 +149,7 @@ func (ve *VectorEngineImpl) requiredTrainCount() int {
 	if needsPQ && minTrain < 256 {
 		minTrain = 256
 	}
-	
+
 	return minTrain
 }
 
@@ -153,18 +158,24 @@ func (ve *VectorEngineImpl) InsertVector(id int64, vector []float32) error {
 		return fmt.Errorf("vector length mismatch: expected %d", ve.maxVectorSize)
 	}
 
-	// 1) WAL first
-	key := make([]byte, 8)
-	binary.LittleEndian.PutUint64(key, uint64(id))
-	if err := ve.wal.WriteEntry(string(key), string(float32ArrayToBytes(vector))); err != nil {
-		return err
+	// 1) WAL first (if enabled)
+	if ve.wal != nil {
+		key := make([]byte, 8)
+		binary.LittleEndian.PutUint64(key, uint64(id))
+		if err := ve.wal.WriteEntry(string(key), string(float32ArrayToBytes(vector))); err != nil {
+			return err
+		}
 	}
 
 	// 2) Ingest (train if needed, add to FAISS, enqueue persistence), then mark committed.
 	if err := ve.insertAfterWAL(id, vector); err != nil {
 		return err
 	}
-	return ve.wal.MarkCommitted()
+
+	if ve.wal != nil {
+		return ve.wal.MarkCommitted()
+	}
+	return nil
 }
 
 // insertAfterWAL performs the ingest without writing to WAL (used by InsertVector and WAL replay).
@@ -330,19 +341,25 @@ func (ve *VectorEngineImpl) GetVectorByID(id int64) ([]float32, error) {
 }
 
 func (ve *VectorEngineImpl) RemoveVector(id int64) error {
-	// 1) WAL first - log the deletion
-	key := make([]byte, 8)
-	binary.LittleEndian.PutUint64(key, uint64(id))
-	// Use empty value to indicate deletion
-	if err := ve.wal.WriteEntry(string(key), ""); err != nil {
-		return err
+	// 1) WAL first - log the deletion (if enabled)
+	if ve.wal != nil {
+		key := make([]byte, 8)
+		binary.LittleEndian.PutUint64(key, uint64(id))
+		// Use empty value to indicate deletion
+		if err := ve.wal.WriteEntry(string(key), ""); err != nil {
+			return err
+		}
 	}
 
 	// 2) Remove from FAISS index and tracking
 	if err := ve.removeAfterWAL(id); err != nil {
 		return err
 	}
-	return ve.wal.MarkCommitted()
+
+	if ve.wal != nil {
+		return ve.wal.MarkCommitted()
+	}
+	return nil
 }
 
 // removeAfterWAL performs the removal without writing to WAL (used by RemoveVector and WAL replay).
@@ -387,7 +404,9 @@ func (ve *VectorEngineImpl) Close() error {
 			log.Printf("Final checkpoint failed: %v", err)
 		}
 
-		ve.wal.Close()
+		if ve.wal != nil {
+			ve.wal.Close()
+		}
 		ve.dataFile.Close()
 		ve.idMapIndex.Delete()
 	})
@@ -432,6 +451,10 @@ func (ve *VectorEngineImpl) checkpoint() error {
 }
 
 func (ve *VectorEngineImpl) replayWAL() error {
+	if ve.wal == nil {
+		return nil
+	}
+
 	records, err := ve.wal.Replay()
 	if err != nil {
 		return err

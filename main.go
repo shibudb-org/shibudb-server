@@ -358,13 +358,14 @@ func connectToServer(port string) {
 			query = models.Query{Type: models.TypeGetUser, Data: parts[1]}
 		case "create-space":
 			if len(parts) < 2 {
-				fmt.Println("Usage: create-space <name> [--engine key-value|vector] [--dimension N] [--index-type TYPE] [--metric METRIC]")
+				fmt.Println("Usage: create-space <name> [--engine key-value|vector] [--dimension N] [--index-type TYPE] [--metric METRIC] [--enable-wal]")
 				continue
 			}
 			engineType := "key-value"
 			dimension := 0
 			indexType := "Flat"
 			metric := "L2"
+			enableWAL := false
 			for i := 2; i < len(parts); i++ {
 				if parts[i] == "--engine" && i+1 < len(parts) {
 					engineType = parts[i+1]
@@ -382,13 +383,15 @@ func connectToServer(port string) {
 					metricStr := parts[i+1]
 					metric = metricStr
 					i++
+				} else if parts[i] == "--enable-wal" {
+					enableWAL = true
 				}
 			}
 			if engineType == "vector" && dimension <= 0 {
 				fmt.Println("For vector engine, you must specify --dimension <N> (e.g., 128)")
 				continue
 			}
-			query = models.Query{Type: models.TypeCreateSpace, Space: parts[1], User: username, EngineType: engineType, Dimension: dimension, IndexType: indexType, Metric: metric}
+			query = models.Query{Type: models.TypeCreateSpace, Space: parts[1], User: username, EngineType: engineType, Dimension: dimension, IndexType: indexType, Metric: metric, EnableWAL: enableWAL}
 		case "delete-space":
 			if len(parts) < 2 {
 				fmt.Println("Usage: delete-space <name>")
