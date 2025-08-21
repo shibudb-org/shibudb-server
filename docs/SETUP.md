@@ -38,14 +38,14 @@ sudo installer -pkg shibudb-{version}-apple_silicon.pkg -target /
 **AMD64:**
 ```bash
 # Download and install
-wget https://github.com/Podcopic-Labs/ShibuDb/releases/download/v{version}/shibudb_{version}_amd64.deb
+wget https://github.com/shibudb.org/shibudb-server/releases/download/v{version}/shibudb_{version}_amd64.deb
 sudo dpkg -i shibudb_{version}_amd64.deb
 ```
 
 **ARM64:**
 ```bash
 # Download and install
-wget https://github.com/Podcopic-Labs/ShibuDb/releases/download/v{version}/shibudb_{version}_arm64.deb
+wget https://github.com/shibudb.org/shibudb-server/releases/download/v{version}/shibudb_{version}_arm64.deb
 sudo dpkg -i shibudb_{version}_arm64.deb
 ```
 
@@ -54,14 +54,14 @@ sudo dpkg -i shibudb_{version}_arm64.deb
 **AMD64:**
 ```bash
 # Download and install
-wget https://github.com/Podcopic-Labs/ShibuDb/releases/download/v{version}/shibudb-{version}-1.x86_64.rpm
+wget https://github.com/shibudb.org/shibudb-server/releases/download/v{version}/shibudb-{version}-1.x86_64.rpm
 sudo rpm -i shibudb-{version}-1.x86_64.rpm
 ```
 
 **ARM64:**
 ```bash
 # Download and install
-wget https://github.com/Podcopic-Labs/ShibuDb/releases/download/v{version}/shibudb-{version}-1.aarch64.rpm
+wget https://github.com/shibudb.org/shibudb-server/releases/download/v{version}/shibudb-{version}-1.aarch64.rpm
 sudo rpm -i shibudb-{version}-1.aarch64.rpm
 ```
 
@@ -70,7 +70,7 @@ sudo rpm -i shibudb-{version}-1.aarch64.rpm
 If you prefer using Homebrew on macOS, you can install ShibuDb directly from our tap:
 
 ```bash
-brew tap Podcopic-Labs/shibudb
+brew tap shibudb.org/shibudb-server
 
 # Install ShibuDb
 brew install shibudb
@@ -336,6 +336,6 @@ After successful setup, explore these guides:
 If you encounter issues not covered in this guide:
 
 1. Check the [Troubleshooting Guide](TROUBLESHOOTING.md)
-2. Review [GitHub Issues](https://github.com/Podcopic-Labs/ShibuDb/issues)
-3. Join [GitHub Discussions](https://github.com/Podcopic-Labs/ShibuDb/discussions)
+2. Review [GitHub Issues](https://github.com/shibudb.org/shibudb-server/issues)
+3. Join [GitHub Discussions](https://github.com/shibudb.org/shibudb-server/discussions)
 4. Check the [Architecture Documentation](ARCHITECTURE.md) for technical details 

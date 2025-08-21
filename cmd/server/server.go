@@ -14,10 +14,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/Podcopic-Labs/ShibuDb/internal/auth"
-	"github.com/Podcopic-Labs/ShibuDb/internal/models"
-	"github.com/Podcopic-Labs/ShibuDb/internal/queryengine"
-	"github.com/Podcopic-Labs/ShibuDb/internal/spaces"
+	"github.com/shibudb.org/shibudb-server/internal/auth"
+	"github.com/shibudb.org/shibudb-server/internal/models"
+	"github.com/shibudb.org/shibudb-server/internal/queryengine"
+	"github.com/shibudb.org/shibudb-server/internal/spaces"
 )
 
 // ConnectionManager handles connection limiting and tracking

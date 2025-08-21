@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Podcopic-Labs/ShibuDb/internal/models"
+	"github.com/shibudb.org/shibudb-server/internal/models"
 )
 
 func TestVectorHNSW32FlatE2E(t *testing.T) {

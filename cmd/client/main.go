@@ -8,7 +8,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/Podcopic-Labs/ShibuDb/internal/models"
+	"github.com/shibudb.org/shibudb-server/internal/models"
 )
 
 func main() {

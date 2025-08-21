@@ -2,7 +2,7 @@ package benchmark
 
 import (
 	"fmt"
-	"github.com/Podcopic-Labs/ShibuDb/internal/index"
+	"github.com/shibudb.org/shibudb-server/internal/index"
 	"os"
 	"sync"
 	"testing"

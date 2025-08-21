@@ -13,7 +13,7 @@ func TestShibuDB(t *testing.T) {
 	os.Remove("test_wal.db")
 
 	// Initialize database
-	db, err := OpenDBWithPaths("test_storage.db", "test_wal.db", "test_index.dat")
+	db, err := OpenDBWithPathsAndWAL("test_storage.db", "test_wal.db", "test_index.dat", true)
 	if err != nil {
 		t.Fatalf("Failed to open database: %v", err)
 	}
@@ -135,7 +135,7 @@ func TestShibuDB(t *testing.T) {
 
 		// Close and reopen the database to simulate crash recovery
 		db.Close()
-		db, err = OpenDBWithPaths("test_storage.db", "test_wal.db", "test_index.dat")
+		db, err = OpenDBWithPathsAndWAL("test_storage.db", "test_wal.db", "test_index.dat", true)
 		if err != nil {
 			t.Fatalf("Failed to reopen DB for WAL replay test: %v", err)
 		}
@@ -177,7 +177,7 @@ func TestShibuDB(t *testing.T) {
 		db.Close()
 		os.Remove("test_storage_concurrent.db")
 		os.Remove("test_wal_concurrent.db")
-		db2, err := OpenDBWithPaths("test_storage_concurrent.db", "test_wal_concurrent.db", "test_index_concurrent.dat")
+		db2, err := OpenDBWithPathsAndWAL("test_storage_concurrent.db", "test_wal_concurrent.db", "test_index_concurrent.dat", true)
 		if err != nil {
 			t.Fatalf("Failed to open concurrent test DB: %v", err)
 		}

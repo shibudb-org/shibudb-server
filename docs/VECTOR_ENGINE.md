@@ -4,6 +4,7 @@
 
 - [Overview](#overview)
 - [Vector Space Management](#vector-space-management)
+- [WAL Configuration for Vector Spaces](#wal-configuration-for-vector-spaces)
 - [FAISS Index Types](#faiss-index-types)
 - [Basic Vector Operations](#basic-vector-operations)
 - [Advanced Search Operations](#advanced-search-operations)
@@ -74,6 +75,12 @@ CREATE-SPACE fast_accurate --engine vector --dimension 128 --index-type HNSW64,F
 CREATE-SPACE efficient_accurate --engine vector --dimension 128 --index-type PQ8,Flat --metric L2
 CREATE-SPACE balanced_large --engine vector --dimension 128 --index-type IVF64,PQ16 --metric L2
 CREATE-SPACE fast_efficient --engine vector --dimension 128 --index-type HNSW128,PQ32 --metric L2
+
+# Create with WAL enabled (for enhanced durability)
+CREATE-SPACE durable_embeddings --engine vector --dimension 128 --enable-wal
+
+# Create with WAL disabled (default, for maximum performance)
+CREATE-SPACE fast_embeddings --engine vector --dimension 128 --disable-wal
 ```
 
 **Parameters:**
@@ -81,6 +88,8 @@ CREATE-SPACE fast_efficient --engine vector --dimension 128 --index-type HNSW128
 - `--dimension N`: Vector dimension (required for vector spaces)
 - `--index-type TYPE`: FAISS index type (default: Flat)
 - `--metric METRIC`: Distance metric (default: L2)
+- `--enable-wal`: Enable Write-Ahead Logging for enhanced durability (default: disabled for vector spaces)
+- `--disable-wal`: Disable Write-Ahead Logging for maximum performance (default for vector spaces)
 
 ### Minimum Vector Requirements
 
@@ -175,6 +184,49 @@ USE embeddings
 # Verify current space (prompt will show current space)
 [embeddings]>
 ```
+
+### WAL Configuration for Vector Spaces
+
+Vector spaces support configurable Write-Ahead Logging (WAL) to balance performance and durability:
+
+#### Default Behavior (WAL Disabled)
+- **Performance**: Maximum write performance (~20-30% faster)
+- **Durability**: Basic durability through data file persistence
+- **Recovery**: Limited recovery capabilities
+- **Use Case**: High-performance vector operations where some data loss is acceptable
+
+#### WAL Enabled
+- **Performance**: Slightly slower due to additional logging overhead
+- **Durability**: Enhanced durability with full crash recovery
+- **Recovery**: Complete recovery from crashes and unexpected shutdowns
+- **Use Case**: Production systems requiring strong durability guarantees
+
+#### WAL Configuration Examples
+
+```bash
+# Create vector space with WAL enabled (enhanced durability)
+CREATE-SPACE production_vectors --engine vector --dimension 128 --index-type HNSW32 --enable-wal
+
+# Create vector space with WAL disabled (maximum performance, default)
+CREATE-SPACE fast_vectors --engine vector --dimension 128 --index-type HNSW32 --disable-wal
+
+# Create vector space with WAL disabled (explicit, same as default)
+CREATE-SPACE performance_vectors --engine vector --dimension 128 --index-type HNSW32
+```
+
+#### When to Use WAL
+
+**Use WAL Enabled (`--enable-wal`) for:**
+- Production systems with critical data
+- Applications requiring strong durability guarantees
+- Systems where data loss is unacceptable
+- Long-running vector operations
+
+**Use WAL Disabled (`--disable-wal` or default) for:**
+- Development and testing environments
+- High-throughput applications where some data loss is acceptable
+- Real-time vector processing with strict latency requirements
+- Temporary or cache-like vector storage
 
 ## FAISS Index Types
 
@@ -770,6 +822,12 @@ CREATE-SPACE user_embeddings_balanced --engine vector --dimension 128 --index-ty
 # For large user base (high accuracy)
 CREATE-SPACE user_embeddings_accurate --engine vector --dimension 128 --index-type HNSW64,Flat --metric InnerProduct
 
+# For production systems (with WAL enabled for durability)
+CREATE-SPACE user_embeddings_production --engine vector --dimension 128 --index-type HNSW32 --metric InnerProduct --enable-wal
+
+# For high-performance caching (WAL disabled for speed)
+CREATE-SPACE user_embeddings_cache --engine vector --dimension 128 --index-type HNSW16 --metric InnerProduct --disable-wal
+
 USE user_embeddings_balanced
 
 # Store user embeddings
@@ -969,7 +1027,7 @@ shibudb manager 9090 stats
 
 #### From WAL (Write-Ahead Log)
 
-Vector data is automatically recovered from WAL on server restart:
+Vector data is automatically recovered from WAL on server restart (if WAL is enabled):
 
 ```bash
 # Restart server (recovery happens automatically)
@@ -979,6 +1037,8 @@ sudo shibudb start 9090
 # Check logs for recovery messages
 tail -f /usr/local/var/log/shibudb.log
 ```
+
+**Note**: WAL recovery is only available if the space was created with `--enable-wal`. Spaces created with WAL disabled have limited recovery capabilities.
 
 #### Index Rebuilding
 

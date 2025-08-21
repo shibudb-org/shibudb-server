@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/Podcopic-Labs/ShibuDb/internal/models"
+	"github.com/shibudb.org/shibudb-server/internal/models"
 )
 
 func SendQuery(q models.Query, conn net.Conn, reader *bufio.Reader) error {
@@ -22,7 +22,7 @@ func SendQuery(q models.Query, conn net.Conn, reader *bufio.Reader) error {
 }
 
 func CreateSpaceWithIndex(tableSpace, engineType string, dimension int, indexType string, metric string, conn net.Conn, reader *bufio.Reader) bool {
-	query := models.Query{Type: "CREATE_SPACE", Space: tableSpace, EngineType: engineType, Dimension: dimension, IndexType: indexType, Metric: metric}
+	query := models.Query{Type: "CREATE_SPACE", Space: tableSpace, EngineType: engineType, Dimension: dimension, IndexType: indexType, Metric: metric, EnableWAL: true}
 	data, _ := json.Marshal(query)
 	_, err := conn.Write(append(data, '\n'))
 	if err != nil {
@@ -106,6 +106,7 @@ func CreateVectorSpace(space string, dimension int, indexType string, metric str
 		Dimension:  dimension,
 		IndexType:  indexType,
 		Metric:     metric,
+		EnableWAL:  true,
 	}
 	data, _ := json.Marshal(query)
 	_, err := conn.Write(append(data, '\n'))

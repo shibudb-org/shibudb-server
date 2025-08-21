@@ -36,7 +36,7 @@ This project and everyone participating in it is governed by our Code of Conduct
    ```
 3. Add the upstream repository:
    ```bash
-   git remote add upstream https://github.com/Podcopic-Labs/ShibuDb.git
+   git remote add upstream https://github.com/shibudb.org/shibudb-server.git
    ```
 
 ## Development Setup

@@ -6,10 +6,10 @@ import (
 	"log"
 	"strings"
 
-	"github.com/Podcopic-Labs/ShibuDb/internal/auth"
-	"github.com/Podcopic-Labs/ShibuDb/internal/models"
-	"github.com/Podcopic-Labs/ShibuDb/internal/spaces"
-	"github.com/Podcopic-Labs/ShibuDb/internal/storage"
+	"github.com/shibudb.org/shibudb-server/internal/auth"
+	"github.com/shibudb.org/shibudb-server/internal/models"
+	"github.com/shibudb.org/shibudb-server/internal/spaces"
+	"github.com/shibudb.org/shibudb-server/internal/storage"
 )
 
 // Add this interface above QueryEngine
@@ -189,7 +189,7 @@ func (qe *QueryEngine) Execute(query models.Query) (string, error) {
 			}
 		}
 
-		_, err = qe.spaceManager.CreateSpace(query.Space, query.EngineType, query.Dimension, indexType, metric)
+		_, err = qe.spaceManager.CreateSpaceWithWAL(query.Space, query.EngineType, query.Dimension, indexType, metric, query.EnableWAL)
 		if err != nil {
 			return "", err
 		}

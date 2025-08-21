@@ -34,9 +34,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/Podcopic-Labs/ShibuDb/cmd/server"
-	"github.com/Podcopic-Labs/ShibuDb/internal/auth"
-	"github.com/Podcopic-Labs/ShibuDb/internal/models"
+	"github.com/shibudb.org/shibudb-server/cmd/server"
+	"github.com/shibudb.org/shibudb-server/internal/auth"
+	"github.com/shibudb.org/shibudb-server/internal/models"
 )
 
 const (
@@ -96,11 +96,13 @@ func isServerRunning() (bool, int) {
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Println("Usage: shibudb [start <port> [max_connections] | stop | connect <port> | manager <port> <command> | --help]")
+		fmt.Println("Usage: shibudb [start <port> [max_connections] | stop | connect <port> | manager <port> <command> | --version | --help]")
 		return
 	}
 
 	switch os.Args[1] {
+	case "--version":
+		printVersion()
 	case "start":
 		if len(os.Args) < 3 || len(os.Args) > 4 {
 			fmt.Println("Usage: shibudb start <port> [max_connections]")
@@ -154,6 +156,14 @@ func main() {
 	}
 }
 
+func printVersion() {
+	fmt.Printf("ShibuDB version %s\n", Version)
+	fmt.Printf("Build time: %s\n", BuildTime)
+	fmt.Printf("Copyright (C) 2025 Podcopic Labs\n")
+	fmt.Printf("License: GNU Affero General Public License v3.0\n")
+	fmt.Printf("For more information, visit: https://github.com/Podcopic-Labs/ShibuDb\n")
+}
+
 func printHelp() {
 	fmt.Println(`ShibuDB - Lightweight Embedded Database
 Usage:
@@ -161,6 +171,7 @@ Usage:
   sudo shibudb stop                             Stop the ShibuDB background server
   shibudb connect <port>                        Connect to the ShibuDB CLI client
   shibudb manager <port> <command>              Manage connection limits at runtime
+  shibudb --version                             Show version information
   shibudb --help                                Show this help message
 
 Connection Limits:
@@ -358,13 +369,15 @@ func connectToServer(port string) {
 			query = models.Query{Type: models.TypeGetUser, Data: parts[1]}
 		case "create-space":
 			if len(parts) < 2 {
-				fmt.Println("Usage: create-space <name> [--engine key-value|vector] [--dimension N] [--index-type TYPE] [--metric METRIC]")
+				fmt.Println("Usage: create-space <name> [--engine key-value|vector] [--dimension N] [--index-type TYPE] [--metric METRIC] [--enable-wal] [--disable-wal]")
 				continue
 			}
 			engineType := "key-value"
 			dimension := 0
 			indexType := "Flat"
 			metric := "L2"
+			enableWAL := false // Will be set based on engine type
+			walExplicitlySet := false
 			for i := 2; i < len(parts); i++ {
 				if parts[i] == "--engine" && i+1 < len(parts) {
 					engineType = parts[i+1]
@@ -382,13 +395,25 @@ func connectToServer(port string) {
 					metricStr := parts[i+1]
 					metric = metricStr
 					i++
+				} else if parts[i] == "--enable-wal" {
+					enableWAL = true
+					walExplicitlySet = true
+				} else if parts[i] == "--disable-wal" {
+					enableWAL = false
+					walExplicitlySet = true
 				}
 			}
+
+			// Set default WAL based on engine type if not explicitly set
+			if !walExplicitlySet {
+				enableWAL = (engineType == "key-value") // Default to WAL enabled for key-value, disabled for vector
+			}
+
 			if engineType == "vector" && dimension <= 0 {
 				fmt.Println("For vector engine, you must specify --dimension <N> (e.g., 128)")
 				continue
 			}
-			query = models.Query{Type: models.TypeCreateSpace, Space: parts[1], User: username, EngineType: engineType, Dimension: dimension, IndexType: indexType, Metric: metric}
+			query = models.Query{Type: models.TypeCreateSpace, Space: parts[1], User: username, EngineType: engineType, Dimension: dimension, IndexType: indexType, Metric: metric, EnableWAL: enableWAL}
 		case "delete-space":
 			if len(parts) < 2 {
 				fmt.Println("Usage: delete-space <name>")

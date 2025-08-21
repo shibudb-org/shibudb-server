@@ -2,7 +2,7 @@
 
 [![Go Version](https://img.shields.io/badge/Go-1.23.0-blue.svg)](https://golang.org)
 [![License](https://img.shields.io/badge/License-AGPL%203.0-green.svg)](LICENSE)
-[![Platforms](https://img.shields.io/badge/Platforms-Linux%20%7C%20macOS-blue.svg)](https://github.com/Podcopic-Labs/ShibuDb)
+[![Platforms](https://img.shields.io/badge/Platforms-Linux%20%7C%20macOS-blue.svg)](https://github.com/shibudb.org/shibudb-server)
 
 ShibuDb is a lightweight, embedded database system with vector search capabilities powered by FAISS. It provides high-performance storage and retrieval with support for both traditional key-value operations and advanced vector similarity search.
 
@@ -22,7 +22,7 @@ ShibuDb is a lightweight, embedded database system with vector search capabiliti
 
 ```bash
 # From source
-git clone https://github.com/Podcopic-Labs/ShibuDb.git
+git clone https://github.com/shibudb.org/shibudb-server.git
 cd ShibuDb
 
 # Start the local server on port 4444 with default admin username and password as admin:admin
@@ -169,7 +169,7 @@ make connect-local-client
 
 ### From Source
 ```bash
-git clone https://github.com/Podcopic-Labs/ShibuDb.git
+git clone https://github.com/shibudb.org/shibudb-server.git
 cd ShibuDb
 make build
 sudo make install
@@ -286,9 +286,9 @@ This project is licensed under the GNU Affero General Public License v3.0 (AGPL-
 
 ## 🆘 Support
 
-- **Documentation**: [Wiki](https://github.com/Podcopic-Labs/ShibuDb/wiki)
-- **Issues**: [GitHub Issues](https://github.com/Podcopic-Labs/ShibuDb/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/Podcopic-Labs/ShibuDb/discussions)
+- **Documentation**: [Wiki](https://github.com/shibudb.org/shibudb-server/wiki)
+- **Issues**: [GitHub Issues](https://github.com/shibudb.org/shibudb-server/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/shibudb.org/shibudb-server/discussions)
 
 ## 🙏 Acknowledgments
 

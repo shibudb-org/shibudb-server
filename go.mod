@@ -1,4 +1,4 @@
-module github.com/Podcopic-Labs/ShibuDb
+module github.com/shibudb.org/shibudb-server
 
 go 1.23.0
 

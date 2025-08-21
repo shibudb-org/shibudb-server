@@ -38,7 +38,7 @@ func TestVectorEngineImpl_InsertAndSearch(t *testing.T) {
 		os.Remove(walPath)
 	})
 
-	ve, err := NewVectorEngine(dataPath, indexPath, walPath, maxVectorSize, indexDesc, metric)
+	ve, err := NewVectorEngine(dataPath, indexPath, walPath, maxVectorSize, indexDesc, metric, true)
 	if err != nil {
 		t.Fatalf("Failed to create engine: %v", err)
 	}
@@ -98,7 +98,7 @@ func TestVectorEngineImpl_InsertAndSearch(t *testing.T) {
 		os.Remove(cleanIndexPath)
 		os.Remove(cleanWalPath)
 
-		cleanVe, err := NewVectorEngine(cleanDataPath, cleanIndexPath, cleanWalPath, maxVectorSize, indexDesc, metric)
+		cleanVe, err := NewVectorEngine(cleanDataPath, cleanIndexPath, cleanWalPath, maxVectorSize, indexDesc, metric, true)
 		if err != nil {
 			t.Fatalf("Failed to create clean engine: %v", err)
 		}
@@ -168,7 +168,7 @@ func TestVectorEngineImpl_InsertAndSearch(t *testing.T) {
 		os.Remove(cleanIndexPath)
 		os.Remove(cleanWalPath)
 
-		cleanVe, err := NewVectorEngine(cleanDataPath, cleanIndexPath, cleanWalPath, maxVectorSize, indexDesc, metric)
+		cleanVe, err := NewVectorEngine(cleanDataPath, cleanIndexPath, cleanWalPath, maxVectorSize, indexDesc, metric, true)
 		if err != nil {
 			t.Fatalf("Failed to create clean engine: %v", err)
 		}
@@ -234,7 +234,7 @@ func TestVectorEngineImpl_InsertAndSearch(t *testing.T) {
 		os.Remove(cleanIndexPath)
 		os.Remove(cleanWalPath)
 
-		cleanVe, err := NewVectorEngine(cleanDataPath, cleanIndexPath, cleanWalPath, maxVectorSize, indexDesc, metric)
+		cleanVe, err := NewVectorEngine(cleanDataPath, cleanIndexPath, cleanWalPath, maxVectorSize, indexDesc, metric, true)
 		if err != nil {
 			t.Fatalf("Failed to create clean engine: %v", err)
 		}
@@ -262,7 +262,7 @@ func TestVectorEngineImpl_InsertAndSearch(t *testing.T) {
 		os.Remove(cleanIndexPath)
 		os.Remove(cleanWalPath)
 
-		cleanVe, err := NewVectorEngine(cleanDataPath, cleanIndexPath, cleanWalPath, maxVectorSize, indexDesc, metric)
+		cleanVe, err := NewVectorEngine(cleanDataPath, cleanIndexPath, cleanWalPath, maxVectorSize, indexDesc, metric, true)
 		if err != nil {
 			t.Fatalf("Failed to create clean engine: %v", err)
 		}
@@ -315,7 +315,7 @@ func TestVectorEngineImpl_InsertAndSearch(t *testing.T) {
 }
 
 func TestVectorEngineImpl_InvalidInsert(t *testing.T) {
-	ve, _ := NewVectorEngine("/tmp/vec.db", "/tmp/vec.idx", "/tmp/vec.wal", 8, "Flat", faiss.MetricL2)
+	ve, _ := NewVectorEngine("/tmp/vec.db", "/tmp/vec.idx", "/tmp/vec.wal", 8, "Flat", faiss.MetricL2, true)
 	defer ve.Close()
 
 	err := ve.InsertVector(123, []float32{1.0, 2.0})
