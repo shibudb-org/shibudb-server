@@ -43,7 +43,7 @@ cp "$FAISS_LIB_DIR/libfaiss_c.dylib" "$DIST_CONTENT_DIR/"
 # === Create tar.gz ===
 echo "📦 Creating tar.gz archive..."
 cd "$DIST_DIR"
-tar -czvf "$FINAL_TARBALL" "$OUTPUT_NAME"
+tar -czvf "../mac/apple_silicon/$OUTPUT_NAME.tar.gz" "$OUTPUT_NAME"
 cd - >/dev/null
 
 # === Clean up distribution folder ===

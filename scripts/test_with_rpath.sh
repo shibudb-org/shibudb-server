@@ -168,7 +168,7 @@ run_all_tests() {
             run_tests_with_rpath "$package" "${additional_args[@]}"
         else
             # If that fails, check if there are test files in the package directory
-            package_path=$(echo "$package" | sed 's|github.com/Podcopic-Labs/ShibuDb/||')
+            package_path=$(echo "$package" | sed 's|github.com/shibudb.org/shibudb-server/||')
             if [ -d "$package_path" ] && find "$package_path" -name "*_test.go" -type f | grep -q .; then
                 echo -e "${YELLOW}📦 Testing package: $package (found test files)${NC}"
                 run_tests_with_rpath "$package" "${additional_args[@]}"

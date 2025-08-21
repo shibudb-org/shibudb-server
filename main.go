@@ -161,7 +161,7 @@ func printVersion() {
 	fmt.Printf("Build time: %s\n", BuildTime)
 	fmt.Printf("Copyright (C) 2025 Podcopic Labs\n")
 	fmt.Printf("License: GNU Affero General Public License v3.0\n")
-	fmt.Printf("For more information, visit: https://github.com/Podcopic-Labs/ShibuDb\n")
+	fmt.Printf("For more information, visit: https://github.com/shibudb.org/shibudb-server\n")
 }
 
 func printHelp() {
@@ -632,7 +632,7 @@ func printStartupBanner() {
 ` + cyan + `Secure | Embedded | Fast — Welcome to ShibuDB` + reset)
 
 	fmt.Printf("%sVersion:%s %s\n", blue, reset, Version)
-	fmt.Printf("%sDocs   :%s https://github.com/Podcopic-Labs/ShibuDb\n", blue, reset)
+	fmt.Printf("%sDocs   :%s https://github.com/shibudb.org/shibudb-server\n", blue, reset)
 }
 
 func startServer(port string, maxConnections int32) {

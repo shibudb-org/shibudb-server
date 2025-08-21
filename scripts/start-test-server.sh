@@ -102,7 +102,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/Podcopic-Labs/ShibuDb/cmd/server"
+	"github.com/shibudb.org/shibudb-server/cmd/server"
 )
 
 func main() {
