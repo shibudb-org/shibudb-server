@@ -2,6 +2,9 @@
 
 ## Version History
 
+### 1.0.2 - 2025-08-21
+- Added option to enable wal for storage engine
+
 ### 1.0.1 - 2025-08-17
 - Improved vector engine performance
 - Added delete operation in vector storage
