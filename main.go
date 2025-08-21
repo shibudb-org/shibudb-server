@@ -96,11 +96,13 @@ func isServerRunning() (bool, int) {
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Println("Usage: shibudb [start <port> [max_connections] | stop | connect <port> | manager <port> <command> | --help]")
+		fmt.Println("Usage: shibudb [start <port> [max_connections] | stop | connect <port> | manager <port> <command> | --version | --help]")
 		return
 	}
 
 	switch os.Args[1] {
+	case "--version":
+		printVersion()
 	case "start":
 		if len(os.Args) < 3 || len(os.Args) > 4 {
 			fmt.Println("Usage: shibudb start <port> [max_connections]")
@@ -154,6 +156,14 @@ func main() {
 	}
 }
 
+func printVersion() {
+	fmt.Printf("ShibuDB version %s\n", Version)
+	fmt.Printf("Build time: %s\n", BuildTime)
+	fmt.Printf("Copyright (C) 2025 Podcopic Labs\n")
+	fmt.Printf("License: GNU Affero General Public License v3.0\n")
+	fmt.Printf("For more information, visit: https://github.com/Podcopic-Labs/ShibuDb\n")
+}
+
 func printHelp() {
 	fmt.Println(`ShibuDB - Lightweight Embedded Database
 Usage:
@@ -161,6 +171,7 @@ Usage:
   sudo shibudb stop                             Stop the ShibuDB background server
   shibudb connect <port>                        Connect to the ShibuDB CLI client
   shibudb manager <port> <command>              Manage connection limits at runtime
+  shibudb --version                             Show version information
   shibudb --help                                Show this help message
 
 Connection Limits:
