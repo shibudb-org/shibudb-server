@@ -8,6 +8,8 @@ VERSION=$(./scripts/get_version.sh)  # Or hardcode like: VERSION="1.0.0"
 DIST_DIR="build/distribution"
 OUTPUT_NAME="$APP_NAME-$VERSION-darwin-arm64"
 DIST_CONTENT_DIR="$DIST_DIR/$OUTPUT_NAME"
+FINAL_OUTPUT_DIR="build/mac/apple_silicon"
+FINAL_TARBALL="$FINAL_OUTPUT_DIR/$OUTPUT_NAME.tar.gz"
 
 FAISS_LIB_DIR="resources/lib/mac/apple_silicon"
 
@@ -15,6 +17,7 @@ FAISS_LIB_DIR="resources/lib/mac/apple_silicon"
 echo "🧹 Cleaning old build..."
 rm -rf "$DIST_DIR"
 mkdir -p "$DIST_CONTENT_DIR"
+mkdir -p "$FINAL_OUTPUT_DIR"
 
 # === Build Go binary ===
 echo "🔨 Building $APP_NAME..."
@@ -40,8 +43,12 @@ cp "$FAISS_LIB_DIR/libfaiss_c.dylib" "$DIST_CONTENT_DIR/"
 # === Create tar.gz ===
 echo "📦 Creating tar.gz archive..."
 cd "$DIST_DIR"
-tar -czvf "../$OUTPUT_NAME.tar.gz" "$OUTPUT_NAME"
+tar -czvf "$FINAL_TARBALL" "$OUTPUT_NAME"
 cd - >/dev/null
 
+# === Clean up distribution folder ===
+echo "🧹 Cleaning up temporary files..."
+rm -rf "$DIST_DIR"
+
 echo "✅ Done!"
-echo " - Output: build/$OUTPUT_NAME.tar.gz"
+echo " - Output: $FINAL_TARBALL"
