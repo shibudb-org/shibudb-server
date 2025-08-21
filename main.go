@@ -358,14 +358,15 @@ func connectToServer(port string) {
 			query = models.Query{Type: models.TypeGetUser, Data: parts[1]}
 		case "create-space":
 			if len(parts) < 2 {
-				fmt.Println("Usage: create-space <name> [--engine key-value|vector] [--dimension N] [--index-type TYPE] [--metric METRIC] [--enable-wal]")
+				fmt.Println("Usage: create-space <name> [--engine key-value|vector] [--dimension N] [--index-type TYPE] [--metric METRIC] [--enable-wal] [--disable-wal]")
 				continue
 			}
 			engineType := "key-value"
 			dimension := 0
 			indexType := "Flat"
 			metric := "L2"
-			enableWAL := false
+			enableWAL := false // Will be set based on engine type
+			walExplicitlySet := false
 			for i := 2; i < len(parts); i++ {
 				if parts[i] == "--engine" && i+1 < len(parts) {
 					engineType = parts[i+1]
@@ -385,8 +386,18 @@ func connectToServer(port string) {
 					i++
 				} else if parts[i] == "--enable-wal" {
 					enableWAL = true
+					walExplicitlySet = true
+				} else if parts[i] == "--disable-wal" {
+					enableWAL = false
+					walExplicitlySet = true
 				}
 			}
+
+			// Set default WAL based on engine type if not explicitly set
+			if !walExplicitlySet {
+				enableWAL = (engineType == "key-value") // Default to WAL enabled for key-value, disabled for vector
+			}
+
 			if engineType == "vector" && dimension <= 0 {
 				fmt.Println("For vector engine, you must specify --dimension <N> (e.g., 128)")
 				continue

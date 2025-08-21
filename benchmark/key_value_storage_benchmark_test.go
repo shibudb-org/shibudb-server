@@ -1,17 +1,18 @@
 package benchmark
 
 import (
-	"github.com/Podcopic-Labs/ShibuDb/internal/storage"
 	"os"
 	"strconv"
 	"sync"
 	"testing"
+
+	"github.com/Podcopic-Labs/ShibuDb/internal/storage"
 )
 
 func BenchmarkShibuDB(b *testing.B) {
 	os.Remove("benchmark_storage.db")
 	os.Remove("benchmark_wal.db")
-	db, err := storage.OpenDBWithPaths("benchmark_storage.db", "benchmark_wal.db", "benchmark_index.dat")
+	db, err := storage.OpenDBWithPathsAndWAL("benchmark_storage.db", "benchmark_wal.db", "benchmark_index.dat", true)
 	if err != nil {
 		b.Fatalf("Failed to open database: %v", err)
 	}

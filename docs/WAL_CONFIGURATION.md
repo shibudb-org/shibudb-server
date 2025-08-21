@@ -1,12 +1,26 @@
-# WAL Configuration for Vector Storage
+# WAL Configuration for Storage Engines
 
 ## Overview
 
-ShibuDb now supports configurable Write-Ahead Logging (WAL) for vector storage spaces. By default, WAL is disabled for better performance, but users can enable it for enhanced durability guarantees.
+ShibuDb now supports configurable Write-Ahead Logging (WAL) for both vector and key-value storage spaces. The default behavior differs between engine types to optimize for their typical use cases.
 
 ## WAL Behavior
 
-### When WAL is Disabled (Default)
+### Default Behavior by Engine Type
+
+#### Key-Value Storage (WAL Enabled by Default)
+- **Performance**: Slightly slower due to WAL overhead
+- **Durability**: Enhanced durability with crash recovery
+- **Recovery**: Full recovery from crashes and unexpected shutdowns
+- **Use Case**: Traditional database workloads requiring strong durability
+
+#### Vector Storage (WAL Disabled by Default)
+- **Performance**: Faster write operations
+- **Durability**: Basic durability through data file persistence
+- **Recovery**: Limited recovery capabilities
+- **Use Case**: High-performance vector operations where some data loss is acceptable
+
+### When WAL is Disabled
 - **Performance**: Faster write operations
 - **Durability**: Basic durability through data file persistence
 - **Recovery**: Limited recovery capabilities
@@ -22,6 +36,18 @@ ShibuDb now supports configurable Write-Ahead Logging (WAL) for vector storage s
 
 ### Command Line Interface
 
+#### Key-Value Storage
+Create a key-value space with WAL enabled (default):
+```bash
+create-space my_kv_space --engine key-value
+```
+
+Create a key-value space with WAL disabled:
+```bash
+create-space my_kv_space --engine key-value --disable-wal
+```
+
+#### Vector Storage
 Create a vector space with WAL disabled (default):
 ```bash
 create-space my_vector_space --engine vector --dimension 128 --index-type Flat --metric L2
@@ -34,12 +60,22 @@ create-space my_vector_space --engine vector --dimension 128 --index-type Flat -
 
 ### Programmatic API
 
+#### Key-Value Storage
 ```go
-// Create space with WAL disabled (default)
-space, err := spaceManager.CreateSpace("my_space", "vector", 128, "Flat", "L2")
+// Create key-value space with WAL enabled (default)
+space, err := spaceManager.CreateSpace("my_kv_space", "key-value", 0, "", "")
 
-// Create space with WAL enabled
-space, err := spaceManager.CreateSpaceWithWAL("my_space", "vector", 128, "Flat", "L2", true)
+// Create key-value space with WAL disabled
+space, err := spaceManager.CreateSpaceWithWAL("my_kv_space", "key-value", 0, "", "", false)
+```
+
+#### Vector Storage
+```go
+// Create vector space with WAL disabled (default)
+space, err := spaceManager.CreateSpace("my_vector_space", "vector", 128, "Flat", "L2")
+
+// Create vector space with WAL enabled
+space, err := spaceManager.CreateSpaceWithWAL("my_vector_space", "vector", 128, "Flat", "L2", true)
 ```
 
 ## Configuration Details

@@ -27,7 +27,7 @@ type ShibuDB struct {
 	closeOnce    sync.Once
 }
 
-func OpenDBWithPaths(dataPath, walPath, indexPath string) (*ShibuDB, error) {
+func OpenDBWithPathsAndWAL(dataPath, walPath, indexPath string, enableWAL bool) (*ShibuDB, error) {
 	file, err := os.OpenFile(dataPath, os.O_RDWR|os.O_CREATE, 0666)
 	if err != nil {
 		return nil, err
@@ -38,9 +38,12 @@ func OpenDBWithPaths(dataPath, walPath, indexPath string) (*ShibuDB, error) {
 		return nil, err
 	}
 
-	dbWAL, err := wal.OpenWAL(walPath)
-	if err != nil {
-		return nil, err
+	var dbWAL *wal.WAL
+	if enableWAL {
+		dbWAL, err = wal.OpenWAL(walPath)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	db := &ShibuDB{
@@ -52,7 +55,9 @@ func OpenDBWithPaths(dataPath, walPath, indexPath string) (*ShibuDB, error) {
 	}
 
 	db.index.BatchLoadFromMmap()
-	db.replayWAL()
+	if enableWAL {
+		db.replayWAL()
+	}
 
 	go db.autoFlushBatch()
 
@@ -60,6 +65,10 @@ func OpenDBWithPaths(dataPath, walPath, indexPath string) (*ShibuDB, error) {
 }
 
 func OpenDB(filename string, walFilename string) (*ShibuDB, error) {
+	return OpenDBWithWAL(filename, walFilename, true)
+}
+
+func OpenDBWithWAL(filename string, walFilename string, enableWAL bool) (*ShibuDB, error) {
 	file, err := os.OpenFile(filename, os.O_RDWR|os.O_CREATE, 0666)
 	if err != nil {
 		return nil, err
@@ -68,9 +77,12 @@ func OpenDB(filename string, walFilename string) (*ShibuDB, error) {
 	if err != nil {
 		return nil, err
 	}
-	dbWAL, err := wal.OpenWAL(walFilename)
-	if err != nil {
-		return nil, err
+	var dbWAL *wal.WAL
+	if enableWAL {
+		dbWAL, err = wal.OpenWAL(walFilename)
+		if err != nil {
+			return nil, err
+		}
 	}
 	db := &ShibuDB{
 		file:     file,
@@ -80,7 +92,9 @@ func OpenDB(filename string, walFilename string) (*ShibuDB, error) {
 		batch:    make(map[string]string),
 	}
 	db.index.BatchLoadFromMmap()
-	db.replayWAL()
+	if enableWAL {
+		db.replayWAL()
+	}
 
 	go db.autoFlushBatch()
 
@@ -88,6 +102,9 @@ func OpenDB(filename string, walFilename string) (*ShibuDB, error) {
 }
 
 func (db *ShibuDB) replayWAL() {
+	if db.wal == nil {
+		return
+	}
 	entries, err := db.wal.Replay()
 	if err != nil {
 		log.Printf("WAL replay failed: %v", err)
@@ -148,10 +165,13 @@ func (db *ShibuDB) FlushBatch() error {
 	db.lock.Lock()
 	defer db.lock.Unlock()
 
-	for key, value := range batchCopy {
-		err := db.wal.WriteEntry(key, value)
-		if err != nil {
-			return err
+	// Write to WAL if enabled
+	if db.wal != nil {
+		for key, value := range batchCopy {
+			err := db.wal.WriteEntry(key, value)
+			if err != nil {
+				return err
+			}
 		}
 	}
 
@@ -195,9 +215,12 @@ func (db *ShibuDB) FlushBatch() error {
 		return err
 	}
 
-	db.wal.MarkCommitted()
-	if db.wal.ShouldCheckpoint() {
-		db.wal.Clear()
+	// Mark WAL as committed if enabled
+	if db.wal != nil {
+		db.wal.MarkCommitted()
+		if db.wal.ShouldCheckpoint() {
+			db.wal.Clear()
+		}
 	}
 
 	return nil
@@ -272,9 +295,11 @@ func (db *ShibuDB) Delete(key string) error {
 	}
 
 	db.index.Remove(key)
-	err := db.wal.WriteDelete(key)
-	if err != nil {
-		return err
+	if db.wal != nil {
+		err := db.wal.WriteDelete(key)
+		if err != nil {
+			return err
+		}
 	}
 
 	keyBytes := []byte(key)
@@ -299,8 +324,10 @@ func (db *ShibuDB) Close() error {
 		log.Println("Closed.............")
 		close(db.quitChan)
 		db.FlushBatch()
-		db.wal.Clear()
-		db.wal.Close()
+		if db.wal != nil {
+			db.wal.Clear()
+			db.wal.Close()
+		}
 		db.file.Close()
 	})
 	return nil

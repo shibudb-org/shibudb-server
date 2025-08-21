@@ -131,7 +131,9 @@ func (sm *SpaceManager) loadSpaceMetas() {
 				dataFile := filepath.Join(spacePath, "data.db")
 				walFile := filepath.Join(spacePath, "wal.db")
 				indexFile := filepath.Join(spacePath, "index.dat")
-				db, err := storage.OpenDBWithPaths(dataFile, walFile, indexFile)
+				// Use stored WAL setting, default to true for backward compatibility
+				enableWAL := meta.EnableWAL
+				db, err := storage.OpenDBWithPathsAndWAL(dataFile, walFile, indexFile, enableWAL)
 				if err == nil {
 					sm.spaces[meta.Name] = db
 				} else {
@@ -190,7 +192,9 @@ func (sm *SpaceManager) UseSpace(space string) (interface{}, error) {
 }
 
 func (sm *SpaceManager) CreateSpace(space, engineType string, dimension int, indexType string, metric string) (interface{}, error) {
-	return sm.CreateSpaceWithWAL(space, engineType, dimension, indexType, metric, false)
+	// Default to WAL enabled for key-value (backward compatibility) and disabled for vector (performance)
+	enableWAL := engineType == "key-value"
+	return sm.CreateSpaceWithWAL(space, engineType, dimension, indexType, metric, enableWAL)
 }
 
 func (sm *SpaceManager) CreateSpaceWithWAL(space, engineType string, dimension int, indexType string, metric string, enableWAL bool) (interface{}, error) {
@@ -215,7 +219,7 @@ func (sm *SpaceManager) CreateSpaceWithWAL(space, engineType string, dimension i
 		dataFile := filepath.Join(spacePath, "data.db")
 		walFile := filepath.Join(spacePath, "wal.db")
 		indexFile := filepath.Join(spacePath, "index.dat")
-		db, err := storage.OpenDBWithPaths(dataFile, walFile, indexFile)
+		db, err := storage.OpenDBWithPathsAndWAL(dataFile, walFile, indexFile, enableWAL)
 		if err != nil {
 			return nil, err
 		}

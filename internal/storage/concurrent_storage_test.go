@@ -12,7 +12,7 @@ func TestMultipleAutoFlushes(t *testing.T) {
 	_ = os.Remove("auto_flush_storage.db")
 	_ = os.Remove("auto_flush_wal.db")
 
-	db, err := OpenDBWithPaths("auto_flush_storage.db", "auto_flush_wal.db", "auto_flush_index.dat")
+	db, err := OpenDBWithPathsAndWAL("auto_flush_storage.db", "auto_flush_wal.db", "auto_flush_index.dat", true)
 	if err != nil {
 		t.Fatalf("Failed to open DB: %v", err)
 	}
