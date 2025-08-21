@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/Podcopic-Labs/ShibuDb/internal/models"
+	"github.com/shibudb.org/shibudb-server/internal/models"
 )
 
 func SendQuery(q models.Query, conn net.Conn, reader *bufio.Reader) error {

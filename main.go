@@ -34,9 +34,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/Podcopic-Labs/ShibuDb/cmd/server"
-	"github.com/Podcopic-Labs/ShibuDb/internal/auth"
-	"github.com/Podcopic-Labs/ShibuDb/internal/models"
+	"github.com/shibudb.org/shibudb-server/cmd/server"
+	"github.com/shibudb.org/shibudb-server/internal/auth"
+	"github.com/shibudb.org/shibudb-server/internal/models"
 )
 
 const (

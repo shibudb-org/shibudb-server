@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Podcopic-Labs/ShibuDb/internal/models"
+	"github.com/shibudb.org/shibudb-server/internal/models"
 )
 
 var globalConn net.Conn

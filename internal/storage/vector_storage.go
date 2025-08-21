@@ -15,7 +15,7 @@ import (
 	"time"
 
 	"github.com/DataIntelligenceCrew/go-faiss"
-	"github.com/Podcopic-Labs/ShibuDb/internal/wal"
+	"github.com/shibudb.org/shibudb-server/internal/wal"
 )
 
 type VectorEngineImpl struct {

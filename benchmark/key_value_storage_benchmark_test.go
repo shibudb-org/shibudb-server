@@ -6,7 +6,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/Podcopic-Labs/ShibuDb/internal/storage"
+	"github.com/shibudb.org/shibudb-server/internal/storage"
 )
 
 func BenchmarkShibuDB(b *testing.B) {

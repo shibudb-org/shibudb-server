@@ -11,8 +11,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/Podcopic-Labs/ShibuDb/internal/index"
-	"github.com/Podcopic-Labs/ShibuDb/internal/wal"
+	"github.com/shibudb.org/shibudb-server/internal/index"
+	"github.com/shibudb.org/shibudb-server/internal/wal"
 )
 
 type ShibuDB struct {

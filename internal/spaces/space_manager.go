@@ -9,7 +9,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/Podcopic-Labs/ShibuDb/internal/storage"
+	"github.com/shibudb.org/shibudb-server/internal/storage"
 
 	"github.com/DataIntelligenceCrew/go-faiss"
 )
