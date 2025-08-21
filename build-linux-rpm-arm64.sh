@@ -7,7 +7,6 @@ BUILDROOT="$PWD/build/rpm"
 RPMBUILD="$PWD/build/rpmbuild"
 PKG_ROOT="$BUILDROOT"
 FINAL_INSTALLER_DIR="$PWD/build/linux/rpm/arm64"
-FINAL_RPM="$FINAL_INSTALLER_DIR/${APP_NAME}-${VERSION}-1.aarch64.rpm"
 
 # Clean up old builds
 rm -rf "$BUILDROOT" "$RPMBUILD"
@@ -73,7 +72,7 @@ rm -rf "$TMP_TAR_DIR"
 cat > "$RPMBUILD/SPECS/$APP_NAME.spec" <<EOF
 Name:           $APP_NAME
 Version:        $VERSION
-Release:        1%{?dist}
+Release:        1
 Summary:        Lightweight Embedded Database
 
 License:        MIT
@@ -111,8 +110,15 @@ EOF
 # Build the RPM
 rpmbuild --define "_topdir $RPMBUILD" -ba "$RPMBUILD/SPECS/$APP_NAME.spec"
 
-# Move final RPM to organized location
-cp "$RPMBUILD/RPMS/aarch64/${APP_NAME}-${VERSION}-1.aarch64.rpm" "$FINAL_RPM"
+# Find the actual generated RPM file and move it to organized location
+GENERATED_RPM=$(find "$RPMBUILD/RPMS/aarch64" -name "${APP_NAME}-${VERSION}-*.aarch64.rpm" | head -1)
+if [ -z "$GENERATED_RPM" ]; then
+    echo "❌ Error: Could not find generated RPM file"
+    exit 1
+fi
+
+FINAL_RPM="$FINAL_INSTALLER_DIR/$(basename "$GENERATED_RPM")"
+cp "$GENERATED_RPM" "$FINAL_RPM"
 
 # Clean up temporary files
 echo "🧹 Cleaning up temporary files..."
