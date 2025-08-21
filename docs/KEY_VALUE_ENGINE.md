@@ -4,6 +4,7 @@
 
 - [Overview](#overview)
 - [Key-Value Space Management](#key-value-space-management)
+- [WAL Configuration for Key-Value Spaces](#wal-configuration-for-key-value-spaces)
 - [Basic Operations](#basic-operations)
 - [Advanced Operations](#advanced-operations)
 - [Data Types and Formats](#data-types-and-formats)
@@ -50,7 +51,18 @@ CREATE-SPACE users --engine key-value
 
 # Create with custom name
 CREATE-SPACE product_catalog --engine key-value
+
+# Create with WAL enabled (default, for enhanced durability)
+CREATE-SPACE durable_users --engine key-value --enable-wal
+
+# Create with WAL disabled (for maximum performance)
+CREATE-SPACE fast_cache --engine key-value --disable-wal
 ```
+
+**Parameters:**
+- `--engine key-value`: Specifies key-value engine type
+- `--enable-wal`: Enable Write-Ahead Logging for enhanced durability (default for key-value spaces)
+- `--disable-wal`: Disable Write-Ahead Logging for maximum performance
 
 **Note**: Only admin users can create spaces.
 
@@ -78,6 +90,51 @@ USE users
 # Verify current space (prompt will show current space)
 [users]>
 ```
+
+### WAL Configuration for Key-Value Spaces
+
+Key-value spaces support configurable Write-Ahead Logging (WAL) to balance performance and durability:
+
+#### Default Behavior (WAL Enabled)
+- **Performance**: Slightly slower due to WAL overhead
+- **Durability**: Enhanced durability with full crash recovery
+- **Recovery**: Complete recovery from crashes and unexpected shutdowns
+- **Use Case**: Traditional database workloads requiring strong durability
+
+#### WAL Disabled
+- **Performance**: Maximum write performance (~20-30% faster)
+- **Durability**: Basic durability through data file persistence
+- **Recovery**: Limited recovery capabilities
+- **Use Case**: High-performance applications where some data loss is acceptable
+
+#### WAL Configuration Examples
+
+```bash
+# Create key-value space with WAL enabled (enhanced durability, default)
+CREATE-SPACE production_data --engine key-value --enable-wal
+
+# Create key-value space with WAL disabled (maximum performance)
+CREATE-SPACE cache_data --engine key-value --disable-wal
+
+# Create key-value space with WAL enabled (explicit, same as default)
+CREATE-SPACE durable_data --engine key-value
+```
+
+#### When to Use WAL
+
+**Use WAL Enabled (`--enable-wal` or default) for:**
+- Production systems with critical data
+- User data, session information, and configuration
+- Applications requiring strong durability guarantees
+- Systems where data loss is unacceptable
+- Traditional database workloads
+
+**Use WAL Disabled (`--disable-wal`) for:**
+- High-performance caching layers
+- Temporary or session data that can be regenerated
+- Development and testing environments
+- Applications where some data loss is acceptable
+- Real-time processing with strict latency requirements
 
 ### Deleting a Space
 
@@ -324,9 +381,12 @@ PUT data:large:1:chunk3 "third_part_of_data"
 ### 1. User Management System
 
 ```bash
-# Create user space
+# Create user space (WAL enabled by default for durability)
 CREATE-SPACE user_management --engine key-value
 USE user_management
+
+# Alternative: Create with explicit WAL configuration
+CREATE-SPACE user_management_durable --engine key-value --enable-wal
 
 # Store user profiles
 PUT users:123:profile "{\"name\":\"John Doe\",\"email\":\"john@example.com\",\"age\":30}"
@@ -370,9 +430,12 @@ PUT flags:maintenance_mode:enabled "false"
 ### 3. Caching Layer
 
 ```bash
-# Create cache space
-CREATE-SPACE cache --engine key-value
+# Create cache space (WAL disabled for maximum performance)
+CREATE-SPACE cache --engine key-value --disable-wal
 USE cache
+
+# Alternative: Create with WAL enabled if cache durability is important
+CREATE-SPACE persistent_cache --engine key-value --enable-wal
 
 # Cache API responses
 PUT cache:api:users:123 "{\"id\":123,\"name\":\"John Doe\",\"email\":\"john@example.com\"}"
@@ -514,7 +577,7 @@ shibudb manager 9090 stats
 
 #### From WAL (Write-Ahead Log)
 
-If the server crashes, data is automatically recovered from the WAL on restart:
+If the server crashes, data is automatically recovered from the WAL on restart (if WAL is enabled):
 
 ```bash
 # Restart server (recovery happens automatically)
@@ -524,6 +587,8 @@ sudo shibudb start 9090
 # Check logs for recovery messages
 tail -f /usr/local/var/log/shibudb.log
 ```
+
+**Note**: WAL recovery is only available if the space was created with `--enable-wal` (default for key-value spaces). Spaces created with `--disable-wal` have limited recovery capabilities.
 
 #### Manual Data Export
 
