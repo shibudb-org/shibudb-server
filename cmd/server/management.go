@@ -5,7 +5,27 @@ import (
 	"fmt"
 	"net/http"
 	"sync"
+	"time"
 )
+
+// SystemStats holds system resource information
+type SystemStats struct {
+	Memory struct {
+		Alloc      uint64  `json:"alloc_bytes"`
+		TotalAlloc uint64  `json:"total_alloc_bytes"`
+		Sys        uint64  `json:"sys_bytes"`
+		NumGC      uint32  `json:"num_gc"`
+		AllocMB    float64 `json:"alloc_mb"`
+		SysMB      float64 `json:"sys_mb"`
+		UsageMB    float64 `json:"usage_mb"`
+	} `json:"memory"`
+	CPU struct {
+		NumCPU     int     `json:"num_cpu"`
+		UsagePercent float64 `json:"usage_percent"`
+	} `json:"cpu"`
+	Goroutines int `json:"goroutines"`
+	Timestamp  time.Time `json:"timestamp"`
+}
 
 // ManagementServer provides HTTP endpoints for runtime server management
 type ManagementServer struct {
@@ -13,18 +33,22 @@ type ManagementServer struct {
 	port        string
 	server      *http.Server
 	mu          sync.RWMutex
+	// System monitoring
+	systemMonitor *SystemMonitor
 }
 
 // NewManagementServer creates a new management server
 func NewManagementServer(connManager *ConnectionManager, port string) *ManagementServer {
 	ms := &ManagementServer{
-		connManager: connManager,
-		port:        port,
+		connManager:   connManager,
+		port:          port,
+		systemMonitor: NewSystemMonitor(),
 	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", ms.healthHandler)
 	mux.HandleFunc("/stats", ms.statsHandler)
+	mux.HandleFunc("/system", ms.systemHandler)
 	mux.HandleFunc("/limit", ms.limitHandler)
 	mux.HandleFunc("/limit/increase", ms.increaseLimitHandler)
 	mux.HandleFunc("/limit/decrease", ms.decreaseLimitHandler)
@@ -48,6 +72,32 @@ func (ms *ManagementServer) Stop() error {
 	return ms.server.Close()
 }
 
+// getSystemStats collects current system resource information
+func (ms *ManagementServer) getSystemStats() SystemStats {
+	var stats SystemStats
+	stats.Timestamp = time.Now()
+
+	// Get memory information
+	memInfo := GetMemoryInfo()
+	stats.Memory.Alloc = uint64(memInfo["alloc_bytes"].(uint64))
+	stats.Memory.TotalAlloc = uint64(memInfo["total_alloc_bytes"].(uint64))
+	stats.Memory.Sys = uint64(memInfo["sys_bytes"].(uint64))
+	stats.Memory.NumGC = uint32(memInfo["num_gc"].(uint32))
+	stats.Memory.AllocMB = memInfo["alloc_mb"].(float64)
+	stats.Memory.SysMB = memInfo["sys_mb"].(float64)
+	stats.Memory.UsageMB = memInfo["usage_mb"].(float64)
+
+	// Get system information
+	sysInfo := GetSystemInfo()
+	stats.CPU.NumCPU = sysInfo["num_cpu"].(int)
+	stats.Goroutines = sysInfo["goroutines"].(int)
+	
+	// Calculate CPU usage using the system monitor
+	stats.CPU.UsagePercent = ms.systemMonitor.CalculateCPUUsage()
+
+	return stats
+}
+
 // healthHandler returns server health status
 func (ms *ManagementServer) healthHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -64,14 +114,50 @@ func (ms *ManagementServer) healthHandler(w http.ResponseWriter, r *http.Request
 	json.NewEncoder(w).Encode(response)
 }
 
-// statsHandler returns connection statistics
+// statsHandler returns connection statistics with system info
 func (ms *ManagementServer) statsHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	stats := ms.connManager.GetConnectionStats()
+	// Get connection stats
+	connStats := ms.connManager.GetConnectionStats()
+	
+	// Get system stats
+	systemStats := ms.getSystemStats()
+	
+	// Combine both stats
+	response := map[string]interface{}{
+		"connections": connStats,
+		"system": map[string]interface{}{
+			"memory": map[string]interface{}{
+				"alloc_mb":     systemStats.Memory.AllocMB,
+				"sys_mb":       systemStats.Memory.SysMB,
+				"usage_mb":     systemStats.Memory.UsageMB,
+				"num_gc":       systemStats.Memory.NumGC,
+			},
+			"cpu": map[string]interface{}{
+				"num_cpu":      systemStats.CPU.NumCPU,
+				"usage_percent": systemStats.CPU.UsagePercent,
+			},
+			"goroutines": systemStats.Goroutines,
+			"timestamp":  systemStats.Timestamp,
+		},
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
+}
+
+// systemHandler returns detailed system resource information
+func (ms *ManagementServer) systemHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	stats := ms.getSystemStats()
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(stats)

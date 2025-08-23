@@ -771,6 +771,8 @@ func handleManagerCommand(args []string) {
 		getManagerStatus(baseURL)
 	case "stats":
 		getManagerStats(baseURL)
+	case "system":
+		getManagerSystem(baseURL)
 	case "limit":
 		if len(args) < 3 {
 			fmt.Println("Usage: shibudb manager <port> limit <new_limit>")
@@ -846,7 +848,8 @@ func testManagementConnectivity(baseURL string) bool {
 func printManagerUsage() {
 	fmt.Println(`Manager Commands:
   status                    Show current connection limit and active connections
-  stats                     Show detailed connection statistics
+  stats                     Show detailed connection statistics with system info
+  system                    Show detailed system resource information
   limit <new_limit>         Set connection limit to specific value
   increase [amount]         Increase connection limit by amount (default: 100)
   decrease [amount]         Decrease connection limit by amount (default: 100)
@@ -855,11 +858,12 @@ func printManagerUsage() {
 
 Examples:
   shibudb manager 4444 status
+  shibudb manager 4444 stats
+  shibudb manager 4444 system
   shibudb manager 4444 limit 2000
   shibudb manager 4444 increase 500
   shibudb manager 4444 decrease 200
-  shibudb manager 4444 reset
-  shibudb manager 4444 stats`)
+  shibudb manager 4444 reset`)
 }
 
 func makeManagerRequest(method, url string, body interface{}) (*http.Response, error) {
@@ -930,11 +934,34 @@ func getManagerStats(baseURL string) {
 		return
 	}
 
-	fmt.Printf("Connection Statistics:\n")
-	fmt.Printf("Active Connections: %d\n", int(result["active_connections"].(float64)))
-	fmt.Printf("Max Connections: %d\n", int(result["max_connections"].(float64)))
-	fmt.Printf("Usage Percentage: %.1f%%\n", result["usage_percentage"].(float64))
-	fmt.Printf("Available Slots: %d\n", int(result["available_slots"].(float64)))
+	fmt.Println("\n📊 Connection & System Statistics:")
+	fmt.Println("==================================")
+	
+	// Connection statistics
+	if connections, ok := result["connections"].(map[string]interface{}); ok {
+		fmt.Printf("Active Connections: %d\n", int(connections["active_connections"].(float64)))
+		fmt.Printf("Max Connections: %d\n", int(connections["max_connections"].(float64)))
+		fmt.Printf("Usage Percentage: %.2f%%\n", connections["usage_percentage"])
+		fmt.Printf("Available Slots: %d\n", int(connections["available_slots"].(float64)))
+	} else {
+		// Fallback for old format
+		fmt.Printf("Active Connections: %d\n", int(result["active_connections"].(float64)))
+		fmt.Printf("Max Connections: %d\n", int(result["max_connections"].(float64)))
+		fmt.Printf("Usage Percentage: %.2f%%\n", result["usage_percentage"])
+		fmt.Printf("Available Slots: %d\n", int(result["available_slots"].(float64)))
+	}
+	
+	// System information
+	if system, ok := result["system"].(map[string]interface{}); ok {
+		fmt.Println("\n🖥️  System Resources:")
+		if memory, ok := system["memory"].(map[string]interface{}); ok {
+			fmt.Printf("Memory Usage: %.2f MB\n", memory["usage_mb"])
+		}
+		if cpu, ok := system["cpu"].(map[string]interface{}); ok {
+			fmt.Printf("CPU Usage: %.2f%% (%d cores)\n", cpu["usage_percent"], int(cpu["num_cpu"].(float64)))
+		}
+		fmt.Printf("Active Goroutines: %d\n", int(system["goroutines"].(float64)))
+	}
 }
 
 func setManagerLimit(baseURL string, newLimit int32) {
@@ -1035,6 +1062,52 @@ func checkManagerHealth(baseURL string) {
 		fmt.Printf("Service: %s\n", result["service"])
 	} else {
 		fmt.Printf("Error: Health check failed\n")
+	}
+}
+
+func getManagerSystem(baseURL string) {
+	fmt.Printf("Getting system resource information from: %s\n", baseURL)
+
+	resp, err := makeManagerRequest("GET", baseURL+"/system", nil)
+	if err != nil {
+		fmt.Printf("Error: Failed to connect to management server: %v\n", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	var result map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		fmt.Printf("Error: Failed to parse response: %v\n", err)
+		return
+	}
+
+	if resp.StatusCode == http.StatusOK {
+		fmt.Println("\n🖥️  System Resource Information:")
+		fmt.Println("==================================")
+		
+		// Memory information
+		if memory, ok := result["memory"].(map[string]interface{}); ok {
+			fmt.Printf("Memory Usage: %.2f MB (Allocated: %.2f MB, System: %.2f MB)\n",
+				memory["usage_mb"], memory["alloc_mb"], memory["sys_mb"])
+			fmt.Printf("Total Allocated: %.2f MB\n", float64(memory["total_alloc_bytes"].(float64))/1024/1024)
+			fmt.Printf("Garbage Collections: %d\n", int(memory["num_gc"].(float64)))
+		}
+		
+		// CPU information
+		if cpu, ok := result["cpu"].(map[string]interface{}); ok {
+			fmt.Printf("CPU Cores: %d\n", int(cpu["num_cpu"].(float64)))
+			fmt.Printf("CPU Usage: %.2f%%\n", cpu["usage_percent"])
+		}
+		
+		// Goroutines
+		fmt.Printf("Active Goroutines: %d\n", int(result["goroutines"].(float64)))
+		
+		// Timestamp
+		if timestamp, ok := result["timestamp"].(string); ok {
+			fmt.Printf("Timestamp: %s\n", timestamp)
+		}
+	} else {
+		fmt.Printf("Error: Failed to get system information\n")
 	}
 }
 
