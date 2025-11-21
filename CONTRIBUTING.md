@@ -24,19 +24,14 @@ This project and everyone participating in it is governed by our Code of Conduct
 
 - Go 1.23.0 or later
 - Git
-- Make (optional, for build scripts)
+- Make (required for build scripts)
 
-### Fork and Clone
+### Clone
 
-1. Fork the repository on GitHub
-2. Clone your fork locally:
+Clone the canonical repository locally:
    ```bash
-   git clone https://github.com/YOUR_USERNAME/ShibuDb.git
-   cd ShibuDb
-   ```
-3. Add the upstream repository:
-   ```bash
-   git remote add upstream https://github.com/shibudb.org/shibudb-server.git
+   git clone https://github.com/shibudb-org/shibudb-server.git
+   cd shibudb-server
    ```
 
 ## Development Setup
@@ -44,40 +39,30 @@ This project and everyone participating in it is governed by our Code of Conduct
 ### 1. Install Dependencies
 
 ```bash
-# Install Go dependencies
-go mod download
-
-# Verify the build
-go build -o shibudb main.go
+# Install dependencies and verify the toolchain
+install go version 1.23.0 or above
 ```
 
 ### 2. Run Tests
 
 ```bash
-# Run all tests
-go test ./...
-
-# Run tests with coverage
-go test -cover ./...
+# Run all tests (unit + integration)
+make test
 
 # Run benchmarks
-go test -bench=. ./benchmark/
+make benchmark
 
 # Run E2E tests
-go test ./E2ETests/
-```
+make e2e-test
 
-### 3. Build for Different Platforms
+# Start local server (Default port: 4444, Default username: admin, Default password: admin)
+make start-local-server
 
-```bash
-# Build for current platform
-go build -o shibudb main.go
+# Connect to local server using shibudb-cli (Connects with default credentials and port)
+make connect-local-client
 
-# Build for Linux AMD64
-GOOS=linux GOARCH=amd64 go build -o shibudb-linux-amd64 main.go
-
-# Build for macOS ARM64
-GOOS=darwin GOARCH=arm64 go build -o shibudb-darwin-arm64 main.go
+# Database files cleanup after running tests
+make clean-db
 ```
 
 ## Coding Standards
@@ -134,48 +119,6 @@ func (s *Storage) Get(key string) ([]byte, error) {
 - Use table-driven tests for multiple scenarios
 - Mock external dependencies
 
-### Test Structure
-
-```go
-func TestStorage_Get(t *testing.T) {
-    tests := []struct {
-        name    string
-        key     string
-        want    []byte
-        wantErr bool
-    }{
-        {
-            name:    "valid key",
-            key:     "test-key",
-            want:    []byte("test-value"),
-            wantErr: false,
-        },
-        {
-            name:    "empty key",
-            key:     "",
-            want:    nil,
-            wantErr: true,
-        },
-    }
-    
-    for _, tt := range tests {
-        t.Run(tt.name, func(t *testing.T) {
-            s := NewStorage()
-            got, err := s.Get(tt.key)
-            
-            if (err != nil) != tt.wantErr {
-                t.Errorf("Storage.Get() error = %v, wantErr %v", err, tt.wantErr)
-                return
-            }
-            
-            if !reflect.DeepEqual(got, tt.want) {
-                t.Errorf("Storage.Get() = %v, want %v", got, tt.want)
-            }
-        })
-    }
-}
-```
-
 ### Benchmarking
 
 - Add benchmarks for performance-critical code
@@ -186,28 +129,25 @@ func TestStorage_Get(t *testing.T) {
 
 ### Before Submitting
 
-1. **Update your fork:**
+1. **Create a feature branch (required before making changes):**
    ```bash
-   git fetch upstream
-   git checkout main
-   git merge upstream/main
+   git checkout -b feature/sdb-{github issue id}/{your-feature-name}
    ```
 
-2. **Create a feature branch:**
-   ```bash
-   git checkout -b feature/your-feature-name
-   ```
+3. **Open or reference a GitHub issue (required for every contribution):**
+   - Find an existing issue or create a new one describing the problem/feature.
+   - Note the issue number for your PR title and description.
 
-3. **Make your changes:**
+4. **Make your changes:**
    - Write your code following the coding standards
    - Add tests for new functionality
    - Update documentation if needed
    - Ensure all tests pass
 
-4. **Commit your changes:**
+5. **Commit your changes:**
    ```bash
    git add .
-   git commit -m "Add feature: brief description"
+   git commit -m "feat: brief description"
    ```
 
 ### Commit Message Guidelines
@@ -216,10 +156,6 @@ Use conventional commit format:
 
 ```
 <type>(<scope>): <description>
-
-[optional body]
-
-[optional footer]
 ```
 
 Types:
@@ -242,14 +178,17 @@ docs(readme): update installation instructions
 
 1. Push your branch to your fork:
    ```bash
-   git push origin feature/your-feature-name
+   git push origin feature/sdb-{github issue id}/{your-feature-name}
    ```
 
 2. Create a Pull Request on GitHub
+   - **PR title format (required):** `<GitHub issue reference>: <concise summary>`
+     - Example: `#123: add vector eviction policy`
+   - Include a direct link to the GitHub issue in the PR body (e.g., `Fixes #123`).
 
 3. Fill out the PR template with:
    - Description of changes
-   - Related issue number
+   - Related issue number (link required)
    - Testing performed
    - Breaking changes (if any)
 
@@ -259,14 +198,6 @@ docs(readme): update installation instructions
 - Address review comments promptly
 - Keep PRs focused and reasonably sized
 - Update PR description if significant changes are made
-
-## Release Process
-
-### Version Management
-
-- Use semantic versioning (MAJOR.MINOR.PATCH)
-- Update version in `CHANGELOG.txt`
-- Tag releases on GitHub
 
 ### Release Checklist
 
