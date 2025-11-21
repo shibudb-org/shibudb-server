@@ -1,0 +1,12 @@
+# ShibuDB Changelog
+
+## Version History
+
+### 1.0.1 - 2025-11-21
+- Initial release
+- Basic database functionality
+- FAISS vector engine support
+- Key-Value engine support
+- Support for multiple platforms (Linux AMD64/ARM64, macOS ARM64)
+
+## Current Version: 1.0.1

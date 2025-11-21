@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<installer-gui-script minSpecVersion="1">
+    <title>ShibuDB Installer</title>
+    <options customize="never" allow-external-scripts="no"/>
+    <domains enable_anywhere="true"/>
+    <background file="shibudb.icns" alignment="center"/>
+    <welcome file="welcome.html"/>
+    <choices-outline>
+        <line choice="default">
+            <pkg-ref id="com.shibudb.core"/>
+        </line>
+    </choices-outline>
+    <pkg-ref id="com.shibudb.core" auth="Root">shibudb-component.pkg</pkg-ref>
+</installer-gui-script>

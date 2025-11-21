@@ -1,0 +1,118 @@
+name: Release Builds
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - CHANGELOG.txt
+  workflow_dispatch:
+
+jobs:
+  tests:
+    name: Verify Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libopenblas-dev libgomp1
+
+      - name: Run unit tests
+        run: make test
+
+      - name: Start test server
+        run: ./scripts/start-test-server.sh
+
+      - name: Run E2E tests
+        run: make e2e-test
+
+      - name: Stop test server
+        if: always()
+        run: ./scripts/stop-test-server.sh
+
+  build:
+    name: Build ${{ matrix.script }}
+    needs: tests
+    runs-on: ${{ matrix.os }}
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    strategy:
+      matrix:
+        include:
+          - script: build-mac-pkg-arm64.sh
+            os: macos-latest
+            artifact: build/mac/apple_silicon
+          - script: build-macos-cli-tarball.sh
+            os: macos-latest
+            artifact: build/mac/apple_silicon
+          - script: build-linux-deb-amd64.sh
+            os: ubuntu-latest
+            artifact: build/linux/deb/amd64
+          - script: build-linux-rpm-amd64.sh
+            os: ubuntu-latest
+            artifact: build/linux/rpm/amd64
+          - script: build-linux-deb-arm64.sh
+            os: ubuntu-22.04-arm
+            artifact: build/linux/deb/arm64
+          - script: build-linux-rpm-arm64.sh
+            os: ubuntu-22.04-arm
+            artifact: build/linux/rpm/arm64
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Determine release version
+        id: version
+        run: |
+          VERSION=$(./scripts/get_version.sh)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Ensure build scripts are executable
+        run: chmod +x build-*.sh
+
+      - name: Run ${{ matrix.script }}
+        run: "./${{ matrix.script }}"
+
+      - name: Upload artifacts
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.script }}-${{ github.sha }}
+          path: ${{ matrix.artifact }}
+          retention-days: 14
+
+  publish:
+    name: Publish Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.build.outputs.version }}
+          name: ShibuDB v${{ needs.build.outputs.version }}
+          generate_release_notes: true
+          files: release-assets/**/*
+

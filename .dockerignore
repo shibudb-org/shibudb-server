@@ -1,0 +1,67 @@
+# Git
+.git
+.gitignore
+
+# Build artifacts
+build/
+dist/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test files
+*.test
+*.out
+coverage.out
+coverage.html
+
+# Database files
+*.db
+*.dat
+*.faiss
+
+# IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Documentation
+docs/
+*.md
+!README.md
+
+# Scripts (keep only essential ones)
+scripts/
+!scripts/get_version.sh
+
+# Resources (keep only lib files)
+resources/
+!resources/lib/
+
+# Temporary files
+tmp/
+temp/
+
+# Docker
+Dockerfile
+.dockerignore
+
+# CI/CD
+.github/
+.gitlab-ci.yml
+.travis.yml
+
+# License and legal
+LICENSE
+CHANGELOG.txt 
