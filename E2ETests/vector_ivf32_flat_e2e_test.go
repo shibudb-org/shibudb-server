@@ -55,4 +55,16 @@ func TestVectorIVF32FlatE2E(t *testing.T) {
 	if !strings.Contains(resp, expectedID) {
 		t.Fatalf("Expected top-1 result to be %s, got: %s", expectedID, resp)
 	}
+
+	// Delete vector 1050 and verify get-vector returns not found
+	q = models.Query{Type: models.TypeDeleteVector, Space: space, Key: "1050"}
+	resp = sendQueryAndGetResponse(q, conn, reader)
+	if !strings.Contains(resp, "VECTOR_DELETED") && !strings.Contains(resp, "OK") {
+		t.Fatalf("Expected DELETE_VECTOR success, got: %s", resp)
+	}
+	q = models.Query{Type: models.TypeGetVector, Space: space, Key: "1050"}
+	resp = sendQueryAndGetResponse(q, conn, reader)
+	if !strings.Contains(resp, "ERROR") && !strings.Contains(resp, "not found") {
+		t.Fatalf("Expected GET_VECTOR after delete to fail with not found, got: %s", resp)
+	}
 }

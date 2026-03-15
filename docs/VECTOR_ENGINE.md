@@ -7,6 +7,7 @@
 - [WAL Configuration for Vector Spaces](#wal-configuration-for-vector-spaces)
 - [FAISS Index Types](#faiss-index-types)
 - [Basic Vector Operations](#basic-vector-operations)
+- [Delete Vector](#delete-vector---remove-vectors)
 - [Advanced Search Operations](#advanced-search-operations)
 - [Distance Metrics](#distance-metrics)
 - [Performance Optimization](#performance-optimization)
@@ -132,12 +133,14 @@ ShibuDb supports various FAISS index types with hardcoded configurations and com
 
 #### Single Index Types
 
-| Index Type | Description | Use Case | Memory | Speed | Min Vectors Required |
-|------------|-------------|----------|--------|-------|---------------------|
-| `Flat` | Exact search | Small datasets, high accuracy | High | Slow | 0 |
-| `HNSW{n}` | Hierarchical Navigable Small World | Fast similarity search | Medium | Fast | 0 |
-| `IVF{n}` | Inverted file index | Large datasets | Low | Medium | n |
-| `PQ{n}` | Product quantization | Very large datasets | Very Low | Fast | 256 |
+| Index Type | Description | Use Case | Memory | Speed | Min Vectors Required | Delete |
+|------------|-------------|----------|--------|-------|---------------------|--------|
+| `Flat` | Exact search | Small datasets, high accuracy | High | Slow | 0 | Yes |
+| `HNSW{n}` | Hierarchical Navigable Small World | Fast similarity search | Medium | Fast | 0 | **No** |
+| `IVF{n}` | Inverted file index | Large datasets | Low | Medium | n | Yes |
+| `PQ{n}` | Product quantization | Very large datasets | Very Low | Fast | 256 | Yes |
+
+*"Delete" column: whether `DELETE-VECTOR` is supported for that index type.*
 
 #### Hardcoded Index Variants
 
@@ -294,6 +297,7 @@ CREATE-SPACE hnsw256 --engine vector --dimension 128 --index-type HNSW256 # 256 
 - No training required
 - Search available immediately (no minimum vectors required)
 - Number suffix indicates number of neighbors (higher = more accurate but slower)
+- **Vector deletion not supported**: `DELETE-VECTOR` is not available for HNSW indices; the operation returns an error.
 
 ### 3. IVF Index (Inverted File Index)
 
@@ -508,6 +512,27 @@ INSERT-VECTOR 1001 1.5,2.5,3.5,4.5,5.5,6.5,7.5,8.5
 # Get vector by ID
 GET-VECTOR 1
 ```
+
+### DELETE-VECTOR - Remove Vectors
+
+Remove a vector by ID. The vector is marked as deleted (tombstone) in the data file, so it no longer appears in search results and `GET-VECTOR` returns "not found". Deletion is persisted across server restarts.
+
+```bash
+# Delete a vector by ID
+DELETE-VECTOR 1
+DELETE-VECTOR 1050
+```
+
+**Format**: `DELETE-VECTOR <id>`
+
+**Index support**: Vector deletion is **not supported for HNSW index types** (including `HNSW{n}` and composite indices like `HNSW{n},Flat`). For those spaces, `DELETE-VECTOR` returns an error: *"vector deletion not supported for HNSW index type"*. Use Flat, IVF, or PQ index types if you need to delete vectors.
+
+| Index type   | DELETE-VECTOR supported |
+|-------------|--------------------------|
+| Flat        | Yes                      |
+| IVF, IVF,Flat, IVF,PQ | Yes              |
+| PQ, PQ,Flat | Yes                      |
+| **HNSW, HNSW,Flat, HNSW,PQ** | **No**        |
 
 ### SEARCH-TOPK - Similarity Search
 
@@ -969,7 +994,20 @@ INSERT-VECTOR user@123 1.0,2.0,3.0,4.0,5.0
 # May cause issues
 ```
 
-#### 3. "Operation not supported: not a vector space" Error
+#### 3. "Vector deletion not supported for HNSW index type" Error
+
+**Problem**: `DELETE-VECTOR` was used on a space that uses an HNSW index (e.g. `HNSW32`, `HNSW64,Flat`).
+
+**Solution**: HNSW indices do not support removing vectors. Either use a different index type that supports deletion (Flat, IVF, PQ), or avoid deleting vectors in that space.
+
+```bash
+# If you need deletion, use Flat or IVF instead of HNSW
+CREATE-SPACE my_vectors --engine vector --dimension 128 --index-type Flat
+# or
+CREATE-SPACE my_vectors --engine vector --dimension 128 --index-type IVF32
+```
+
+#### 4. "Operation not supported: not a vector space" Error
 
 **Problem**: Trying to use vector operations in key-value space
 
@@ -985,7 +1023,7 @@ USE my_vectors
 INSERT-VECTOR 1 1.0,2.0,3.0,4.0,5.0
 ```
 
-#### 4. Performance Issues
+#### 5. Performance Issues
 
 **Problem**: Slow search or high memory usage
 

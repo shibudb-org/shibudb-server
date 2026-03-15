@@ -252,6 +252,49 @@ func TestVectorEngineImpl_InsertAndSearch(t *testing.T) {
 		}
 	})
 
+	t.Run("Remove persists after restart", func(t *testing.T) {
+		cleanDataPath := "testdata/vector_data_remove_persist.db"
+		cleanIndexPath := "testdata/vector_index_remove_persist.faiss"
+		cleanWalPath := "testdata/vector_wal_remove_persist.db"
+
+		os.Remove(cleanDataPath)
+		os.Remove(cleanIndexPath)
+		os.Remove(cleanWalPath)
+
+		// Use WAL disabled so restart only relies on tombstone in data file (avoids WAL replay issues after close)
+		ve1, err := NewVectorEngine(cleanDataPath, cleanIndexPath, cleanWalPath, maxVectorSize, indexDesc, metric, false)
+		if err != nil {
+			t.Fatalf("Failed to create engine: %v", err)
+		}
+		id := int64(7777)
+		vec := randomVector(maxVectorSize)
+		if err := ve1.InsertVector(id, vec); err != nil {
+			t.Fatalf("InsertVector failed: %v", err)
+		}
+		time.Sleep(500 * time.Millisecond)
+		if err := ve1.RemoveVector(id); err != nil {
+			t.Fatalf("RemoveVector failed: %v", err)
+		}
+		ve1.Close()
+
+		// Reopen and verify vector is still gone (tombstone in data file)
+		ve2, err := NewVectorEngine(cleanDataPath, cleanIndexPath, cleanWalPath, maxVectorSize, indexDesc, metric, false)
+		if err != nil {
+			t.Fatalf("Failed to reopen engine: %v", err)
+		}
+		defer ve2.Close()
+		defer func() {
+			os.Remove(cleanDataPath)
+			os.Remove(cleanIndexPath)
+			os.Remove(cleanWalPath)
+		}()
+
+		_, err = ve2.GetVectorByID(id)
+		if err == nil {
+			t.Error("Expected error when getting removed vector after restart")
+		}
+	})
+
 	t.Run("Insert after remove", func(t *testing.T) {
 		// Create a fresh engine for this test
 		cleanDataPath := "testdata/vector_data_insert_after_remove.db"

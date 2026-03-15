@@ -55,4 +55,11 @@ func TestVectorHNSW32FlatE2E(t *testing.T) {
 	if !strings.Contains(resp, expectedID) {
 		t.Fatalf("Expected top-1 result to be %s, got: %s", expectedID, resp)
 	}
+
+	// HNSW does not support vector deletion; DELETE_VECTOR must return an error
+	q = models.Query{Type: models.TypeDeleteVector, Space: space, Key: "1050"}
+	resp = sendQueryAndGetResponse(q, conn, reader)
+	if !strings.Contains(resp, "ERROR") || !strings.Contains(resp, "not supported") {
+		t.Fatalf("Expected DELETE_VECTOR to fail with not supported for HNSW, got: %s", resp)
+	}
 }

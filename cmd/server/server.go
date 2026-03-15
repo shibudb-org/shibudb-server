@@ -405,7 +405,7 @@ func handleConnection(conn net.Conn, spaceManager *spaces.SpaceManager, authMana
 				continue
 			}
 		// Vector engine access checks
-		case "INSERT_VECTOR":
+		case "INSERT_VECTOR", "DELETE_VECTOR":
 			if !(user.Role == auth.RoleAdmin || authManager.HasRole(user, query.Space, auth.RoleWrite)) {
 				fmt.Fprintf(conn, `{"status":"ERROR","message":"write permission denied"}`+"\n")
 				continue

@@ -18,6 +18,13 @@ import (
 	"github.com/shibudb.org/shibudb-server/internal/wal"
 )
 
+// tombstoneMarker is the first float32 of a vector record meaning "deleted" (same data file, no extra file).
+// Quiet NaN 0x7FC00000 — reserved; vectors with NaN in first dimension are not supported.
+const tombstoneMarker = uint32(0x7FC00000)
+
+// ErrDeletionNotSupported is returned by RemoveVector when the index type (e.g. HNSW) does not support vector deletion.
+var ErrDeletionNotSupported = errors.New("vector deletion not supported for HNSW index type")
+
 type VectorEngineImpl struct {
 	dataFile      *os.File
 	indexFile     string
@@ -107,7 +114,7 @@ func NewVectorEngine(dataPath, indexPath, walPath string, maxVectorSize int, ind
 		flushCh:  make(chan struct{}, 1),
 	}
 
-	// Rebuild fileOffsets from data file.
+	// Rebuild fileOffsets from data file (last record per id wins; tombstones mark deleted).
 	if err := e.rebuildOffsetsFromDataFile(); err != nil {
 		return nil, fmt.Errorf("rebuildOffsetsFromDataFile: %w", err)
 	}
@@ -337,21 +344,34 @@ func (ve *VectorEngineImpl) GetVectorByID(id int64) ([]float32, error) {
 	if _, err := ve.dataFile.ReadAt(buf, offset); err != nil {
 		return nil, fmt.Errorf("read vector at offset %d: %w", offset, err)
 	}
+	// Tombstone: same record format, first float32 is reserved marker (see tombstoneMarker).
+	if len(buf) >= 12 && binary.LittleEndian.Uint32(buf[8:12]) == tombstoneMarker {
+		return nil, fmt.Errorf("ID %d not found", id)
+	}
 	return bytesToFloat32Array(buf[8:])
 }
 
 func (ve *VectorEngineImpl) RemoveVector(id int64) error {
-	// 1) WAL first - log the deletion (if enabled)
+	// HNSW index type does not support remove_ids in FAISS; reject deletion up front.
+	if strings.HasPrefix(ve.indexType, "HNSW") {
+		return ErrDeletionNotSupported
+	}
+
+	// 1) Persist tombstone in the same data file (like key_value_storage Delete: no extra file).
+	if err := ve.appendTombstoneToDataFile(id); err != nil {
+		return err
+	}
+
+	// 2) WAL - log the deletion (if enabled) for crash recovery
 	if ve.wal != nil {
 		key := make([]byte, 8)
 		binary.LittleEndian.PutUint64(key, uint64(id))
-		// Use empty value to indicate deletion
 		if err := ve.wal.WriteEntry(string(key), ""); err != nil {
 			return err
 		}
 	}
 
-	// 2) Remove from FAISS index and tracking
+	// 3) Remove from FAISS index and pendingAdd; fileOffsets[id] already points to tombstone
 	if err := ve.removeAfterWAL(id); err != nil {
 		return err
 	}
@@ -385,9 +405,35 @@ func (ve *VectorEngineImpl) removeAfterWAL(id int64) error {
 	// Remove from pending additions if it exists there
 	delete(ve.pendingAdd, id)
 
-	// Remove from file offsets tracking
-	delete(ve.fileOffsets, id)
+	// Do not delete from fileOffsets: RemoveVector already wrote a tombstone and set fileOffsets[id]
+	// to that offset so GetVectorByID returns "not found" and rebuildOffsetsFromDataFile keeps it after restart.
 
+	return nil
+}
+
+// appendTombstoneToDataFile appends a tombstone record for id to the data file (same format as
+// normal records; first float32 of payload = tombstoneMarker) and updates fileOffsets[id].
+// Same pattern as key_value_storage.Delete: persist delete on disk in the main file.
+func (ve *VectorEngineImpl) appendTombstoneToDataFile(id int64) error {
+	ve.lock.Lock()
+	defer ve.lock.Unlock()
+
+	pos, err := ve.dataFile.Seek(0, io.SeekEnd)
+	if err != nil {
+		return err
+	}
+	recordSize := 8 + 4*ve.maxVectorSize
+	buf := make([]byte, recordSize)
+	binary.LittleEndian.PutUint64(buf[0:8], uint64(id))
+	binary.LittleEndian.PutUint32(buf[8:12], tombstoneMarker)
+	// rest is zero; same size as a normal vector record
+	if _, err := ve.dataFile.Write(buf); err != nil {
+		return err
+	}
+	if err := ve.dataFile.Sync(); err != nil {
+		return err
+	}
+	ve.fileOffsets[id] = pos
 	return nil
 }
 

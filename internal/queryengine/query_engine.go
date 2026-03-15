@@ -279,6 +279,32 @@ func (qe *QueryEngine) Execute(query models.Query) (string, error) {
 			return "", err
 		}
 		return "VECTOR_INSERTED", nil
+	case models.TypeDeleteVector:
+		if query.Space == "" {
+			return "", errors.New("no space selected")
+		}
+		eng, ok := qe.spaceManager.GetSpace(query.Space)
+		if !ok {
+			return "", errors.New("space does not exist")
+		}
+		meta, metaOk := qe.spaceManager.SpaceMeta(query.Space)
+		if !metaOk || meta.EngineType != "vector" {
+			return "", errors.New("operation not supported: not a vector space")
+		}
+		engine, ok := eng.(storage.VectorEngine)
+		if !ok {
+			return "", errors.New("internal error: engine is not VectorEngine")
+		}
+		var id int64
+		_, err := fmt.Sscanf(query.Key, "%d", &id)
+		if err != nil {
+			return "", errors.New("invalid vector id")
+		}
+		err = engine.RemoveVector(id)
+		if err != nil {
+			return "", err
+		}
+		return "VECTOR_DELETED", nil
 	case "SEARCH_TOPK":
 		if query.Space == "" {
 			return "", errors.New("no space selected")

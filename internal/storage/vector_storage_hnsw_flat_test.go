@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"errors"
 	"math/rand"
 	"os"
 	"reflect"
@@ -124,7 +125,7 @@ func TestVectorEngineImpl_InsertAndSearch_HNSW32Flat(t *testing.T) {
 		}
 	})
 
-	t.Run("Remove vector", func(t *testing.T) {
+	t.Run("Remove vector not supported for HNSW", func(t *testing.T) {
 		// Create a fresh engine for this test
 		cleanDataPath := "testdata/vector_data_hnsw_remove.db"
 		cleanIndexPath := "testdata/vector_index_hnsw_remove.faiss"
@@ -155,42 +156,26 @@ func TestVectorEngineImpl_InsertAndSearch_HNSW32Flat(t *testing.T) {
 
 		time.Sleep(500 * time.Millisecond) // Ensure batch operations are flushed
 
-		// Verify it exists
+		// HNSW does not support vector deletion; RemoveVector must return ErrDeletionNotSupported
+		err = cleanVe.RemoveVector(id)
+		if err == nil {
+			t.Error("Expected RemoveVector to fail with ErrDeletionNotSupported for HNSW")
+		}
+		if err != nil && !errors.Is(err, ErrDeletionNotSupported) {
+			t.Errorf("Expected ErrDeletionNotSupported, got: %v", err)
+		}
+
+		// Vector should still be retrievable and in search results
 		stored, err := cleanVe.GetVectorByID(id)
 		if err != nil {
-			t.Errorf("GetVectorByID failed: %v", err)
+			t.Errorf("GetVectorByID failed after unsupported remove: %v", err)
 		}
 		if !reflect.DeepEqual(stored, vec) {
-			t.Errorf("Expected stored vector to match inserted vector")
-		}
-
-		// Remove the vector
-		err = cleanVe.RemoveVector(id)
-		if err != nil {
-			t.Errorf("RemoveVector failed: %v", err)
-		}
-
-		time.Sleep(500 * time.Millisecond) // Ensure batch operations are flushed
-
-		// Verify it's removed from GetVectorByID
-		_, err = cleanVe.GetVectorByID(id)
-		if err == nil {
-			t.Error("Expected error when getting removed vector")
-		}
-
-		// Verify it's not returned in search results
-		ids, _, err := cleanVe.SearchTopK(vec, 10)
-		if err != nil {
-			t.Errorf("SearchTopK failed: %v", err)
-		}
-		for _, searchID := range ids {
-			if searchID == id {
-				t.Errorf("Removed vector ID %d found in search results", id)
-			}
+			t.Errorf("Expected stored vector to be unchanged")
 		}
 	})
 
-	t.Run("Remove non-existent vector", func(t *testing.T) {
+	t.Run("Remove non-existent vector returns not supported for HNSW", func(t *testing.T) {
 		// Create a fresh engine for this test
 		cleanDataPath := "testdata/vector_data_hnsw_remove_nonexistent.db"
 		cleanIndexPath := "testdata/vector_index_hnsw_remove_nonexistent.faiss"
@@ -211,71 +196,15 @@ func TestVectorEngineImpl_InsertAndSearch_HNSW32Flat(t *testing.T) {
 			os.Remove(cleanWalPath)
 		}()
 
-		// Try to remove a non-existent vector
+		// HNSW rejects all RemoveVector calls; even non-existent id returns ErrDeletionNotSupported
 		err = cleanVe.RemoveVector(99999)
-		if err != nil {
-			t.Errorf("RemoveVector should not fail for non-existent vector: %v", err)
+		if err == nil {
+			t.Error("Expected RemoveVector to fail with ErrDeletionNotSupported for HNSW")
+		}
+		if err != nil && !errors.Is(err, ErrDeletionNotSupported) {
+			t.Errorf("Expected ErrDeletionNotSupported, got: %v", err)
 		}
 	})
 
-	t.Run("Insert after remove", func(t *testing.T) {
-		// Create a fresh engine for this test
-		cleanDataPath := "testdata/vector_data_hnsw_insert_after_remove.db"
-		cleanIndexPath := "testdata/vector_index_hnsw_insert_after_remove.faiss"
-		cleanWalPath := "testdata/vector_wal_hnsw_insert_after_remove.db"
-
-		os.Remove(cleanDataPath)
-		os.Remove(cleanIndexPath)
-		os.Remove(cleanWalPath)
-
-		cleanVe, err := NewVectorEngine(cleanDataPath, cleanIndexPath, cleanWalPath, maxVectorSize, indexDesc, metric, true)
-		if err != nil {
-			t.Skipf("Failed to create clean engine: %v", err)
-		}
-		defer cleanVe.Close()
-		defer func() {
-			os.Remove(cleanDataPath)
-			os.Remove(cleanIndexPath)
-			os.Remove(cleanWalPath)
-		}()
-
-		// Insert, remove, then insert again with same ID
-		id := int64(8888)
-		vec1 := randomVector(maxVectorSize)
-		vec2 := randomVector(maxVectorSize)
-
-		// First insert
-		err = cleanVe.InsertVector(id, vec1)
-		if err != nil {
-			t.Errorf("First InsertVector failed: %v", err)
-		}
-
-		time.Sleep(500 * time.Millisecond) // Ensure batch operations are flushed
-
-		// Remove
-		err = cleanVe.RemoveVector(id)
-		if err != nil {
-			t.Errorf("RemoveVector failed: %v", err)
-		}
-
-		// Insert again with same ID
-		err = cleanVe.InsertVector(id, vec2)
-		if err != nil {
-			t.Errorf("Second InsertVector failed: %v", err)
-		}
-
-		time.Sleep(500 * time.Millisecond) // Ensure batch operations are flushed
-
-		// Verify the new vector is stored
-		stored, err := cleanVe.GetVectorByID(id)
-		if err != nil {
-			t.Errorf("GetVectorByID failed: %v", err)
-		}
-		if !reflect.DeepEqual(stored, vec2) {
-			t.Errorf("Expected stored vector to match second inserted vector")
-		}
-		if reflect.DeepEqual(stored, vec1) {
-			t.Errorf("Stored vector should not match first inserted vector")
-		}
-	})
+	// Insert after remove is not tested for HNSW because deletion is not supported.
 }

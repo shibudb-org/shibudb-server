@@ -15,6 +15,7 @@ const (
 	TypeUpdateUserPermissions = "UPDATE_USER_PERMISSIONS"
 	TypeGetUser               = "GET_USER"
 	TypeInsertVector          = "INSERT_VECTOR"
+	TypeDeleteVector          = "DELETE_VECTOR"
 	TypeSearchTopK            = "SEARCH_TOPK"
 	TypeGetVector             = "GET_VECTOR"
 	TypeRangeSearch           = "RANGE_SEARCH"

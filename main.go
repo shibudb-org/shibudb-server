@@ -442,6 +442,16 @@ func connectToServer(port string) {
 				continue
 			}
 			query = models.Query{Type: models.TypeInsertVector, Key: parts[1], Value: parts[2], Space: space, User: username}
+		case "delete-vector":
+			if space == "" {
+				fmt.Println("No space selected. Use 'USE <space>' first.")
+				continue
+			}
+			if len(parts) < 2 {
+				fmt.Println("Usage: delete-vector <id>")
+				continue
+			}
+			query = models.Query{Type: models.TypeDeleteVector, Key: parts[1], Space: space, User: username}
 		case "search-topk":
 			if space == "" {
 				fmt.Println("No space selected. Use 'USE <space>' first.")
