@@ -40,12 +40,14 @@ func SaveConnectionLimit(dataDir string, limit int32) error {
 }
 
 // LoadConnectionLimit loads the persisted connection limit from dataDir.
+// If connection_limit.json is missing, it returns an error for which os.IsNotExist(err) is true
+// (so callers can distinguish “no persisted config” from a real on-disk limit).
 func LoadConnectionLimit(dataDir string) (int32, error) {
 	cfgFile := filepath.Join(dataDir, "connection_limit.json")
 	data, err := os.ReadFile(cfgFile)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return 1000, nil
+			return 0, err
 		}
 		return 0, fmt.Errorf("failed to read config file: %v", err)
 	}
@@ -62,6 +64,9 @@ func LoadConnectionLimit(dataDir string) (int32, error) {
 func GetPersistentLimit(dataDir string, defaultLimit int32) int32 {
 	persistedLimit, err := LoadConnectionLimit(dataDir)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return defaultLimit
+		}
 		fmt.Printf("Warning: Failed to load persisted limit: %v\n", err)
 		fmt.Printf("Using default limit: %d\n", defaultLimit)
 		return defaultLimit

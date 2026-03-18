@@ -542,7 +542,7 @@ UPDATE-USER-PERMISSIONS username
 **Solutions**:
 ```bash
 # Check connection statistics
-shibudb manager 9090 stats
+shibudb manager stats
 
 # Monitor server logs
 tail -f /usr/local/var/log/shibudb.log
@@ -570,7 +570,7 @@ ls -la /usr/local/var/lib/shibudb/
 tail -f /usr/local/var/log/shibudb.log | grep -E "(slow|performance|timeout)"
 
 # Check connection usage
-shibudb manager 9090 stats
+shibudb manager stats
 ```
 
 ### Data Recovery
@@ -582,7 +582,7 @@ If the server crashes, data is automatically recovered from the WAL on restart (
 ```bash
 # Restart server (recovery happens automatically)
 sudo shibudb stop
-sudo shibudb start 9090
+sudo shibudb start --port 9090
 
 # Check logs for recovery messages
 tail -f /usr/local/var/log/shibudb.log

@@ -90,8 +90,8 @@ Version: $VERSION
 Architecture: $ARCH
 Maintainer: Your Name <you@example.com>
 Depends: libc6, libstdc++6, libgomp1, libopenblas0
-Description: Lightweight embedded database with FAISS vector search.
- ShibuDB is a high-performance embedded database engine
+Description: Lightweight database with FAISS vector search.
+ ShibuDB is a high-performance database engine
  optimized for vector search using FAISS.
 EOF
 

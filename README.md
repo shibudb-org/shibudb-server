@@ -4,7 +4,7 @@
 [![License](https://img.shields.io/badge/License-AGPL%203.0-green.svg)](LICENSE)
 [![Platforms](https://img.shields.io/badge/Platforms-Linux%20%7C%20macOS-blue.svg)](https://github.com/shibudb.org/shibudb-server)
 
-ShibuDb is a lightweight, embedded database system with vector search capabilities powered by FAISS. It provides high-performance storage and retrieval with support for both traditional key-value operations and advanced vector similarity search.
+ShibuDb is a lightweight database system with vector search capabilities powered by FAISS. It provides high-performance storage and retrieval with support for both traditional key-value operations and advanced vector similarity search.
 
 ## ✨ Key Features
 
@@ -204,7 +204,7 @@ sudo rpm -i shibudb-{version}-1.aarch64.rpm
 ```bash
 # Build and run
 docker build -t shibudb:latest .
-docker run -d --name shibudb -p 9090:9090 -p 10090:10090 shibudb:latest
+docker run -d --name shibudb -p 8080:8080 -p 9080:9080 shibudb:latest
 ```
 
 ## 🎯 Use Cases
@@ -231,35 +231,41 @@ docker run -d --name shibudb -p 9090:9090 -p 10090:10090 shibudb:latest
 
 ### Server Management
 ```bash
-# Start server
-sudo shibudb start 9090
+# Start server (default listen port 4444; management API on 5444)
+sudo shibudb start
+
+# Or choose ports (client and management must differ)
+sudo shibudb start --port 9090 --management-port 19090
 
 # Stop server
 sudo shibudb stop
 
-# Check status
-shibudb manager 9090 status
+# Check status (default management port 5444)
+shibudb manager status
 ```
 
 ### Runtime Management
 ```bash
 # View connection statistics
-shibudb manager 9090 stats
+shibudb manager stats
 
 # Update connection limit
-shibudb manager 9090 limit 2000
+shibudb manager limit 2000
 
 # Health check
-shibudb manager 9090 health
+shibudb manager health
+
+# If the server used e.g. --management-port 19090
+shibudb manager --port 19090 stats
 ```
 
 ### HTTP Management API
 ```bash
-# Get connection status
-curl http://localhost:10090/limit
+# Get connection status (default management port 5444)
+curl http://localhost:5444/limit
 
 # Update connection limit
-curl -X PUT http://localhost:10090/limit \
+curl -X PUT http://localhost:5444/limit \
   -H "Content-Type: application/json" \
   -d '{"limit": 2000}'
 ```
@@ -298,6 +304,6 @@ This project is licensed under the GNU Affero General Public License v3.0 (AGPL-
 
 ---
 
-**ShibuDb** - Fast, reliable, and scalable embedded database with vector search capabilities.
+**ShibuDb** - Fast, reliable, and scalable database with vector search capabilities.
 
 *For detailed information about specific features, please refer to the [documentation](docs/).*

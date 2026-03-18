@@ -92,7 +92,7 @@ echo ""
 port=${1:-4444}
 
 # Run the client binary
-"$clientBinary" connect "$port"
+"$clientBinary" connect --port "$port" --username admin --password admin
 
 # Clean up
 rm -rf "$tempDir" 

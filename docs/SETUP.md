@@ -96,11 +96,17 @@ ShibuDb automatically creates the following directory structure:
 By default, ShibuDb allows up to 1000 concurrent connections. You can modify this:
 
 ```bash
-# Start with custom connection limit
-shibudb start 9090 2000
+# Start with custom connection limit (default listen port is 4444)
+shibudb start --max-connections 2000
 
-# Or update at runtime
-shibudb manager 9090 limit 2000
+# Or set default via environment for that shell
+SHIBUDB_MAX_CONNECTIONS=2000 shibudb start
+
+# Custom port and limit
+shibudb start --max-connections 2000 --port 9090
+
+# Or update at runtime (default management port is 5444 when using default main port 4444)
+shibudb manager limit 2000
 ```
 
 ## First Steps
@@ -108,22 +114,24 @@ shibudb manager 9090 limit 2000
 ### 1. Start the Server
 
 ```bash
-# Start with default settings (port 9090, 1000 connections), first time start will ask for new admin credentials
-shibudb start 9090
+# Start with defaults (listen port 4444, 1000 connections); first start will prompt for admin credentials
+shibudb start
 
-#starting shibudb first time with admin credentials.
-shibudb start --admin-user admin --admin-password admin 9090
+# First start with admin credentials (non-interactive)
+shibudb start --admin-user admin --admin-password admin
 
-# Start with custom connection limit
-# if server is started for first time, it will ask for new admin credentials
-sudo shibudb start 9090 500
+# Custom listen port (e.g. 9090)
+shibudb start --port 9090
+
+# Custom connection limit
+sudo shibudb start --max-connections 500 --port 9090
 ```
 
 ### 2. Connect to the Database
 
 ```bash
-# Connect to the server, this will prompt for username and password
-shibudb connect 9090
+# Connect to the server (default main port 4444; use --port when different)
+shibudb connect
 You'll be prompted for credentials:
 ```
 Username: {admin username}
@@ -132,7 +140,7 @@ Password: {admin password}
 
 ```bash
 # Connect to the server with credentials
-shibudb connect --admin-user admin --admin-password admin 9090
+shibudb connect --port 9090 --username admin --password admin
 ```
 
 ### 3. Create Your First Space
@@ -178,21 +186,21 @@ tail -f ~/.shibudb/log/shibudb.log
 ### 2. Test Connection
 
 ```bash
-# Test basic connectivity
-telnet localhost 9090
+# Test basic connectivity (default listen port 4444)
+telnet localhost 4444
 
-# Test management API
-curl http://localhost:10090/health
+# Test management API (default management port 5444, set with start/run --management-port)
+curl http://localhost:5444/health
 ```
 
 ### 3. Verify Management API
 
 ```bash
 # Get connection statistics
-curl http://localhost:10090/stats
+curl http://localhost:5444/stats
 
 # Get current connection limit
-curl http://localhost:10090/limit
+curl http://localhost:5444/limit
 ```
 
 ### 4. Run Basic Tests
@@ -230,10 +238,10 @@ mkdir -p ~/.shibudb/lib ~/.shibudb/log ~/.shibudb/run
 **Solution**:
 ```bash
 # Check what's using the port
-sudo lsof -i :9090
+sudo lsof -i :4444
 
 # Kill the process or use a different port
-sudo shibudb start 9091
+sudo shibudb start --port 9091
 ```
 
 #### 3. FAISS Library Issues
@@ -257,11 +265,11 @@ export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
 ```bash
 # Check if server is running
 sudo shibudb stop
-sudo shibudb start 9090
+sudo shibudb start
 
-# Check firewall settings
-sudo ufw allow 9090
-sudo ufw allow 10090
+# Check firewall settings (default listen 4444, management 5444)
+sudo ufw allow 4444
+sudo ufw allow 5444
 ```
 
 #### 5. Authentication Failures
@@ -272,7 +280,7 @@ sudo ufw allow 10090
 ```bash
 # Reset admin password by recreating users file
 rm ~/.shibudb/lib/users.json
-sudo shibudb start 9090
+sudo shibudb start
 # Default credentials will be recreated: admin/admin
 ```
 
@@ -304,10 +312,10 @@ tail -f ~/.shibudb/log/shibudb.log
 
 ```bash
 # Increase connection limit for high-traffic scenarios
-sudo shibudb start 9090 5000
+sudo shibudb start --max-connections 5000
 
-# Monitor connection usage
-shibudb manager 9090 stats
+# Monitor connection usage (use your listen port)
+shibudb manager stats
 ```
 
 #### 2. Memory Usage

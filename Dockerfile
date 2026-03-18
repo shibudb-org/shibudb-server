@@ -47,8 +47,8 @@ RUN chown shibudb:shibudb /usr/local/bin/shibudb
 # Switch to non-root user
 USER shibudb
 
-# Expose default port
-EXPOSE 8080
+# Expose client and management ports (see --port / --management-port)
+EXPOSE 8080 9080
 
 # Set environment variables
 ENV SHIBUDB_DATA_DIR=/usr/local/var/lib/shibudb
@@ -61,4 +61,4 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
 
 # Default command
 ENTRYPOINT ["/usr/local/bin/shibudb"]
-CMD ["start", "8080"] 
+CMD ["start", "--port", "8080", "--management-port", "9080"] 

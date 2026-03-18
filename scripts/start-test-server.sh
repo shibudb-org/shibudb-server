@@ -117,7 +117,7 @@ func main() {
 	dataPath := filepath.Join(currentDir, "test-data")
 
 	// Start server on port 4444 with 100 max connections
-	server.StartServer("4444", configPath, 100, dataPath)
+	server.StartServer("4444", configPath, 100, dataPath, "5444")
 }
 EOF
 

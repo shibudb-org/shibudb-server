@@ -124,7 +124,7 @@ cat > "$WELCOME_HTML" <<EOF
 <body>
   <div class="container">
     <h2>Welcome to ShibuDB Installer</h2>
-    <p>You're just a few clicks away from installing <strong>ShibuDB</strong>, a lightweight embedded database engine.</p>
+    <p>You're just a few clicks away from installing <strong>ShibuDB</strong>, a lightweight atabase engine.</p>
     <p>Once installed, you can run the CLI from your terminal using:</p>
     <p><code>shibudb</code></p>
     <p>The binary will be installed to: <code>/usr/local/bin</code></p>

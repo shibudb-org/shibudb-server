@@ -7,7 +7,6 @@ import (
 	"net"
 	"os"
 	"os/signal"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -186,7 +185,10 @@ func (cm *ConnectionManager) Shutdown() {
 	close(cm.shutdownChan)
 }
 
-func StartServer(port string, authFilePath string, maxConnections int32, dataFolderPath string) {
+func StartServer(port string, authFilePath string, maxConnections int32, dataFolderPath string, managementPort string) {
+	if port == managementPort {
+		panic(fmt.Sprintf("client port and management port must differ (both are %s)", port))
+	}
 	spaceManager := spaces.NewSpaceManager(dataFolderPath)
 	defer spaceManager.CloseAll()
 
@@ -203,6 +205,13 @@ func StartServer(port string, authFilePath string, maxConnections int32, dataFol
 		actualLimit = persistentLimit
 	}
 
+	// No connection_limit.json yet: persist the limit we are using (from CLI/default or from file above).
+	if _, loadErr := LoadConnectionLimit(dataFolderPath); loadErr != nil && os.IsNotExist(loadErr) {
+		if saveErr := SaveConnectionLimit(dataFolderPath, actualLimit); saveErr != nil {
+			fmt.Printf("Warning: Failed to save connection limit: %v\n", saveErr)
+		}
+	}
+
 	// Create connection manager
 	connManager := NewConnectionManager(actualLimit, dataFolderPath)
 	defer connManager.Shutdown()
@@ -213,8 +222,6 @@ func StartServer(port string, authFilePath string, maxConnections int32, dataFol
 	// Start signal handler for runtime limit updates
 	go handleSignals(connManager)
 
-	// Start management server on port + 1000
-	managementPort := fmt.Sprintf("%d", getPortAsInt(port)+1000)
 	managementServer := NewManagementServer(connManager, managementPort)
 	go func() {
 		fmt.Printf("Starting management server on port %s...\n", managementPort)
@@ -270,14 +277,6 @@ func StartServer(port string, authFilePath string, maxConnections int32, dataFol
 
 		go handleConnectionWithManager(conn, spaceManager, authManager, connManager)
 	}
-}
-
-// getPortAsInt converts port string to int
-func getPortAsInt(port string) int {
-	if portInt, err := strconv.Atoi(port); err == nil {
-		return portInt
-	}
-	return 9090 // default fallback
 }
 
 // handleSignals handles runtime connection limit updates via signals

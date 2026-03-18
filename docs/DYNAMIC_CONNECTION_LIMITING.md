@@ -4,6 +4,8 @@
 
 ShibuDB now supports **dynamic connection limiting** that allows you to update connection limits at runtime without restarting the server. This feature provides multiple ways to manage connection limits based on your operational needs.
 
+At server startup, set the initial limit with `shibudb start --max-connections <n>` (optional `--port <p>` and `--management-port <m>`; defaults **4444** and **5444**) or the `SHIBUDB_MAX_CONNECTIONS` environment variable (see `shibudb --help`). A persisted `connection_limit.json` under your data directory still takes precedence when present. Use `shibudb manager --port` with the same port the server passed to `--management-port`.
+
 ## Key Features
 
 - **Zero Downtime Updates**: Change connection limits without restarting the server
@@ -16,13 +18,13 @@ ShibuDB now supports **dynamic connection limiting** that allows you to update c
 
 ### 1. HTTP Management API
 
-The server automatically starts a management HTTP server on port `<main_port> + 1000`.
+The server starts a management HTTP server on the port given by `start`/`run` **`--management-port`** (default **5444**).
 
 #### Endpoints
 
 **Health Check**
 ```bash
-GET http://localhost:10090/health
+GET http://localhost:5444/health
 ```
 Response:
 ```json
@@ -34,7 +36,7 @@ Response:
 
 **Connection Statistics**
 ```bash
-GET http://localhost:10090/stats
+GET http://localhost:5444/stats
 ```
 Response:
 ```json
@@ -48,7 +50,7 @@ Response:
 
 **Get Current Limit**
 ```bash
-GET http://localhost:10090/limit
+GET http://localhost:5444/limit
 ```
 Response:
 ```json
@@ -60,7 +62,7 @@ Response:
 
 **Set Connection Limit**
 ```bash
-PUT http://localhost:10090/limit
+PUT http://localhost:5444/limit
 Content-Type: application/json
 
 {
@@ -78,7 +80,7 @@ Response:
 
 **Increase Limit**
 ```bash
-POST http://localhost:10090/limit/increase
+POST http://localhost:5444/limit/increase
 Content-Type: application/json
 
 {
@@ -98,7 +100,7 @@ Response:
 
 **Decrease Limit**
 ```bash
-POST http://localhost:10090/limit/decrease
+POST http://localhost:5444/limit/decrease
 Content-Type: application/json
 
 {
@@ -118,26 +120,29 @@ Response:
 
 ### 2. CLI Management Tool
 
-Use the built-in CLI tool for easy management:
+Use the built-in CLI tool for easy management (default management port is **5444**; use `--port` if yours differs):
 
 ```bash
 # Check current status
-shibudb manager 9090 status
+shibudb manager status
 
 # View detailed statistics
-shibudb manager 9090 stats
+shibudb manager stats
 
 # Set specific limit
-shibudb manager 9090 limit 2000
+shibudb manager limit 2000
 
 # Increase limit by 500
-shibudb manager 9090 increase 500
+shibudb manager increase 500
 
 # Decrease limit by 200
-shibudb manager 9090 decrease 200
+shibudb manager decrease 200
 
 # Check server health
-shibudb manager 9090 health
+shibudb manager health
+
+# Example: server started with --port 9090 --management-port 19090
+shibudb manager --port 19090 status
 ```
 
 ### 3. Unix Signals
@@ -187,30 +192,30 @@ type ConnectionManager struct {
 ### Production Environment
 
 ```bash
-# Start server with conservative limit
-sudo shibudb start 9090 1000
+# Start server with conservative limit (pick any free management port ≠ client port)
+sudo shibudb start --max-connections 1000 --port 9090 --management-port 19090
 
 # Monitor usage
-shibudb manager 9090 stats
+shibudb manager --port 19090 stats
 
 # Scale up during peak hours
-shibudb manager 9090 increase 500
+shibudb manager --port 19090 increase 500
 
 # Scale down during off-peak
-shibudb manager 9090 decrease 300
+shibudb manager --port 19090 decrease 300
 ```
 
 ### Development Environment
 
 ```bash
 # Start with low limit for testing
-sudo shibudb start 9090 100
+sudo shibudb start --max-connections 100 --port 9090 --management-port 19090
 
 # Increase for load testing
-shibudb manager 9090 limit 1000
+shibudb manager --port 19090 limit 1000
 
 # Reset to original limit
-shibudb manager 9090 limit 100
+shibudb manager --port 19090 limit 100
 ```
 
 ### Automated Scaling
@@ -221,16 +226,16 @@ shibudb manager 9090 limit 100
 
 while true; do
     # Get current usage
-    usage=$(curl -s http://localhost:10090/stats | jq -r '.usage_percentage')
+    usage=$(curl -s http://localhost:5444/stats | jq -r '.usage_percentage')
     
     if (( $(echo "$usage > 80" | bc -l) )); then
         echo "High usage detected: ${usage}%"
-        curl -X POST http://localhost:10090/limit/increase \
+        curl -X POST http://localhost:5444/limit/increase \
              -H "Content-Type: application/json" \
              -d '{"amount": 200}'
     elif (( $(echo "$usage < 30" | bc -l) )); then
         echo "Low usage detected: ${usage}%"
-        curl -X POST http://localhost:10090/limit/decrease \
+        curl -X POST http://localhost:5444/limit/decrease \
              -H "Content-Type: application/json" \
              -d '{"amount": 100}'
     fi
@@ -267,8 +272,8 @@ Error: Failed to connect to management server: connection refused
 ### Troubleshooting
 
 1. **Management Server Not Responding**
-   - Check if server is running: `shibudb manager 9090 health`
-   - Verify management port: `<main_port> + 1000`
+   - Check if server is running: `shibudb manager --port 19090 health`
+   - Verify management port matches the server’s `--management-port`
    - Check firewall settings
 
 2. **Limit Updates Failing**
@@ -294,16 +299,16 @@ Error: Failed to connect to management server: connection refused
 
 ```bash
 # Alert when usage exceeds 80%
-usage=$(shibudb manager 9090 stats | grep "Usage Percentage" | awk '{print $3}' | sed 's/%//')
+usage=$(shibudb manager --port 19090 stats | grep "Usage Percentage" | awk '{print $3}' | sed 's/%//')
 if (( $(echo "$usage > 80" | bc -l) )); then
     echo "WARNING: High connection usage: ${usage}%"
     # Send alert via email, Slack, etc.
 fi
 
 # Alert when limit changes
-old_limit=$(shibudb manager 9090 status | grep "Current Limit" | awk '{print $3}')
+old_limit=$(shibudb manager --port 19090 status | grep "Current Limit" | awk '{print $3}')
 sleep 60
-new_limit=$(shibudb manager 9090 status | grep "Current Limit" | awk '{print $3}')
+new_limit=$(shibudb manager --port 19090 status | grep "Current Limit" | awk '{print $3}')
 if [ "$old_limit" != "$new_limit" ]; then
     echo "INFO: Connection limit changed from $old_limit to $new_limit"
 fi
@@ -314,13 +319,13 @@ fi
 ### 1. Start Conservative
 ```bash
 # Start with lower limits and scale up
-sudo shibudb start 9090 500
+sudo shibudb start --max-connections 500 --port 9090 --management-port 19090
 ```
 
 ### 2. Monitor Regularly
 ```bash
 # Set up monitoring
-watch -n 30 'shibudb manager 9090 stats'
+watch -n 30 'shibudb manager --port 19090 stats'
 ```
 
 ### 3. Use Appropriate Update Methods
@@ -333,13 +338,13 @@ watch -n 30 'shibudb manager 9090 stats'
 # Pre-configure scaling scripts
 cat > scale_up.sh << 'EOF'
 #!/bin/bash
-shibudb manager 9090 increase 200
+shibudb manager increase 200
 echo "$(date): Increased connection limit"
 EOF
 
 cat > scale_down.sh << 'EOF'
 #!/bin/bash
-shibudb manager 9090 decrease 100
+shibudb manager decrease 100
 echo "$(date): Decreased connection limit"
 EOF
 ```
@@ -355,12 +360,12 @@ EOF
 ### Recommended Security Measures
 
 ```bash
-# Restrict management API access
-iptables -A INPUT -p tcp --dport 10090 -s 127.0.0.1 -j ACCEPT
-iptables -A INPUT -p tcp --dport 10090 -j DROP
+# Restrict management API access (use your management port, e.g. 5444 by default)
+iptables -A INPUT -p tcp --dport 5444 -s 127.0.0.1 -j ACCEPT
+iptables -A INPUT -p tcp --dport 5444 -j DROP
 
 # Use SSH tunnel for remote management
-ssh -L 10090:localhost:10090 user@server
+ssh -L 5444:localhost:5444 user@server
 ```
 
 ## Performance Impact
@@ -377,9 +382,9 @@ ssh -L 10090:localhost:10090 user@server
 ```bash
 # Test connection acquisition performance
 time for i in {1..1000}; do
-    shibudb manager 9090 status > /dev/null
+    shibudb manager --port 19090 status > /dev/null
 done
 
 # Test limit update performance
-time shibudb manager 9090 increase 100
+time shibudb manager --port 19090 increase 100
 ```

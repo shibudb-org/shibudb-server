@@ -56,7 +56,7 @@ On first startup, ShibuDb creates a default admin user:
 
 ```bash
 # Connect to ShibuDb
-shibudb connect 9090
+shibudb connect --port 9090
 
 # You'll be prompted for credentials
 Username: admin
@@ -417,7 +417,7 @@ tail -f /usr/local/var/log/shibudb.log | grep "authentication failed"
 ```bash
 # Restrict access to ShibuDb ports
 sudo ufw allow from 192.168.1.0/24 to any port 9090
-sudo ufw allow from 192.168.1.0/24 to any port 10090
+sudo ufw allow from 192.168.1.0/24 to any port 5444
 
 # Block external access
 sudo ufw deny from any to any port 9090
@@ -427,7 +427,7 @@ sudo ufw deny from any to any port 9090
 ```bash
 # When SSL support is added
 # Use encrypted connections for sensitive data
-shibudb connect 9090 --ssl
+shibudb connect --port 9090 --ssl
 ```
 
 ## Examples and Use Cases
@@ -689,7 +689,7 @@ sudo shibudb stop
 sudo rm /usr/local/var/lib/shibudb/users.json
 
 # Restart server (creates default admin/admin)
-sudo shibudb start 9090
+sudo shibudb start --port 9090
 
 # Login with default credentials
 Username: admin
@@ -712,7 +712,7 @@ sudo cp /backup/users.json /usr/local/var/lib/shibudb/users.json
 
 # Restart server
 sudo shibudb stop
-sudo shibudb start 9090
+sudo shibudb start --port 9090
 ```
 
 ## Next Steps

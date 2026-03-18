@@ -140,14 +140,18 @@ clean: ## Clean build artifacts
 	find internal -name "*.mutex" -delete
 	@echo "Cleanup complete."
 
-start-local-server: ## Start local development server
-	@echo "Starting local development server..."
+start-local-server: ## Run ShibuDB server in foreground (port 4444, admin/admin); Ctrl+C to stop
+	@chmod +x scripts/start-local-server.sh
+	@./scripts/start-local-server.sh
+
+dev-server-smoke: ## Build/run cmd/server test binary harness (not a long-running server)
+	@echo "Running dev-server test harness..."
 	go run cmd/dev_server/main.go
 
 connect-local-client: ## Connect to local development server using CLI client
 	@echo "Connecting to local development server..."
 	@echo "Default credentials: admin/admin"
-	@echo "Default port: 4444"
+	@echo "Note: shibudb CLI default listen port is 4444; dev/E2E test server also uses 4444"
 	./scripts/connect-client.sh 4444
 
 # Docker targets
@@ -158,7 +162,7 @@ docker-build: ## Build Docker image
 
 docker-run: ## Run ShibuDb in Docker
 	@echo "Running ShibuDb in Docker..."
-	docker run -it --rm -p 8080:8080 shibudb:latest
+	docker run -it --rm -p 8080:8080 -p 9080:9080 shibudb:latest
 
 # Version management
 version: ## Show current version

@@ -1,5 +1,5 @@
 /*
-ShibuDb - Fast, reliable, and scalable embedded database with vector search capabilities.
+ShibuDb - Fast, reliable, and scalable database with vector search capabilities.
 Copyright (C) 2025 Podcopic Labs
 
 This program is free software: you can redistribute it and/or modify
@@ -22,6 +22,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -134,7 +135,7 @@ func isServerRunning(pidFilePath string) (bool, int) {
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Println("Usage: shibudb [start <port> [max_connections] | stop | connect <port> | manager <port> <command> | --version | --help]")
+		fmt.Println("Usage: shibudb [start [flags] | stop | connect [flags] | manager [flags] <command> | --version | --help]")
 		return
 	}
 
@@ -147,23 +148,34 @@ func main() {
 		dataDir := fs.String("data-dir", defaultDataDir(), "data directory root (stores files under lib/, log/, run/)")
 		adminUser := fs.String("admin-user", "", "admin username for initial bootstrap (non-interactive)")
 		adminPass := fs.String("admin-password", "", "admin password for initial bootstrap (non-interactive)")
+		portFlag := fs.String("port", server.DefaultPort, "TCP port for client connections (1–65535)")
+		mgmtPortFlag := fs.String("management-port", server.DefaultManagementPort, "TCP port for the management HTTP API (1–65535; must differ from --port)")
+		maxConnFlag := fs.Int("max-connections", int(resolveDefaultMaxConnections()), "maximum number of concurrent connections (default comes from SHIBUDB_MAX_CONNECTIONS if set; persisted limit may override at runtime)")
 		fs.Parse(os.Args[2:]) //nolint
-		args := fs.Args()
-		if len(args) < 1 || len(args) > 2 {
-			fmt.Println("Usage: shibudb start [--data-dir <path>] [--admin-user <u> --admin-password <p>] <port> [max_connections]")
+		if len(fs.Args()) != 0 {
+			fmt.Println("Usage: shibudb start [--data-dir <path>] [--admin-user <u> --admin-password <p>] [--port <n>] [--management-port <n>] [--max-connections <n>]")
 			return
 		}
-		port := args[0]
-		maxConnections := int32(1000)
-		if len(args) == 2 {
-			if max, err := strconv.ParseInt(args[1], 10, 32); err == nil && max > 0 {
-				maxConnections = int32(max)
-			} else {
-				fmt.Println("Invalid max_connections value. Must be a positive integer.")
-				return
-			}
+		port, err := normalizeListenPort(*portFlag)
+		if err != nil {
+			fmt.Println("Invalid --port:", err)
+			return
 		}
-		startServer(port, maxConnections, newRuntimePaths(*dataDir), *adminUser, *adminPass)
+		mgmtPort, err := normalizeListenPort(*mgmtPortFlag)
+		if err != nil {
+			fmt.Println("Invalid --management-port:", err)
+			return
+		}
+		if port == mgmtPort {
+			fmt.Println("Error: --port and --management-port must be different.")
+			return
+		}
+		maxConnections := int32(*maxConnFlag)
+		if maxConnections <= 0 {
+			fmt.Println("Invalid --max-connections value. Must be a positive integer.")
+			return
+		}
+		startServer(port, mgmtPort, maxConnections, newRuntimePaths(*dataDir), *adminUser, *adminPass)
 
 	case "stop":
 		fs := flag.NewFlagSet("stop", flag.ExitOnError)
@@ -176,20 +188,32 @@ func main() {
 		dataDir := fs.String("data-dir", defaultDataDir(), "data directory root (stores files under lib/, log/, run/)")
 		adminUser := fs.String("admin-user", "", "admin username for initial bootstrap (non-interactive)")
 		adminPass := fs.String("admin-password", "", "admin password for initial bootstrap (non-interactive)")
+		portFlag := fs.String("port", server.DefaultPort, "TCP port for client connections (1–65535)")
+		mgmtPortFlag := fs.String("management-port", server.DefaultManagementPort, "TCP port for the management HTTP API (1–65535; must differ from --port)")
+		maxConnFlag := fs.Int("max-connections", int(resolveDefaultMaxConnections()), "maximum number of concurrent connections (default comes from SHIBUDB_MAX_CONNECTIONS if set; persisted limit may override at runtime)")
 		fs.Parse(os.Args[2:]) //nolint
-		args := fs.Args()
-		if len(args) < 1 || len(args) > 2 {
-			fmt.Println("Usage: shibudb run [--data-dir <path>] [--admin-user <u> --admin-password <p>] <port> [max_connections]")
+		if len(fs.Args()) != 0 {
+			fmt.Println("Usage: shibudb run [--data-dir <path>] [--admin-user <u> --admin-password <p>] [--port <n>] [--management-port <n>] [--max-connections <n>]")
 			return
 		}
-		maxConnections := int32(1000)
-		if len(args) == 2 {
-			if max, err := strconv.ParseInt(args[1], 10, 32); err == nil && max > 0 {
-				maxConnections = int32(max)
-			} else {
-				fmt.Println("Invalid max_connections value. Must be a positive integer.")
-				return
-			}
+		port, err := normalizeListenPort(*portFlag)
+		if err != nil {
+			fmt.Println("Invalid --port:", err)
+			return
+		}
+		mgmtPort, err := normalizeListenPort(*mgmtPortFlag)
+		if err != nil {
+			fmt.Println("Invalid --management-port:", err)
+			return
+		}
+		if port == mgmtPort {
+			fmt.Println("Error: --port and --management-port must be different.")
+			return
+		}
+		maxConnections := int32(*maxConnFlag)
+		if maxConnections <= 0 {
+			fmt.Println("Invalid --max-connections value. Must be a positive integer.")
+			return
 		}
 		paths := newRuntimePaths(*dataDir)
 		// Pre-bootstrap admin non-interactively if credentials are provided.
@@ -199,19 +223,24 @@ func main() {
 				log.Fatalf("Failed to bootstrap admin: %v", err)
 			}
 		}
-		server.StartServer(args[0], paths.authFile, maxConnections, paths.libDir)
+		server.StartServer(port, paths.authFile, maxConnections, paths.libDir, mgmtPort)
 
 	case "connect":
 		fs := flag.NewFlagSet("connect", flag.ExitOnError)
+		portFlag := fs.String("port", server.DefaultPort, "TCP port of the ShibuDB server (1–65535)")
 		username := fs.String("username", "", "username (optional; will prompt if omitted)")
 		password := fs.String("password", "", "password (optional; will prompt if omitted)")
 		// Shorthands for convenience/backwards habits
 		_ = fs.String("user", "", "alias for --username") // parsed below
 		_ = fs.String("pass", "", "alias for --password") // parsed below
 		fs.Parse(os.Args[2:])                             //nolint
-		args := fs.Args()
-		if len(args) != 1 {
-			fmt.Println("Usage: shibudb connect [--username <u> --password <p>] <port>")
+		if len(fs.Args()) != 0 {
+			fmt.Println("Usage: shibudb connect [--port <n>] [--username <u> --password <p>]")
+			return
+		}
+		port, err := normalizeListenPort(*portFlag)
+		if err != nil {
+			fmt.Println("Invalid --port:", err)
 			return
 		}
 		// If user passed aliases, honor them.
@@ -223,14 +252,24 @@ func main() {
 				*password = f.Value.String()
 			}
 		})
-		connectToServer(args[0], *username, *password)
+		connectToServer(port, *username, *password)
 
 	case "manager":
-		if len(os.Args) < 4 {
-			fmt.Println("Usage: shibudb manager <port> <command>")
+		fs := flag.NewFlagSet("manager", flag.ExitOnError)
+		mgmtPortFlag := fs.String("port", server.DefaultManagementPort, "management HTTP API port (must match the server’s --management-port; 1–65535)")
+		fs.Parse(os.Args[2:]) //nolint
+		args := fs.Args()
+		if len(args) < 1 {
+			fmt.Println("Usage: shibudb manager [--port <n>] <command> [args...]")
+			printManagerUsage()
 			return
 		}
-		handleManagerCommand(os.Args[2:])
+		mgmtPort, err := normalizeListenPort(*mgmtPortFlag)
+		if err != nil {
+			fmt.Println("Invalid --port:", err)
+			return
+		}
+		handleManagerCommand(mgmtPort, args)
 
 	case "--help":
 		printHelp()
@@ -238,6 +277,29 @@ func main() {
 	default:
 		fmt.Println("Unknown command:", os.Args[1])
 	}
+}
+
+func normalizeListenPort(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", errors.New("must not be empty")
+	}
+	v, err := strconv.ParseUint(raw, 10, 16)
+	if err != nil || v < 1 || v > 65535 {
+		return "", errors.New("must be an integer between 1 and 65535")
+	}
+	return strconv.FormatUint(v, 10), nil
+}
+
+func resolveDefaultMaxConnections() int32 {
+	if raw := strings.TrimSpace(os.Getenv("SHIBUDB_MAX_CONNECTIONS")); raw != "" {
+		if v, err := strconv.ParseInt(raw, 10, 32); err == nil && v > 0 {
+			return int32(v)
+		}
+		fmt.Printf("%sWarning:%s ignoring invalid SHIBUDB_MAX_CONNECTIONS=%q (must be positive integer); using default %d\n",
+			yellow, reset, raw, server.DefaultMaxConnections)
+	}
+	return server.DefaultMaxConnections
 }
 
 func printVersion() {
@@ -249,24 +311,37 @@ func printVersion() {
 }
 
 func printHelp() {
-	fmt.Println(`ShibuDB - Lightweight Embedded Database
+	defaultConn := resolveDefaultMaxConnections()
+	defPort := server.DefaultPort
+	defMgmt := server.DefaultManagementPort
+	fmt.Printf(`ShibuDB - Lightweight Database
 Usage:
-  shibudb start <port> [max_connections]        Start the ShibuDB server as a background process
-  shibudb stop                                  Stop the ShibuDB background server
-  shibudb connect <port>                        Connect to the ShibuDB CLI client
-  shibudb manager <port> <command>              Manage connection limits at runtime
-  shibudb --version                             Show version information
-  shibudb --help                                Show this help message
+  shibudb start [flags]                        Start the ShibuDB server as a background process
+  shibudb run [flags]                          Run server in foreground (internal; used by start)
+  shibudb stop                                 Stop the ShibuDB background server
+  shibudb connect [flags]                      Connect to the ShibuDB CLI client
+  shibudb manager [flags] <command>            Manage connection limits at runtime
+  shibudb --version                            Show version information
+  shibudb --help                               Show this help message
+
+Listen port (start/run/connect):
+  Default TCP port: %s (override with --port; must be 1–65535)
+
+Management HTTP API (start/run only):
+  Default port: %s (override with --management-port; must differ from --port)
 
 Connection Limits:
-  max_connections: Maximum number of concurrent connections (default: 1000)
-                   Must be a positive integer
+  Default maximum concurrent connections: %d (must be a positive integer)
+  flags/env:
+    --max-connections <n>        Explicit limit for this start/run
+    SHIBUDB_MAX_CONNECTIONS=<n>  Default when --max-connections is omitted
+  note: persisted connection_limit.json (under --data-dir) may override at runtime
 
 Runtime Management:
   The server includes a management API for dynamic connection limit updates:
-  - HTTP API: http://localhost:<port+1000>/limit
+  - HTTP API: http://localhost:%s/ (set with start/run --management-port; default %s)
   - Signals: SIGUSR1 (increase by 100), SIGUSR2 (decrease by 100)
-  - CLI: shibudb manager <port> <command>
+  - CLI: shibudb manager [--port <management_port>] <command> (default %s; must match server)
 
 Manager Commands:
   status                    Show current connection limit and active connections
@@ -277,19 +352,28 @@ Manager Commands:
   health                    Check server health
 
 Examples:
-  shibudb start 9090                   # Start with default 1000 connections
-  shibudb start 9090 500               # Start with 500 connection limit
-  shibudb start --admin-user admin --admin-password admin 9090
+  shibudb start                        # Default port %s, default connection limit
+  shibudb start --port 9090            # Listen on 9090
+  SHIBUDB_MAX_CONNECTIONS=2000 shibudb start
+                                      # Env connection limit, default port %s
+  shibudb start --max-connections 2000 --port 9090
+                                      # Custom limit and port
+  shibudb start --max-connections 500 --port 9090
+  shibudb start --admin-user admin --admin-password admin --port 9090
                                       # First start: bootstrap admin non-interactively
-  shibudb connect --username admin --password admin 9090
-                                      # Connect non-interactively
-  shibudb manager 9090 status          # Check current connection status
-  shibudb manager 9090 limit 2000      # Set limit to 2000
-  shibudb manager 9090 increase 500    # Increase limit by 500
+  shibudb connect --username admin --password admin
+                                      # Connect to default port %s
+  shibudb connect --port 9090 --username admin --password admin
+  shibudb manager status                 # Management API on default port %s
+  shibudb start --port 9090 --management-port 19090
+  shibudb manager --port 19090 limit 2000
+                                      # Custom client and management ports
+  shibudb manager increase 500
   kill -USR1 <pid>                     # Increase limit by 100 via signal
 
 Note: By default, ShibuDB stores runtime files under your home directory.
-You can override paths with --data-dir.`)
+You can override paths with --data-dir.
+`, defPort, defMgmt, defaultConn, defMgmt, defMgmt, defMgmt, defPort, defPort, defPort, defMgmt)
 }
 
 func connectToServer(port, providedUser, providedPass string) {
@@ -734,13 +818,31 @@ func printStartupBanner() {
  \___ \| '_ \| || '_ \ | | | || | | |  _ \ 
   ___) | | | | || |_) || |_| || |_| | |_) |
  |____/|_| |_|_||_.__/  \___/ |____/|____/  
-` + cyan + `Secure | Embedded | Fast — Welcome to ShibuDB` + reset)
+` + cyan + `Secure | Fast — Welcome to ShibuDB` + reset)
 
 	fmt.Printf("%sVersion:%s %s\n", blue, reset, Version)
 	fmt.Printf("%sDocs   :%s https://github.com/shibudb.org/shibudb-server\n", blue, reset)
 }
 
-func startServer(port string, maxConnections int32, paths runtimePaths, adminUser, adminPass string) {
+// buildRunSubcommandArgs builds argv for the child `run` process invoked by start.
+func buildRunSubcommandArgs(port, defaultPort, mgmtPort, defaultMgmtPort string, maxConnections, defaultLimit int32, paths runtimePaths, adminUser, adminPass string) []string {
+	cmdArgs := []string{"run", "--data-dir", paths.rootDir}
+	if adminUser != "" {
+		cmdArgs = append(cmdArgs, "--admin-user", adminUser, "--admin-password", adminPass)
+	}
+	if port != defaultPort {
+		cmdArgs = append(cmdArgs, "--port", port)
+	}
+	if mgmtPort != defaultMgmtPort {
+		cmdArgs = append(cmdArgs, "--management-port", mgmtPort)
+	}
+	if maxConnections != defaultLimit {
+		cmdArgs = append(cmdArgs, "--max-connections", strconv.FormatInt(int64(maxConnections), 10))
+	}
+	return cmdArgs
+}
+
+func startServer(port, mgmtPort string, maxConnections int32, paths runtimePaths, adminUser, adminPass string) {
 	// Check if server is already running
 	if running, pid := isServerRunning(paths.pidFile); running {
 		fmt.Printf("%sError:%s ShibuDB server is already running (PID: %d)\n", red, reset, pid)
@@ -754,15 +856,7 @@ func startServer(port string, maxConnections int32, paths runtimePaths, adminUse
 	}
 	printStartupBanner()
 
-	// Build command: pass --data-dir and any bootstrap credentials to the forked run process
-	cmdArgs := []string{"run", "--data-dir", paths.rootDir}
-	if adminUser != "" {
-		cmdArgs = append(cmdArgs, "--admin-user", adminUser, "--admin-password", adminPass)
-	}
-	cmdArgs = append(cmdArgs, port)
-	if maxConnections != 1000 {
-		cmdArgs = append(cmdArgs, strconv.FormatInt(int64(maxConnections), 10))
-	}
+	cmdArgs := buildRunSubcommandArgs(port, server.DefaultPort, mgmtPort, server.DefaultManagementPort, maxConnections, resolveDefaultMaxConnections(), paths, adminUser, adminPass)
 	cmd := exec.Command(os.Args[0], cmdArgs...)
 
 	logFile := openLogFile(paths.logFile)
@@ -802,13 +896,17 @@ func startServer(port string, maxConnections int32, paths runtimePaths, adminUse
 		log.Fatalf("Failed to write PID file: %v", err)
 	}
 
-	fmt.Printf("%sShibuDB started on port %s (PID: %d, max connections: %d)%s\n", green, port, cmd.Process.Pid, maxConnections, reset)
-
-	if persistedLimit, err := server.LoadConnectionLimit(paths.libDir); err == nil && persistedLimit != maxConnections {
-		fmt.Printf("%sNote: Server will use persisted connection limit: %d%s\n", yellow, persistedLimit, reset)
-	} else {
-		fmt.Printf("%sNote: Server may use persisted connection limit if available%s\n", yellow, reset)
+	displayLimit := maxConnections
+	if pl, err := server.LoadConnectionLimit(paths.libDir); err == nil && pl > 0 {
+		displayLimit = pl
+		if pl != maxConnections {
+			fmt.Printf("%sNote: Persisted connection limit %d overrides the limit passed to this start (%d).%s\n", yellow, pl, maxConnections, reset)
+		}
+	} else if err != nil && !os.IsNotExist(err) {
+		fmt.Printf("%sWarning: Could not read persisted connection limit: %v%s\n", yellow, err, reset)
 	}
+
+	fmt.Printf("%sShibuDB started on port %s (PID: %d, max connections: %d)%s\n", green, port, cmd.Process.Pid, displayLimit, reset)
 }
 
 func stopServer(paths runtimePaths) {
@@ -834,22 +932,14 @@ func stopServer(paths runtimePaths) {
 	}
 }
 
-func handleManagerCommand(args []string) {
-	if len(args) < 2 {
-		fmt.Println("Usage: shibudb manager <port> <command>")
+func handleManagerCommand(managementPort string, args []string) {
+	if len(args) < 1 {
+		fmt.Println("Usage: shibudb manager [--port <n>] <command> [args...]")
+		printManagerUsage()
 		return
 	}
 
-	serverPort := args[0]
-	command := args[1]
-
-	// Calculate management server port (main port + 1000)
-	mainPort, err := strconv.Atoi(serverPort)
-	if err != nil {
-		fmt.Printf("Error: Invalid port number: %s\n", serverPort)
-		return
-	}
-	managementPort := strconv.Itoa(mainPort + 1000)
+	command := args[0]
 	baseURL := fmt.Sprintf("http://localhost:%s", managementPort)
 
 	// Test connectivity first
@@ -865,28 +955,28 @@ func handleManagerCommand(args []string) {
 	case "stats":
 		getManagerStats(baseURL)
 	case "limit":
-		if len(args) < 3 {
-			fmt.Println("Usage: shibudb manager <port> limit <new_limit>")
+		if len(args) < 2 {
+			fmt.Println("Usage: shibudb manager [--port <n>] limit <new_limit>")
 			return
 		}
-		newLimit, err := strconv.Atoi(args[2])
+		newLimit, err := strconv.Atoi(args[1])
 		if err != nil {
-			fmt.Printf("Error: Invalid limit value: %s\n", args[2])
+			fmt.Printf("Error: Invalid limit value: %s\n", args[1])
 			return
 		}
 		setManagerLimit(baseURL, int32(newLimit))
 	case "increase":
 		amount := 100
-		if len(args) >= 3 {
-			if amt, err := strconv.Atoi(args[2]); err == nil {
+		if len(args) >= 2 {
+			if amt, err := strconv.Atoi(args[1]); err == nil {
 				amount = amt
 			}
 		}
 		increaseManagerLimit(baseURL, int32(amount))
 	case "decrease":
 		amount := 100
-		if len(args) >= 3 {
-			if amt, err := strconv.Atoi(args[2]); err == nil {
+		if len(args) >= 2 {
+			if amt, err := strconv.Atoi(args[1]); err == nil {
 				amount = amt
 			}
 		}
@@ -937,22 +1027,28 @@ func testManagementConnectivity(baseURL string) bool {
 }
 
 func printManagerUsage() {
-	fmt.Println(`Manager Commands:
+	fmt.Printf(`Manager Commands:
   status                    Show current connection limit and active connections
   stats                     Show detailed connection statistics
   limit <new_limit>         Set connection limit to specific value
   increase [amount]         Increase connection limit by amount (default: 100)
   decrease [amount]         Decrease connection limit by amount (default: 100)
   health                    Check server health
-  reset                     Reset connection limit to default (1000)
+  reset                     Reset connection limit to configured default
+
+Usage:
+  shibudb manager [--port <management_port>] <command> [args...]
+  Default --port is %s (must match the server’s --management-port).
 
 Examples:
-  shibudb manager 4444 status
-  shibudb manager 4444 limit 2000
-  shibudb manager 4444 increase 500
-  shibudb manager 4444 decrease 200
-  shibudb manager 4444 reset
-  shibudb manager 4444 stats`)
+  shibudb manager status
+  shibudb manager limit 2000
+  shibudb manager increase 500
+  shibudb manager decrease 200
+  shibudb manager reset
+  shibudb manager stats
+  shibudb manager --port 19090 limit 2000   # when server uses --management-port 19090
+`, server.DefaultManagementPort)
 }
 
 func makeManagerRequest(method, url string, body interface{}) (*http.Response, error) {
@@ -1132,9 +1228,10 @@ func checkManagerHealth(baseURL string) {
 }
 
 func resetManagerLimit(baseURL string) {
-	// Reset to default limit (1000)
+	// Reset to configured default limit.
+	defaultLimit := resolveDefaultMaxConnections()
 	body := map[string]interface{}{
-		"limit": 1000,
+		"limit": defaultLimit,
 	}
 
 	resp, err := makeManagerRequest("PUT", baseURL+"/limit", body)
@@ -1151,7 +1248,7 @@ func resetManagerLimit(baseURL string) {
 	}
 
 	if resp.StatusCode == http.StatusOK {
-		fmt.Printf("Success: Reset connection limit to default (1000)\n")
+		fmt.Printf("Success: Reset connection limit to default (%d)\n", defaultLimit)
 	} else {
 		fmt.Printf("Error: %s\n", result["error"])
 	}

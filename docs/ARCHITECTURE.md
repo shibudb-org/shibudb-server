@@ -2,7 +2,7 @@
 
 ## Overview
 
-ShibuDb is a lightweight, embedded database system designed for high-performance storage and retrieval with vector search capabilities. The architecture follows a modular design pattern with clear separation of concerns.
+ShibuDb is a lightweight database system designed for high-performance storage and retrieval with vector search capabilities. The architecture follows a modular design pattern with clear separation of concerns.
 
 ## System Architecture
 

@@ -99,7 +99,7 @@ cat > "$RPMBUILD/SPECS/$APP_NAME.spec" <<EOF
 Name:           $APP_NAME
 Version:        $VERSION
 Release:        1
-Summary:        Lightweight Embedded Database
+Summary:        Lightweight Database
 
 License:        MIT
 URL:            https://github.com/yourusername/ShibuDB
@@ -108,7 +108,7 @@ Source0:        %{name}-%{version}.tar.gz
 BuildArch:      x86_64
 
 %description
-ShibuDB is a lightweight embedded database optimized for high-performance storage and FAISS-based vector search.
+ShibuDB is a lightweight database optimized for high-performance storage and FAISS-based vector search.
 
 %prep
 %setup -q

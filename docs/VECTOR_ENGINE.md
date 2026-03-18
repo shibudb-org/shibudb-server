@@ -1058,7 +1058,7 @@ ls -la /usr/local/var/lib/shibudb/
 tail -f /usr/local/var/log/shibudb.log | grep -E "(slow|performance|timeout)"
 
 # Check connection usage
-shibudb manager 9090 stats
+shibudb manager stats
 ```
 
 ### Data Recovery
@@ -1070,7 +1070,7 @@ Vector data is automatically recovered from WAL on server restart (if WAL is ena
 ```bash
 # Restart server (recovery happens automatically)
 sudo shibudb stop
-sudo shibudb start 9090
+sudo shibudb start --port 9090
 
 # Check logs for recovery messages
 tail -f /usr/local/var/log/shibudb.log
