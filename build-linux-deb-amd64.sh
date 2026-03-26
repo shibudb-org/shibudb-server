@@ -46,9 +46,10 @@ sudo apt-get install -y libopenblas-dev:amd64 libgomp1:amd64 libstdc++6:amd64
 export CC=x86_64-linux-gnu-gcc
 export CXX=x86_64-linux-gnu-g++
 export CGO_ENABLED=1
+RPATH_FLAGS="-Wl,-rpath,\$ORIGIN/../lib -Wl,-rpath,/usr/local/lib"
 export CGO_CFLAGS="-I$(pwd)/resources/lib/include" \
 export CGO_CXXFLAGS="-I$(pwd)/resources/lib/include" \
-export CGO_LDFLAGS="-L$(pwd)/resources/lib/linux/amd64 -lfaiss -lfaiss_c -lstdc++ -lm -lgomp -lopenblas" \
+export CGO_LDFLAGS="-L$(pwd)/resources/lib/linux/amd64 -lfaiss -lfaiss_c -lstdc++ -lm -lgomp -lopenblas ${RPATH_FLAGS}" \
 
 # Copy FAISS libraries to system locations for build
 echo "📦 Installing FAISS libraries for build..."

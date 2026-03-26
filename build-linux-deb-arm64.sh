@@ -63,10 +63,11 @@ ensure_openblas_installed
 echo "🔨 Building $APP_NAME binary..."
 FAISS_INCLUDE_DIR="$(pwd)/resources/lib/include"
 FAISS_LIB_DIR="$(pwd)/resources/lib/linux/arm64"
+RPATH_FLAGS="-Wl,-rpath,\$ORIGIN/../lib -Wl,-rpath,/usr/local/lib"
 CGO_ENABLED=1 \
 CGO_CFLAGS="-I${FAISS_INCLUDE_DIR}" \
 CGO_CXXFLAGS="-I${FAISS_INCLUDE_DIR}" \
-CGO_LDFLAGS="-L${FAISS_LIB_DIR} -lfaiss -lfaiss_c -lstdc++ -lm -lgomp -lopenblas" \
+CGO_LDFLAGS="-L${FAISS_LIB_DIR} -lfaiss -lfaiss_c -lstdc++ -lm -lgomp -lopenblas ${RPATH_FLAGS}" \
 GOOS=linux GOARCH=arm64 \
 go build -tags faiss -ldflags "-X main.Version=$VERSION -X main.BuildTime=$(date -u '+%Y-%m-%d_%H:%M:%S')" -o "$DEB_ROOT/usr/local/bin/$APP_NAME" main.go
 
