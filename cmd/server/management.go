@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 )
 
@@ -16,7 +17,8 @@ type ManagementServer struct {
 }
 
 // NewManagementServer creates a new management server
-func NewManagementServer(connManager *ConnectionManager, port string) *ManagementServer {
+func NewManagementServer(connManager *ConnectionManager, port, managementToken string) *ManagementServer {
+
 	ms := &ManagementServer{
 		connManager: connManager,
 		port:        port,
@@ -29,9 +31,15 @@ func NewManagementServer(connManager *ConnectionManager, port string) *Managemen
 	mux.HandleFunc("/limit/increase", ms.increaseLimitHandler)
 	mux.HandleFunc("/limit/decrease", ms.decreaseLimitHandler)
 
+	handler := http.Handler(mux)
+    	if strings.TrimSpace(managementToken) != "" {
+    		handler = managementAPIAuthHandler(strings.TrimSpace(managementToken), mux)
+    	}
+
 	ms.server = &http.Server{
 		Addr:    ":" + port,
 		Handler: mux,
+		Handler: handler,
 	}
 
 	return ms
