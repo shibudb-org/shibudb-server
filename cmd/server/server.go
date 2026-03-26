@@ -222,7 +222,11 @@ func StartServer(port string, authFilePath string, maxConnections int32, dataFol
 	// Start signal handler for runtime limit updates
 	go handleSignals(connManager)
 
-	managementServer := NewManagementServer(connManager, managementPort)
+	mgmtToken := ResolveManagementAPIToken(dataFolderPath)
+    	if mgmtToken != "" {
+    		fmt.Println("Management API authentication enabled (X-ShibuDB-Management-Token or Authorization: Bearer)")
+    	}
+    	managementServer := NewManagementServer(connManager, managementPort, mgmtToken)
 	go func() {
 		fmt.Printf("Starting management server on port %s...\n", managementPort)
 		if err := managementServer.Start(); err != nil {

@@ -135,7 +135,7 @@ func isServerRunning(pidFilePath string) (bool, int) {
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Println("Usage: shibudb [start [flags] | stop | connect [flags] | manager [flags] <command> | --version | --help]")
+		fmt.Println("Usage: shibudb [start [flags] | stop | connect [flags] | manager [flags] <command> | generate-management-token [flags] | --version | --help]")
 		return
 	}
 
@@ -215,10 +215,12 @@ func main() {
 	case "manager":
 		fs := flag.NewFlagSet("manager", flag.ExitOnError)
 		mgmtPortFlag := fs.String("port", server.DefaultManagementPort, "management HTTP API port (must match the server’s --management-port; 1–65535)")
+		dataDir := fs.String("data-dir", defaultDataDir(), "data directory root (reads lib/management_api_token when token not set via flag or env)")
+		mgmtTokenFlag := fs.String("management-token", "", "management API token (optional; else SHIBUDB_MANAGEMENT_API_TOKEN or lib/management_api_token)")
 		fs.Parse(os.Args[2:]) //nolint
 		args := fs.Args()
 		if len(args) < 1 {
-			fmt.Println("Usage: shibudb manager [--port <n>] <command> [args...]")
+			fmt.Println("Usage: shibudb manager [--port <n>] [--data-dir <path>] [--management-token <t>] <command> [args...]")
 			printManagerUsage()
 			return
 		}
@@ -227,7 +229,28 @@ func main() {
 			fmt.Println("Invalid --port:", err)
 			return
 		}
-		handleManagerCommand(mgmtPort, args)
+		mgmtToken := resolveManagementClientToken(*dataDir, *mgmtTokenFlag)
+		handleManagerCommand(mgmtPort, mgmtToken, args)
+
+	case "generate-management-token":
+		fs := flag.NewFlagSet("generate-management-token", flag.ExitOnError)
+		dataDir := fs.String("data-dir", defaultDataDir(), "data directory root (writes token under lib/)")
+		force := fs.Bool("force", false, "overwrite an existing management_api_token file")
+		fs.Parse(os.Args[2:]) //nolint
+		if len(fs.Args()) != 0 {
+			fmt.Println("Usage: shibudb generate-management-token [--data-dir <path>] [--force]")
+			return
+		}
+		paths := newRuntimePaths(*dataDir)
+		token, err := server.GenerateAndWriteManagementAPIToken(paths.libDir, *force)
+		if err != nil {
+			fmt.Printf("Error: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Management API token written to %s\n", filepath.Join(paths.libDir, server.ManagementAPITokenFile))
+		fmt.Println("Pass this value in the HTTP header " + server.ManagementAPITokenHeader + " (or Authorization: Bearer <token>) when calling the management API.")
+		fmt.Printf("Token: %s\n", token)
+		fmt.Println("Restart the server if it is already running so it loads the new token.")
 
 	case "--help":
 		printHelp()
@@ -278,6 +301,7 @@ Usage:
   shibudb stop                                 Stop the ShibuDB background server
   shibudb connect [flags]                      Connect to the ShibuDB CLI client
   shibudb manager [flags] <command>            Manage connection limits at runtime
+  shibudb generate-management-token [flags]   Create lib/management_api_token (enables management API auth)
   shibudb --version                            Show version information
   shibudb --help                               Show this help message
 
@@ -299,6 +323,7 @@ Runtime Management:
   - HTTP API: http://localhost:%s/ (set with start/run --management-port; default %s)
   - Signals: SIGUSR1 (increase by 100), SIGUSR2 (decrease by 100)
   - CLI: shibudb manager [--port <management_port>] <command> (default %s; must match server)
+  - If lib/management_api_token exists (or SHIBUDB_MANAGEMENT_API_TOKEN is set), send header %s on every request
 
 Manager Commands:
   status                    Show current connection limit and active connections
@@ -330,7 +355,7 @@ Examples:
 
 Note: By default, ShibuDB stores runtime files under your home directory.
 You can override paths with --data-dir.
-`, defPort, defMgmt, defaultConn, defMgmt, defMgmt, defMgmt, defPort, defPort, defPort, defMgmt)
+`, defPort, defMgmt, defaultConn, defMgmt, defMgmt, defMgmt, server.ManagementAPITokenHeader, defPort, defPort, defPort, defMgmt)
 }
 
 func connectToServer(port, providedUser, providedPass string) {
@@ -770,11 +795,11 @@ func promptUpdateUserRole(reader *bufio.Reader, username string) models.User {
 
 func printStartupBanner() {
 	fmt.Println(green + `
-  ____  _     _  _             ____  ____  
- / ___|| |__ (_)| |__   _   _ |  _ \| __ ) 
- \___ \| '_ \| || '_ \ | | | || | | |  _ \ 
+  ____  _     _  _             ____  ____
+ / ___|| |__ (_)| |__   _   _ |  _ \| __ )
+ \___ \| '_ \| || '_ \ | | | || | | |  _ \
   ___) | | | | || |_) || |_| || |_| | |_) |
- |____/|_| |_|_||_.__/  \___/ |____/|____/  
+ |____/|_| |_|_||_.__/  \___/ |____/|____/
 ` + cyan + `Secure | Fast — Welcome to ShibuDB` + reset)
 
 	fmt.Printf("%sVersion:%s %s\n", blue, reset, Version)
@@ -889,9 +914,24 @@ func stopServer(paths runtimePaths) {
 	}
 }
 
-func handleManagerCommand(managementPort string, args []string) {
+func resolveManagementClientToken(dataDir, flagToken string) string {
+	if s := strings.TrimSpace(flagToken); s != "" {
+		return s
+	}
+	if s := strings.TrimSpace(os.Getenv("SHIBUDB_MANAGEMENT_API_TOKEN")); s != "" {
+		return s
+	}
+	paths := newRuntimePaths(dataDir)
+	data, err := os.ReadFile(filepath.Join(paths.libDir, server.ManagementAPITokenFile))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}
+
+func handleManagerCommand(managementPort, mgmtToken string, args []string) {
 	if len(args) < 1 {
-		fmt.Println("Usage: shibudb manager [--port <n>] <command> [args...]")
+		fmt.Println("Usage: shibudb manager [--port <n>] [--data-dir <path>] [--management-token <t>] <command> [args...]")
 		printManagerUsage()
 		return
 	}
@@ -900,7 +940,7 @@ func handleManagerCommand(managementPort string, args []string) {
 	baseURL := fmt.Sprintf("http://localhost:%s", managementPort)
 
 	// Test connectivity first
-	if !testManagementConnectivity(baseURL) {
+	if !testManagementConnectivity(baseURL, mgmtToken) {
 		fmt.Printf("Error: Cannot connect to management server at %s\n", baseURL)
 		fmt.Printf("Please ensure the server is running and the management port is accessible.\n")
 		return
@@ -908,9 +948,9 @@ func handleManagerCommand(managementPort string, args []string) {
 
 	switch command {
 	case "status":
-		getManagerStatus(baseURL)
+		getManagerStatus(baseURL, mgmtToken)
 	case "stats":
-		getManagerStats(baseURL)
+		getManagerStats(baseURL, mgmtToken)
 	case "limit":
 		if len(args) < 2 {
 			fmt.Println("Usage: shibudb manager [--port <n>] limit <new_limit>")
@@ -921,7 +961,7 @@ func handleManagerCommand(managementPort string, args []string) {
 			fmt.Printf("Error: Invalid limit value: %s\n", args[1])
 			return
 		}
-		setManagerLimit(baseURL, int32(newLimit))
+		setManagerLimit(baseURL, mgmtToken, int32(newLimit))
 	case "increase":
 		amount := 100
 		if len(args) >= 2 {
@@ -929,7 +969,7 @@ func handleManagerCommand(managementPort string, args []string) {
 				amount = amt
 			}
 		}
-		increaseManagerLimit(baseURL, int32(amount))
+		increaseManagerLimit(baseURL, mgmtToken, int32(amount))
 	case "decrease":
 		amount := 100
 		if len(args) >= 2 {
@@ -937,18 +977,18 @@ func handleManagerCommand(managementPort string, args []string) {
 				amount = amt
 			}
 		}
-		decreaseManagerLimit(baseURL, int32(amount))
+		decreaseManagerLimit(baseURL, mgmtToken, int32(amount))
 	case "health":
-		checkManagerHealth(baseURL)
+		checkManagerHealth(baseURL, mgmtToken)
 	case "reset":
-		resetManagerLimit(baseURL)
+		resetManagerLimit(baseURL, mgmtToken)
 	default:
 		fmt.Printf("Error: Unknown command: %s\n", command)
 		printManagerUsage()
 	}
 }
 
-func testManagementConnectivity(baseURL string) bool {
+func testManagementConnectivity(baseURL, mgmtToken string) bool {
 	fmt.Printf("Testing connectivity to management server...\n")
 
 	// First test if the port is listening
@@ -967,7 +1007,15 @@ func testManagementConnectivity(baseURL string) bool {
 		Timeout: 5 * time.Second,
 	}
 
-	resp, err := client.Get(baseURL + "/health")
+	req, err := http.NewRequest(http.MethodGet, baseURL+"/health", nil)
+	if err != nil {
+		fmt.Printf("HTTP request build failed: %v\n", err)
+		return false
+	}
+	if t := strings.TrimSpace(mgmtToken); t != "" {
+		req.Header.Set(server.ManagementAPITokenHeader, t)
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		fmt.Printf("HTTP connectivity test failed: %v\n", err)
 		return false
@@ -977,10 +1025,13 @@ func testManagementConnectivity(baseURL string) bool {
 	if resp.StatusCode == http.StatusOK {
 		fmt.Printf("✓ Management server is accessible\n")
 		return true
-	} else {
-		fmt.Printf("✗ Management server returned status: %s\n", resp.Status)
+	}
+	if resp.StatusCode == http.StatusForbidden {
+		fmt.Printf("✗ Management server returned 403 (management API token required). Set --management-token, SHIBUDB_MANAGEMENT_API_TOKEN, or use matching --data-dir with lib/management_api_token.\n")
 		return false
 	}
+	fmt.Printf("✗ Management server returned status: %s\n", resp.Status)
+	return false
 }
 
 func printManagerUsage() {
@@ -994,7 +1045,7 @@ func printManagerUsage() {
   reset                     Reset connection limit to configured default
 
 Usage:
-  shibudb manager [--port <management_port>] <command> [args...]
+  shibudb manager [--port <management_port>] [--data-dir <path>] [--management-token <t>] <command> [args...]
   Default --port is %s (must match the server’s --management-port).
 
 Examples:
@@ -1005,10 +1056,11 @@ Examples:
   shibudb manager reset
   shibudb manager stats
   shibudb manager --port 19090 limit 2000   # when server uses --management-port 19090
+  shibudb generate-management-token         # create lib/management_api_token, then restart server
 `, server.DefaultManagementPort)
 }
 
-func makeManagerRequest(method, url string, body interface{}) (*http.Response, error) {
+func makeManagerRequest(method, url string, body interface{}, mgmtToken string) (*http.Response, error) {
 	var req *http.Request
 	var err error
 
@@ -1027,6 +1079,9 @@ func makeManagerRequest(method, url string, body interface{}) (*http.Response, e
 	}
 
 	req.Header.Set("Content-Type", "application/json")
+	if t := strings.TrimSpace(mgmtToken); t != "" {
+		req.Header.Set(server.ManagementAPITokenHeader, t)
+	}
 
 	// Add timeout to prevent infinite wait
 	client := &http.Client{
@@ -1037,13 +1092,24 @@ func makeManagerRequest(method, url string, body interface{}) (*http.Response, e
 	return client.Do(req)
 }
 
-func getManagerStatus(baseURL string) {
-	resp, err := makeManagerRequest("GET", baseURL+"/limit", nil)
+func warnIfMgmtForbidden(resp *http.Response) bool {
+	if resp.StatusCode != http.StatusForbidden {
+		return false
+	}
+	fmt.Println("Error: management API returned 403 (missing or invalid token). Use generate-management-token, --management-token, SHIBUDB_MANAGEMENT_API_TOKEN, or matching --data-dir with lib/management_api_token.")
+	return true
+}
+
+func getManagerStatus(baseURL, mgmtToken string) {
+	resp, err := makeManagerRequest("GET", baseURL+"/limit", nil, mgmtToken)
 	if err != nil {
 		fmt.Printf("Error: Failed to connect to management server: %v\n", err)
 		return
 	}
 	defer resp.Body.Close()
+	if warnIfMgmtForbidden(resp) {
+		return
+	}
 
 	var result map[string]interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
@@ -1056,10 +1122,10 @@ func getManagerStatus(baseURL string) {
 	fmt.Printf("Active Connections: %d\n", int(result["active_connections"].(float64)))
 }
 
-func getManagerStats(baseURL string) {
+func getManagerStats(baseURL, mgmtToken string) {
 	fmt.Printf("Connecting to management server at: %s\n", baseURL)
 
-	resp, err := makeManagerRequest("GET", baseURL+"/stats", nil)
+	resp, err := makeManagerRequest("GET", baseURL+"/stats", nil, mgmtToken)
 	if err != nil {
 		fmt.Printf("Error: Failed to connect to management server: %v\n", err)
 		fmt.Printf("Please check if the server is running and the management port is accessible.\n")
@@ -1069,6 +1135,9 @@ func getManagerStats(baseURL string) {
 	defer resp.Body.Close()
 
 	fmt.Printf("Response status: %s\n", resp.Status)
+	if warnIfMgmtForbidden(resp) {
+		return
+	}
 
 	var result map[string]interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
@@ -1083,17 +1152,20 @@ func getManagerStats(baseURL string) {
 	fmt.Printf("Available Slots: %d\n", int(result["available_slots"].(float64)))
 }
 
-func setManagerLimit(baseURL string, newLimit int32) {
+func setManagerLimit(baseURL, mgmtToken string, newLimit int32) {
 	body := map[string]interface{}{
 		"limit": newLimit,
 	}
 
-	resp, err := makeManagerRequest("PUT", baseURL+"/limit", body)
+	resp, err := makeManagerRequest("PUT", baseURL+"/limit", body, mgmtToken)
 	if err != nil {
 		fmt.Printf("Error: Failed to connect to management server: %v\n", err)
 		return
 	}
 	defer resp.Body.Close()
+	if warnIfMgmtForbidden(resp) {
+		return
+	}
 
 	var result map[string]interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
@@ -1108,17 +1180,20 @@ func setManagerLimit(baseURL string, newLimit int32) {
 	}
 }
 
-func increaseManagerLimit(baseURL string, amount int32) {
+func increaseManagerLimit(baseURL, mgmtToken string, amount int32) {
 	body := map[string]interface{}{
 		"amount": amount,
 	}
 
-	resp, err := makeManagerRequest("POST", baseURL+"/limit/increase", body)
+	resp, err := makeManagerRequest("POST", baseURL+"/limit/increase", body, mgmtToken)
 	if err != nil {
 		fmt.Printf("Error: Failed to connect to management server: %v\n", err)
 		return
 	}
 	defer resp.Body.Close()
+	if warnIfMgmtForbidden(resp) {
+		return
+	}
 
 	var result map[string]interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
@@ -1135,17 +1210,20 @@ func increaseManagerLimit(baseURL string, amount int32) {
 	}
 }
 
-func decreaseManagerLimit(baseURL string, amount int32) {
+func decreaseManagerLimit(baseURL, mgmtToken string, amount int32) {
 	body := map[string]interface{}{
 		"amount": amount,
 	}
 
-	resp, err := makeManagerRequest("POST", baseURL+"/limit/decrease", body)
+	resp, err := makeManagerRequest("POST", baseURL+"/limit/decrease", body, mgmtToken)
 	if err != nil {
 		fmt.Printf("Error: Failed to connect to management server: %v\n", err)
 		return
 	}
 	defer resp.Body.Close()
+	if warnIfMgmtForbidden(resp) {
+		return
+	}
 
 	var result map[string]interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
@@ -1162,13 +1240,16 @@ func decreaseManagerLimit(baseURL string, amount int32) {
 	}
 }
 
-func checkManagerHealth(baseURL string) {
-	resp, err := makeManagerRequest("GET", baseURL+"/health", nil)
+func checkManagerHealth(baseURL, mgmtToken string) {
+	resp, err := makeManagerRequest("GET", baseURL+"/health", nil, mgmtToken)
 	if err != nil {
 		fmt.Printf("Error: Failed to connect to management server: %v\n", err)
 		return
 	}
 	defer resp.Body.Close()
+	if warnIfMgmtForbidden(resp) {
+		return
+	}
 
 	var result map[string]interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
@@ -1184,19 +1265,22 @@ func checkManagerHealth(baseURL string) {
 	}
 }
 
-func resetManagerLimit(baseURL string) {
+func resetManagerLimit(baseURL, mgmtToken string) {
 	// Reset to configured default limit.
 	defaultLimit := resolveDefaultMaxConnections()
 	body := map[string]interface{}{
 		"limit": defaultLimit,
 	}
 
-	resp, err := makeManagerRequest("PUT", baseURL+"/limit", body)
+	resp, err := makeManagerRequest("PUT", baseURL+"/limit", body, mgmtToken)
 	if err != nil {
 		fmt.Printf("Error: Failed to connect to management server: %v\n", err)
 		return
 	}
 	defer resp.Body.Close()
+	if warnIfMgmtForbidden(resp) {
+		return
+	}
 
 	var result map[string]interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
