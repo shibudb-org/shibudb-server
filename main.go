@@ -38,6 +38,7 @@ import (
 
 	"github.com/shibudb.org/shibudb-server/cmd/server"
 	"github.com/shibudb.org/shibudb-server/internal/auth"
+	"github.com/shibudb.org/shibudb-server/internal/cliinput"
 	"github.com/shibudb.org/shibudb-server/internal/models"
 )
 
@@ -384,22 +385,38 @@ func connectToServer(port, providedUser, providedPass string) {
 	}
 	defer conn.Close()
 
-	reader := bufio.NewReader(os.Stdin)
+	input, err := cliinput.New(os.Stdin, os.Stdout)
+	if err != nil {
+		fmt.Printf("Failed to initialize CLI input: %v\n", err)
+		return
+	}
+	defer input.Close()
+
 	serverReader := bufio.NewReader(conn)
 
 	// --- Login Prompt ---
 	username := strings.TrimSpace(providedUser)
 	password := strings.TrimSpace(providedPass)
 	if username == "" {
-		username = readLine("Username: ", reader)
+		username, err = readLine("Username: ", input)
+		if err != nil {
+			fmt.Printf("Failed to read username: %v\n", err)
+			return
+		}
 	}
 	if password == "" {
-		password = readLine("Password: ", reader)
+		password, err = readPassword("Password: ", input)
+		if err != nil {
+			fmt.Printf("Failed to read password: %v\n", err)
+			return
+		}
 	}
 
 	login := models.LoginRequest{Username: username, Password: password}
-	data, _ := json.Marshal(login)
-	conn.Write(append(data, '\n'))
+	if err := sendJSONLine(conn, login); err != nil {
+		fmt.Printf("Failed to send login request: %v\n", err)
+		return
+	}
 
 	resp, err := serverReader.ReadString('\n')
 	if err != nil || !strings.Contains(resp, `"status":"OK"`) {
@@ -422,13 +439,19 @@ func connectToServer(port, providedUser, providedPass string) {
 
 	// --- Command loop ---
 	for {
-		fmt.Printf("[%s]> ", space)
-		line, _ := reader.ReadString('\n')
+		line, readErr := readLine(fmt.Sprintf("[%s]> ", space), input)
+		if readErr != nil {
+			fmt.Printf("Input error: %v\n", readErr)
+			break
+		}
 		line = strings.TrimSpace(line)
 
 		if line == "" {
 			continue
 		}
+
+		input.AppendHistory(line)
+
 		if strings.EqualFold(line, "exit") || strings.EqualFold(line, "quit") {
 			fmt.Println("Goodbye!")
 			break
@@ -437,8 +460,10 @@ func connectToServer(port, providedUser, providedPass string) {
 		if strings.HasPrefix(strings.ToUpper(line), "USE ") {
 			querySpace := strings.TrimSpace(line[4:])
 			useQuery := models.Query{Type: models.TypeUseSpace, Space: querySpace, User: username}
-			data, _ := json.Marshal(useQuery)
-			conn.Write(append(data, '\n'))
+			if err := sendJSONLine(conn, useQuery); err != nil {
+				fmt.Printf("Failed to send USE command: %v\n", err)
+				break
+			}
 			useResponse, err := serverReader.ReadString('\n')
 			if err != nil || !strings.Contains(useResponse, `"status":"OK"`) {
 				printResponse(useResponse)
@@ -468,7 +493,11 @@ func connectToServer(port, providedUser, providedPass string) {
 				fmt.Println("Only admin can add users.")
 				continue
 			}
-			newUserData := promptNewUser(reader)
+			newUserData, err := promptNewUser(input)
+			if err != nil {
+				fmt.Printf("Failed to read new user input: %v\n", err)
+				continue
+			}
 			query = models.Query{
 				Type:    models.TypeCreateUser,
 				User:    currentUser.Username,
@@ -486,7 +515,11 @@ func connectToServer(port, providedUser, providedPass string) {
 				fmt.Println("Only admin can update users.")
 				continue
 			}
-			user := promptUpdateUserRole(reader, username)
+			user, err := promptUpdateUserRole(input, username)
+			if err != nil {
+				fmt.Printf("Failed to read role update input: %v\n", err)
+				continue
+			}
 			query = models.Query{
 				Type:    models.TypeUpdateUserRole,
 				User:    currentUser.Username,
@@ -504,7 +537,11 @@ func connectToServer(port, providedUser, providedPass string) {
 				fmt.Println("Only admin can update users.")
 				continue
 			}
-			user := promptUpdateUserPassword(reader, username)
+			user, err := promptUpdateUserPassword(input, username)
+			if err != nil {
+				fmt.Printf("Failed to read password update input: %v\n", err)
+				continue
+			}
 			query = models.Query{
 				Type:    models.TypeUpdateUserPassword,
 				User:    currentUser.Username,
@@ -522,7 +559,11 @@ func connectToServer(port, providedUser, providedPass string) {
 				fmt.Println("Only admin can update users.")
 				continue
 			}
-			user := promptUpdateUserPermissions(reader, username)
+			user, err := promptUpdateUserPermissions(input, username)
+			if err != nil {
+				fmt.Printf("Failed to read permissions update input: %v\n", err)
+				continue
+			}
 			query = models.Query{
 				Type:    models.TypeUpdateUserPermissions,
 				User:    currentUser.Username,
@@ -676,8 +717,10 @@ func connectToServer(port, providedUser, providedPass string) {
 			continue
 		}
 
-		data, _ = json.Marshal(query)
-		conn.Write(append(data, '\n'))
+		if err := sendJSONLine(conn, query); err != nil {
+			fmt.Printf("Failed to send command: %v\n", err)
+			break
+		}
 
 		resp, err = serverReader.ReadString('\n')
 		if err != nil {
@@ -719,32 +762,61 @@ func printResponse(resp string) {
 	}
 }
 
-func readLine(prompt string, reader *bufio.Reader) string {
-	fmt.Print(prompt)
-	line, _ := reader.ReadString('\n')
-	return strings.TrimSpace(line)
+func sendJSONLine(conn net.Conn, payload interface{}) error {
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal request payload: %w", err)
+	}
+
+	if _, err := conn.Write(append(data, '\n')); err != nil {
+		return fmt.Errorf("write request payload: %w", err)
+	}
+
+	return nil
 }
 
-func promptNewUser(reader *bufio.Reader) models.User {
-	fmt.Print("New Username: ")
-	uname, _ := reader.ReadString('\n')
-	uname = strings.TrimSpace(uname)
+func readLine(prompt string, reader cliinput.Reader) (string, error) {
+	line, err := reader.ReadLine(prompt)
+	if err != nil {
+		return "", err
+	}
 
-	fmt.Print("New Password: ")
-	pass, _ := reader.ReadString('\n')
-	pass = strings.TrimSpace(pass)
+	return strings.TrimSpace(line), nil
+}
 
-	fmt.Print("Role (admin/user): ")
-	role, _ := reader.ReadString('\n')
-	role = strings.TrimSpace(role)
+func readPassword(prompt string, reader cliinput.Reader) (string, error) {
+	line, err := reader.ReadPassword(prompt)
+	if err != nil {
+		return "", err
+	}
+
+	return strings.TrimSpace(line), nil
+}
+
+func promptNewUser(reader cliinput.Reader) (models.User, error) {
+	uname, err := readLine("New Username: ", reader)
+	if err != nil {
+		return models.User{}, err
+	}
+
+	pass, err := readPassword("New Password: ", reader)
+	if err != nil {
+		return models.User{}, err
+	}
+
+	role, err := readLine("Role (admin/user): ", reader)
+	if err != nil {
+		return models.User{}, err
+	}
 
 	permissions := map[string]string{}
 	if role != auth.RoleAdmin {
 		fmt.Println("Enter table permissions (e.g., table1=read or table2=write). Leave blank to finish:")
 		for {
-			fmt.Print("Permission: ")
-			line, _ := reader.ReadString('\n')
-			line = strings.TrimSpace(line)
+			line, err := readLine("Permission: ", reader)
+			if err != nil {
+				return models.User{}, err
+			}
 			if line == "" {
 				break
 			}
@@ -762,16 +834,17 @@ func promptNewUser(reader *bufio.Reader) models.User {
 		Password:    pass,
 		Role:        role,
 		Permissions: permissions,
-	}
+	}, nil
 }
 
-func promptUpdateUserPermissions(reader *bufio.Reader, username string) models.User {
+func promptUpdateUserPermissions(reader cliinput.Reader, username string) (models.User, error) {
 	permissions := map[string]string{}
 	fmt.Println("Enter table permissions (e.g., table1=read or table2=write). Leave blank to finish:")
 	for {
-		fmt.Print("Permission: ")
-		line, _ := reader.ReadString('\n')
-		line = strings.TrimSpace(line)
+		line, err := readLine("Permission: ", reader)
+		if err != nil {
+			return models.User{}, err
+		}
 		if line == "" {
 			break
 		}
@@ -786,29 +859,31 @@ func promptUpdateUserPermissions(reader *bufio.Reader, username string) models.U
 	return models.User{
 		Username:    username,
 		Permissions: permissions,
-	}
+	}, nil
 }
 
-func promptUpdateUserPassword(reader *bufio.Reader, username string) models.User {
-	fmt.Print("New Password: ")
-	pass, _ := reader.ReadString('\n')
-	pass = strings.TrimSpace(pass)
+func promptUpdateUserPassword(reader cliinput.Reader, username string) (models.User, error) {
+	pass, err := readPassword("New Password: ", reader)
+	if err != nil {
+		return models.User{}, err
+	}
 
 	return models.User{
 		Username: username,
 		Password: pass,
-	}
+	}, nil
 }
 
-func promptUpdateUserRole(reader *bufio.Reader, username string) models.User {
-	fmt.Print("Role (admin/user): ")
-	role, _ := reader.ReadString('\n')
-	role = strings.TrimSpace(role)
+func promptUpdateUserRole(reader cliinput.Reader, username string) (models.User, error) {
+	role, err := readLine("Role (admin/user): ", reader)
+	if err != nil {
+		return models.User{}, err
+	}
 
 	return models.User{
 		Username: username,
 		Role:     role,
-	}
+	}, nil
 }
 
 func printStartupBanner() {

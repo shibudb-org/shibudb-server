@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/shibudb.org/shibudb-server/internal/cliinput"
 	"github.com/shibudb.org/shibudb-server/internal/models"
 )
 
@@ -19,23 +20,29 @@ func main() {
 	}
 	defer conn.Close()
 
-	reader := bufio.NewReader(os.Stdin)
+	input, err := cliinput.New(os.Stdin, os.Stdout)
+	if err != nil {
+		fmt.Printf("Failed to initialize CLI input: %v\n", err)
+		return
+	}
+	defer input.Close()
+
 	serverReader := bufio.NewReader(conn)
 
 	fmt.Println("Connected to ShibuDB. Use: put/get/delete <key> [value], or type 'quit' to exit.")
 
 	for {
-		fmt.Print("> ")
-		line, err := reader.ReadString('\n')
+		line, err := input.ReadLine("> ")
 		if err != nil {
 			fmt.Println("Input error:", err)
-			continue
+			break
 		}
 
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
 		}
+		input.AppendHistory(line)
 
 		// Exit condition
 		if strings.EqualFold(line, "quit") || strings.EqualFold(line, "exit") {
@@ -66,8 +73,10 @@ func main() {
 			continue
 		}
 
-		data, _ := json.Marshal(query)
-		conn.Write(append(data, '\n'))
+		if err := sendJSONLine(conn, query); err != nil {
+			fmt.Println("Request error:", err)
+			break
+		}
 
 		resp, err := serverReader.ReadString('\n')
 		if err != nil {
@@ -77,4 +86,17 @@ func main() {
 
 		fmt.Println(strings.TrimSpace(resp))
 	}
+}
+
+func sendJSONLine(conn net.Conn, payload interface{}) error {
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal request payload: %w", err)
+	}
+
+	if _, err := conn.Write(append(data, '\n')); err != nil {
+		return fmt.Errorf("write request payload: %w", err)
+	}
+
+	return nil
 }
