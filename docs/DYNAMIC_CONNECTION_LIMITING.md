@@ -48,6 +48,8 @@ Response:
 ```json
 {
   "active_connections": 45,
+  "busy_connections": 12,
+  "idle_connections": 33,
   "max_connections": 1000,
   "usage_percentage": 4.5,
   "available_slots": 955
@@ -63,7 +65,10 @@ Response:
 ```json
 {
   "current_limit": 1000,
-  "active_connections": 45
+  "active_connections": 45,
+  "busy_connections": 12,
+  "idle_connections": 33,
+  "available_slots": 955
 }
 ```
 
@@ -309,8 +314,10 @@ Error: Failed to connect to management server: connection refused
 ### Key Metrics
 
 - **Active Connections**: Current number of connected clients
+- **Busy Connections**: Active clients currently processing work
+- **Idle Connections**: Active clients connected but not currently processing work
 - **Connection Usage**: Percentage of limit being used
-- **Available Slots**: Remaining connection capacity
+- **Available Slots**: Remaining connection capacity for new client connections
 - **Limit Changes**: History of limit modifications
 
 ### Alerting Examples

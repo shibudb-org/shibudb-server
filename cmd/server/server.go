@@ -24,6 +24,7 @@ import (
 type ConnectionManager struct {
 	maxConnections    int32
 	activeConnections int32
+	busyConnections   int32
 	semaphore         chan struct{}
 	connections       sync.Map
 	mu                sync.RWMutex
@@ -31,6 +32,12 @@ type ConnectionManager struct {
 	limitUpdateChan chan int32
 	shutdownChan    chan struct{}
 	dataDir         string
+}
+
+type trackedConnection struct {
+	conn net.Conn
+	mu   sync.Mutex
+	busy bool
 }
 
 // NewConnectionManager creates a new connection manager with the specified limit.
@@ -124,7 +131,7 @@ func (cm *ConnectionManager) TryAcquire(conn net.Conn) bool {
 	select {
 	case semaphore <- struct{}{}:
 		atomic.AddInt32(&cm.activeConnections, 1)
-		cm.connections.Store(conn.RemoteAddr().String(), conn)
+		cm.connections.Store(conn.RemoteAddr().String(), &trackedConnection{conn: conn})
 		return true
 	default:
 		return false
@@ -136,6 +143,17 @@ func (cm *ConnectionManager) Release(conn net.Conn) {
 	cm.mu.RLock()
 	semaphore := cm.semaphore
 	cm.mu.RUnlock()
+
+	if value, ok := cm.connections.Load(conn.RemoteAddr().String()); ok {
+		if tracked, ok := value.(*trackedConnection); ok {
+			tracked.mu.Lock()
+			if tracked.busy {
+				tracked.busy = false
+				atomic.AddInt32(&cm.busyConnections, -1)
+			}
+			tracked.mu.Unlock()
+		}
+	}
 
 	<-semaphore
 	atomic.AddInt32(&cm.activeConnections, -1)
@@ -160,22 +178,68 @@ func (cm *ConnectionManager) GetConnectionStats() map[string]interface{} {
 	defer cm.mu.RUnlock()
 
 	active := atomic.LoadInt32(&cm.activeConnections)
+	busy := atomic.LoadInt32(&cm.busyConnections)
 	max := cm.maxConnections
+	idle := active - busy
 	usage := float64(active) / float64(max) * 100
 
 	return map[string]interface{}{
 		"active_connections": active,
+		"busy_connections":   busy,
+		"idle_connections":   idle,
 		"max_connections":    max,
 		"usage_percentage":   usage,
 		"available_slots":    max - active,
 	}
 }
 
+// MarkConnectionBusy marks a connected client as currently processing work.
+func (cm *ConnectionManager) MarkConnectionBusy(conn net.Conn) {
+	value, ok := cm.connections.Load(conn.RemoteAddr().String())
+	if !ok {
+		return
+	}
+	tracked, ok := value.(*trackedConnection)
+	if !ok {
+		return
+	}
+
+	tracked.mu.Lock()
+	defer tracked.mu.Unlock()
+	if tracked.busy {
+		return
+	}
+
+	tracked.busy = true
+	atomic.AddInt32(&cm.busyConnections, 1)
+}
+
+// MarkConnectionIdle marks a connected client as no longer processing work.
+func (cm *ConnectionManager) MarkConnectionIdle(conn net.Conn) {
+	value, ok := cm.connections.Load(conn.RemoteAddr().String())
+	if !ok {
+		return
+	}
+	tracked, ok := value.(*trackedConnection)
+	if !ok {
+		return
+	}
+
+	tracked.mu.Lock()
+	defer tracked.mu.Unlock()
+	if !tracked.busy {
+		return
+	}
+
+	tracked.busy = false
+	atomic.AddInt32(&cm.busyConnections, -1)
+}
+
 // CloseAllConnections forcefully closes all active connections
 func (cm *ConnectionManager) CloseAllConnections() {
 	cm.connections.Range(func(key, value interface{}) bool {
-		if conn, ok := value.(net.Conn); ok {
-			conn.Close()
+		if tracked, ok := value.(*trackedConnection); ok {
+			tracked.conn.Close()
 		}
 		return true
 	})
@@ -343,27 +407,34 @@ func handleConnectionWithManager(conn net.Conn, spaceManager *spaces.SpaceManage
 			conn.RemoteAddr(), connManager.GetActiveConnections(), connManager.GetMaxConnections())
 	}()
 
-	handleConnection(conn, spaceManager, authManager)
+	handleConnection(conn, spaceManager, authManager, connManager)
 }
 
-func handleConnection(conn net.Conn, spaceManager *spaces.SpaceManager, authManager *auth.AuthManager) {
+func handleConnection(conn net.Conn, spaceManager *spaces.SpaceManager, authManager *auth.AuthManager, connManager *ConnectionManager) {
 	defer conn.Close()
 	reader := bufio.NewReader(conn)
 
 	// Expect login first
+	connManager.MarkConnectionBusy(conn)
 	line, err := reader.ReadBytes('\n')
+	connManager.MarkConnectionIdle(conn)
 	if err != nil {
 		fmt.Fprintf(conn, `{"status":"ERROR","message":"authentication failed"}`+"\n")
 		return
 	}
 
 	var login models.LoginRequest
+	connManager.MarkConnectionBusy(conn)
 	if err := json.Unmarshal(line, &login); err != nil {
+		connManager.MarkConnectionIdle(conn)
 		fmt.Fprintf(conn, `{"status":"ERROR","message":"invalid login format"}`+"\n")
 		return
 	}
+	connManager.MarkConnectionIdle(conn)
 
+	connManager.MarkConnectionBusy(conn)
 	user, err := authManager.Authenticate(login.Username, login.Password)
+	connManager.MarkConnectionIdle(conn)
 	if err != nil {
 		fmt.Fprintf(conn, `{"status":"ERROR","message":"%s"}`+"\n", err.Error())
 		return
@@ -373,24 +444,31 @@ func handleConnection(conn net.Conn, spaceManager *spaces.SpaceManager, authMana
 		"status": "OK",
 		"user":   user,
 	}
+	connManager.MarkConnectionBusy(conn)
 	respBytes, _ := json.Marshal(resp)
 	fmt.Fprintf(conn, string(respBytes)+"\n")
+	connManager.MarkConnectionIdle(conn)
 
 	// Auth success
 	qe := queryengine.NewQueryEngine(spaceManager, authManager)
 
 	for {
+		connManager.MarkConnectionBusy(conn)
 		req, err := reader.ReadBytes('\n')
+		connManager.MarkConnectionIdle(conn)
 		if err != nil {
 			fmt.Fprintf(conn, `{"status":"ERROR","message":"connection closed"}`+"\n")
 			return
 		}
 
 		var query models.Query
+		connManager.MarkConnectionBusy(conn)
 		if err := json.Unmarshal(req, &query); err != nil {
+			connManager.MarkConnectionIdle(conn)
 			fmt.Fprintf(conn, `{"status":"ERROR","message":"invalid query"}`+"\n")
 			continue
 		}
+		connManager.MarkConnectionIdle(conn)
 		query.User = login.Username
 
 		// Enforce role-based access
@@ -425,7 +503,9 @@ func handleConnection(conn net.Conn, spaceManager *spaces.SpaceManager, authMana
 		}
 
 		// Execute query
+		connManager.MarkConnectionBusy(conn)
 		result, err := qe.Execute(query)
+		connManager.MarkConnectionIdle(conn)
 		if err != nil {
 			fmt.Fprintf(conn, `{"status":"ERROR","message":"%s"}`+"\n", err.Error())
 			continue
@@ -449,6 +529,8 @@ func handleConnection(conn net.Conn, spaceManager *spaces.SpaceManager, authMana
 			fmt.Fprintf(conn, `{"status":"ERROR","message":"failed to marshal response"}`+"\n")
 			continue
 		}
+		connManager.MarkConnectionBusy(conn)
 		fmt.Fprintf(conn, "%s\n", string(responseBytes))
+		connManager.MarkConnectionIdle(conn)
 	}
 }

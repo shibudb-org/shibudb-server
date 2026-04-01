@@ -1325,6 +1325,9 @@ func getManagerStatus(baseURL, bearerToken string) {
 	fmt.Printf("Connection Status:\n")
 	fmt.Printf("Current Limit: %d\n", int(result["current_limit"].(float64)))
 	fmt.Printf("Active Connections: %d\n", int(result["active_connections"].(float64)))
+	fmt.Printf("Busy Connections: %d\n", int(result["busy_connections"].(float64)))
+	fmt.Printf("Idle Connections: %d\n", int(result["idle_connections"].(float64)))
+	fmt.Printf("Available Slots: %d\n", int(result["available_slots"].(float64)))
 }
 
 func getManagerStats(baseURL, bearerToken string) {
@@ -1349,6 +1352,8 @@ func getManagerStats(baseURL, bearerToken string) {
 
 	fmt.Printf("Connection Statistics:\n")
 	fmt.Printf("Active Connections: %d\n", int(result["active_connections"].(float64)))
+	fmt.Printf("Busy Connections: %d\n", int(result["busy_connections"].(float64)))
+	fmt.Printf("Idle Connections: %d\n", int(result["idle_connections"].(float64)))
 	fmt.Printf("Max Connections: %d\n", int(result["max_connections"].(float64)))
 	fmt.Printf("Usage Percentage: %.1f%%\n", result["usage_percentage"].(float64))
 	fmt.Printf("Available Slots: %d\n", int(result["available_slots"].(float64)))

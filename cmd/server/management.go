@@ -20,7 +20,8 @@ type ManagementServer struct {
 }
 
 // NewManagementServer creates a new management server
-func NewManagementServer(connManager *ConnectionManager, tokenMgr *auth.TokenManager, port string) *ManagementServer {	ms := &ManagementServer{
+func NewManagementServer(connManager *ConnectionManager, tokenMgr *auth.TokenManager, port string) *ManagementServer {
+	ms := &ManagementServer{
 		connManager: connManager,
 		tokenMgr:    tokenMgr,
 		port:        port,
@@ -54,9 +55,9 @@ func (ms *ManagementServer) Stop() error {
 
 // healthHandler returns server health status
 func (ms *ManagementServer) healthHandler(w http.ResponseWriter, r *http.Request) {
-    if !ms.authorizeRequest(w, r) {
-        return
-    }
+	if !ms.authorizeRequest(w, r) {
+		return
+	}
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -73,9 +74,9 @@ func (ms *ManagementServer) healthHandler(w http.ResponseWriter, r *http.Request
 
 // statsHandler returns connection statistics
 func (ms *ManagementServer) statsHandler(w http.ResponseWriter, r *http.Request) {
-    if !ms.authorizeRequest(w, r) {
-    		return
-    }
+	if !ms.authorizeRequest(w, r) {
+		return
+	}
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -89,17 +90,20 @@ func (ms *ManagementServer) statsHandler(w http.ResponseWriter, r *http.Request)
 
 // limitHandler handles GET (current limit) and PUT (update limit) requests
 func (ms *ManagementServer) limitHandler(w http.ResponseWriter, r *http.Request) {
-    if !ms.authorizeRequest(w, r) {
+	if !ms.authorizeRequest(w, r) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 
 	switch r.Method {
 	case http.MethodGet:
-		// Return current limit
+		stats := ms.connManager.GetConnectionStats()
 		response := map[string]interface{}{
 			"current_limit":      ms.connManager.GetMaxConnections(),
-			"active_connections": ms.connManager.GetActiveConnections(),
+			"active_connections": stats["active_connections"],
+			"busy_connections":   stats["busy_connections"],
+			"idle_connections":   stats["idle_connections"],
+			"available_slots":    stats["available_slots"],
 		}
 		json.NewEncoder(w).Encode(response)
 
@@ -138,7 +142,7 @@ func (ms *ManagementServer) limitHandler(w http.ResponseWriter, r *http.Request)
 
 // increaseLimitHandler increases the connection limit by a specified amount
 func (ms *ManagementServer) increaseLimitHandler(w http.ResponseWriter, r *http.Request) {
-    if !ms.authorizeRequest(w, r) {
+	if !ms.authorizeRequest(w, r) {
 		return
 	}
 	if r.Method != http.MethodPost {
@@ -182,9 +186,9 @@ func (ms *ManagementServer) increaseLimitHandler(w http.ResponseWriter, r *http.
 
 // decreaseLimitHandler decreases the connection limit by a specified amount
 func (ms *ManagementServer) decreaseLimitHandler(w http.ResponseWriter, r *http.Request) {
-    if !ms.authorizeRequest(w, r) {
-    		return
-    }
+	if !ms.authorizeRequest(w, r) {
+		return
+	}
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
