@@ -158,3 +158,31 @@ func TestQueryEngine_DeleteVector_NoSpace(t *testing.T) {
 		t.Error("Expected error when no space selected")
 	}
 }
+
+func TestQueryEngine_CreateSpaceSurvivesRestart(t *testing.T) {
+	dir := t.TempDir()
+	sm := spaces.NewSpaceManager(dir)
+	qe := NewQueryEngine(sm, &mockAuth{})
+
+	if _, err := qe.Execute(models.Query{
+		Type:      models.TypeCreateSpace,
+		Space:     "restart_space",
+		User:      "admin",
+		EnableWAL: true,
+	}); err != nil {
+		t.Fatalf("CreateSpace failed: %v", err)
+	}
+	sm.CloseAll()
+
+	reloaded := spaces.NewSpaceManager(dir)
+	defer reloaded.CloseAll()
+	qe = NewQueryEngine(reloaded, &mockAuth{})
+
+	res, err := qe.Execute(models.Query{Type: models.TypeListSpaces})
+	if err != nil {
+		t.Fatalf("TypeListSpaces failed after restart: %v", err)
+	}
+	if !strings.Contains(res, `"restart_space"`) {
+		t.Fatalf("ListSpaces response %q does not include restart_space", res)
+	}
+}

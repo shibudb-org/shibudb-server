@@ -1,19 +1,27 @@
 package spaces
 
 import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"sync"
 	"testing"
 )
 
 func TestIsAllowedIndexType(t *testing.T) {
 	tests := []struct {
-		name     string
+		name      string
 		indexType string
-		expected bool
+		expected  bool
 	}{
 		// Single index types
 		{"Flat", "Flat", true},
 		{"Flat with number", "Flat32", false}, // Flat should not have number suffix
-		
+
 		// HNSW variants (powers of 2 from 2 to 256)
 		{"HNSW2", "HNSW2", true},
 		{"HNSW4", "HNSW4", true},
@@ -24,11 +32,11 @@ func TestIsAllowedIndexType(t *testing.T) {
 		{"HNSW128", "HNSW128", true},
 		{"HNSW256", "HNSW256", true},
 		{"HNSW without number", "HNSW", false}, // HNSW requires number suffix
-		{"HNSW512", "HNSW512", false}, // Out of range
-		{"HNSW1", "HNSW1", false}, // Out of range
-		{"HNSW3", "HNSW3", false}, // Not power of 2
-		{"HNSW7", "HNSW7", false}, // Not power of 2
-		
+		{"HNSW512", "HNSW512", false},          // Out of range
+		{"HNSW1", "HNSW1", false},              // Out of range
+		{"HNSW3", "HNSW3", false},              // Not power of 2
+		{"HNSW7", "HNSW7", false},              // Not power of 2
+
 		// IVF variants (powers of 2 from 2 to 256)
 		{"IVF2", "IVF2", true},
 		{"IVF4", "IVF4", true},
@@ -39,11 +47,11 @@ func TestIsAllowedIndexType(t *testing.T) {
 		{"IVF128", "IVF128", true},
 		{"IVF256", "IVF256", true},
 		{"IVF without number", "IVF", false}, // IVF requires number suffix
-		{"IVF512", "IVF512", false}, // Out of range
-		{"IVF1", "IVF1", false}, // Out of range
-		{"IVF3", "IVF3", false}, // Not power of 2
-		{"IVF7", "IVF7", false}, // Not power of 2
-		
+		{"IVF512", "IVF512", false},          // Out of range
+		{"IVF1", "IVF1", false},              // Out of range
+		{"IVF3", "IVF3", false},              // Not power of 2
+		{"IVF7", "IVF7", false},              // Not power of 2
+
 		// PQ variants (powers of 2 from 2 to 256)
 		{"PQ2", "PQ2", true},
 		{"PQ4", "PQ4", true},
@@ -54,38 +62,38 @@ func TestIsAllowedIndexType(t *testing.T) {
 		{"PQ128", "PQ128", true},
 		{"PQ256", "PQ256", true},
 		{"PQ without number", "PQ", false}, // PQ requires number suffix
-		{"PQ512", "PQ512", false}, // Out of range
-		{"PQ1", "PQ1", false}, // Out of range
-		{"PQ3", "PQ3", false}, // Not power of 2
-		{"PQ7", "PQ7", false}, // Not power of 2
-		
+		{"PQ512", "PQ512", false},          // Out of range
+		{"PQ1", "PQ1", false},              // Out of range
+		{"PQ3", "PQ3", false},              // Not power of 2
+		{"PQ7", "PQ7", false},              // Not power of 2
+
 		// Composite indices
 		{"IVF32,Flat", "IVF32,Flat", true},
 		{"HNSW64,Flat", "HNSW64,Flat", true},
 		{"PQ8,Flat", "PQ8,Flat", true},
 		{"IVF64,PQ16", "IVF64,PQ16", true},
 		{"HNSW128,PQ32", "HNSW128,PQ32", true},
-		
+
 		// Invalid composite indices
 		{"Invalid composite 1", "IVF32,Invalid", false},
 		{"Invalid composite 2", "Invalid,Flat", false},
-		{"Invalid composite 3", "HNSW,Flat", false}, // HNSW without number
-		{"Invalid composite 4", "IVF,Flat", false}, // IVF without number
-		{"Invalid composite 5", "PQ,Flat", false}, // PQ without number
+		{"Invalid composite 3", "HNSW,Flat", false},   // HNSW without number
+		{"Invalid composite 4", "IVF,Flat", false},    // IVF without number
+		{"Invalid composite 5", "PQ,Flat", false},     // PQ without number
 		{"Invalid composite 6", "Flat32,Flat", false}, // Flat with number
-		
+
 		// Edge cases
 		{"Empty string", "", false},
 		{"Only comma", ",", false},
 		{"Multiple commas", "HNSW32,,Flat", false},
-		{"Whitespace", " HNSW32 ", true}, // Should trim whitespace
+		{"Whitespace", " HNSW32 ", true},                  // Should trim whitespace
 		{"Whitespace composite", " HNSW32 , Flat ", true}, // Should trim whitespace
-		
+
 		// Invalid index types
 		{"Invalid type", "Invalid", false},
 		{"Unknown type", "Unknown32", false},
 	}
-	
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			result := isAllowedIndexType(tt.indexType)
@@ -111,14 +119,14 @@ func TestIsPowerOf2InRange(t *testing.T) {
 		{"64", 64, true},
 		{"128", 128, true},
 		{"256", 256, true},
-		
+
 		// Invalid: out of range
 		{"1", 1, false},
 		{"512", 512, false},
 		{"1024", 1024, false},
 		{"0", 0, false},
 		{"-1", -1, false},
-		
+
 		// Invalid: not power of 2
 		{"3", 3, false},
 		{"5", 5, false},
@@ -137,7 +145,7 @@ func TestIsPowerOf2InRange(t *testing.T) {
 		{"255", 255, false},
 		{"257", 257, false},
 	}
-	
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			result := isPowerOf2InRange(tt.n)
@@ -145,5 +153,261 @@ func TestIsPowerOf2InRange(t *testing.T) {
 				t.Errorf("isPowerOf2InRange(%d) = %v, want %v", tt.n, result, tt.expected)
 			}
 		})
+	}
+}
+
+func TestSpaceManager_PersistsSpacesAcrossRestart(t *testing.T) {
+	dir := t.TempDir()
+	sm := NewSpaceManager(dir)
+
+	if _, err := sm.CreateSpaceWithWAL("alpha", "key-value", 0, "", "", true); err != nil {
+		t.Fatalf("CreateSpaceWithWAL failed: %v", err)
+	}
+	if _, err := sm.CreateSpaceWithWAL("beta", "key-value", 0, "", "", true); err != nil {
+		t.Fatalf("CreateSpaceWithWAL failed: %v", err)
+	}
+	sm.CloseAll()
+
+	reloaded := NewSpaceManager(dir)
+	defer reloaded.CloseAll()
+
+	got := reloaded.ListSpaces()
+	sort.Strings(got)
+	want := []string{"alpha", "beta"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("ListSpaces() = %v, want %v", got, want)
+	}
+
+	for _, name := range want {
+		if _, ok := reloaded.GetSpace(name); !ok {
+			t.Fatalf("space %q was not reopened after restart", name)
+		}
+		if _, err := os.Stat(filepath.Join(dir, name, spaceMetaFileName)); err != nil {
+			t.Fatalf("space meta missing for %q: %v", name, err)
+		}
+	}
+}
+
+func TestSpaceManager_KeyValueMetadataOmitsVectorFieldsAndDefaultsWALOff(t *testing.T) {
+	dir := t.TempDir()
+	sm := NewSpaceManager(dir)
+	defer sm.CloseAll()
+
+	if _, err := sm.CreateSpace("kv_default", "key-value", 128, "Flat", "L2"); err != nil {
+		t.Fatalf("CreateSpace failed: %v", err)
+	}
+
+	meta, ok := sm.SpaceMeta("kv_default")
+	if !ok {
+		t.Fatal("SpaceMeta did not return created space")
+	}
+	if meta.EnableWAL {
+		t.Fatal("expected WAL to default to off")
+	}
+	if meta.Dimension != 0 {
+		t.Fatalf("Dimension = %d, want 0 for key-value", meta.Dimension)
+	}
+	if meta.IndexType != "" {
+		t.Fatalf("IndexType = %q, want empty for key-value", meta.IndexType)
+	}
+	if meta.Metric != "" {
+		t.Fatalf("Metric = %q, want empty for key-value", meta.Metric)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, "kv_default", spaceMetaFileName))
+	if err != nil {
+		t.Fatalf("os.ReadFile failed: %v", err)
+	}
+	content := string(data)
+	for _, forbidden := range []string{`"dimension"`, `"index_type"`, `"metric"`, `"enable_wal"`} {
+		if strings.Contains(content, forbidden) {
+			t.Fatalf("key-value metadata unexpectedly contains %s: %s", forbidden, content)
+		}
+	}
+}
+
+func TestSpaceManager_RebuildsManifestFromSpaceMetaFiles(t *testing.T) {
+	dir := t.TempDir()
+	sm := NewSpaceManager(dir)
+
+	if _, err := sm.CreateSpaceWithWAL("alpha", "key-value", 0, "", "", true); err != nil {
+		t.Fatalf("CreateSpaceWithWAL failed: %v", err)
+	}
+	if _, err := sm.CreateSpaceWithWAL("beta", "key-value", 0, "", "", true); err != nil {
+		t.Fatalf("CreateSpaceWithWAL failed: %v", err)
+	}
+	sm.CloseAll()
+
+	staleLine, err := json.Marshal(manifestRecord{
+		Version: currentSpaceLayoutVersion,
+		Op:      manifestOpCreate,
+		Space:   "alpha",
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal failed: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, spacesManifestFileName), append(staleLine, '\n'), 0644); err != nil {
+		t.Fatalf("os.WriteFile failed: %v", err)
+	}
+
+	reloaded := NewSpaceManager(dir)
+	defer reloaded.CloseAll()
+
+	got := reloaded.ListSpaces()
+	sort.Strings(got)
+	want := []string{"alpha", "beta"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("ListSpaces() = %v, want %v", got, want)
+	}
+
+	manifestSpaces, exists, err := reloaded.readManifestSpaces()
+	if err != nil {
+		t.Fatalf("readManifestSpaces() failed: %v", err)
+	}
+	if !exists {
+		t.Fatal("manifest was not recreated")
+	}
+	if len(manifestSpaces) != 2 {
+		t.Fatalf("manifest space count = %d, want 2", len(manifestSpaces))
+	}
+}
+
+func TestSpaceManager_LoadsLegacyMetadataJSONAndMigrates(t *testing.T) {
+	dir := t.TempDir()
+	sm := NewSpaceManager(dir)
+
+	if _, err := sm.CreateSpaceWithWAL("legacy_space", "key-value", 0, "", "", true); err != nil {
+		t.Fatalf("CreateSpaceWithWAL failed: %v", err)
+	}
+	sm.CloseAll()
+
+	if err := os.Remove(filepath.Join(dir, spacesManifestFileName)); err != nil {
+		t.Fatalf("os.Remove manifest failed: %v", err)
+	}
+	if err := os.Remove(filepath.Join(dir, "legacy_space", spaceMetaFileName)); err != nil {
+		t.Fatalf("os.Remove space meta failed: %v", err)
+	}
+
+	legacyMetas := []spaceMeta{{
+		Name:       "legacy_space",
+		EngineType: "key-value",
+		EnableWAL:  true,
+	}}
+	legacyData, err := json.MarshalIndent(legacyMetas, "", "  ")
+	if err != nil {
+		t.Fatalf("json.MarshalIndent failed: %v", err)
+	}
+	legacyData = append(legacyData, '\n')
+	if err := os.WriteFile(filepath.Join(dir, legacyMetadataFileName), legacyData, 0644); err != nil {
+		t.Fatalf("os.WriteFile legacy metadata failed: %v", err)
+	}
+
+	reloaded := NewSpaceManager(dir)
+	defer reloaded.CloseAll()
+
+	if got := reloaded.ListSpaces(); len(got) != 1 || got[0] != "legacy_space" {
+		t.Fatalf("ListSpaces() = %v, want [legacy_space]", got)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "legacy_space", spaceMetaFileName)); err != nil {
+		t.Fatalf("legacy migration did not write space meta: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, spacesManifestFileName)); err != nil {
+		t.Fatalf("legacy migration did not write manifest: %v", err)
+	}
+}
+
+func TestSpaceManager_CreateSpaceMetadataWriteFailureDoesNotPublishSpace(t *testing.T) {
+	dir := t.TempDir()
+	sm := NewSpaceManager(dir)
+	defer sm.CloseAll()
+
+	sm.writeJSONFile = func(path string, value interface{}) error {
+		if strings.HasSuffix(path, spaceMetaFileName) {
+			return errors.New("metadata write failed")
+		}
+		return writeAtomicJSON(path, value)
+	}
+
+	if _, err := sm.CreateSpaceWithWAL("broken", "key-value", 0, "", "", true); err == nil {
+		t.Fatal("CreateSpaceWithWAL() error = nil, want failure")
+	}
+	if got := sm.ListSpaces(); len(got) != 0 {
+		t.Fatalf("ListSpaces() = %v, want empty", got)
+	}
+	if _, ok := sm.GetSpace("broken"); ok {
+		t.Fatal("space was published in memory after metadata failure")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "broken")); !os.IsNotExist(err) {
+		t.Fatalf("space directory should be rolled back, got err=%v", err)
+	}
+}
+
+func TestSpaceManager_ConcurrentCreateSpaceDoesNotLoseManifestEntries(t *testing.T) {
+	dir := t.TempDir()
+	sm := NewSpaceManager(dir)
+	defer sm.CloseAll()
+
+	const totalSpaces = 32
+	var wg sync.WaitGroup
+	errCh := make(chan error, totalSpaces)
+
+	for i := 0; i < totalSpaces; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			spaceName := fmt.Sprintf("space_%03d", i)
+			if _, err := sm.CreateSpaceWithWAL(spaceName, "key-value", 0, "", "", true); err != nil {
+				errCh <- err
+			}
+		}(i)
+	}
+
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		if err != nil {
+			t.Fatalf("CreateSpaceWithWAL failed: %v", err)
+		}
+	}
+
+	sm.CloseAll()
+	reloaded := NewSpaceManager(dir)
+	defer reloaded.CloseAll()
+
+	if got := len(reloaded.ListSpaces()); got != totalSpaces {
+		t.Fatalf("reloaded space count = %d, want %d", got, totalSpaces)
+	}
+	manifestSpaces, exists, err := reloaded.readManifestSpaces()
+	if err != nil {
+		t.Fatalf("readManifestSpaces() failed: %v", err)
+	}
+	if !exists {
+		t.Fatal("manifest missing after concurrent create")
+	}
+	if got := len(manifestSpaces); got != totalSpaces {
+		t.Fatalf("manifest space count = %d, want %d", got, totalSpaces)
+	}
+}
+
+func TestSpaceManager_DeleteSpacePersistsAcrossRestart(t *testing.T) {
+	dir := t.TempDir()
+	sm := NewSpaceManager(dir)
+
+	if _, err := sm.CreateSpaceWithWAL("alpha", "key-value", 0, "", "", true); err != nil {
+		t.Fatalf("CreateSpaceWithWAL failed: %v", err)
+	}
+	if err := sm.DeleteSpace("alpha"); err != nil {
+		t.Fatalf("DeleteSpace failed: %v", err)
+	}
+	sm.CloseAll()
+
+	reloaded := NewSpaceManager(dir)
+	defer reloaded.CloseAll()
+
+	if got := reloaded.ListSpaces(); len(got) != 0 {
+		t.Fatalf("ListSpaces() after delete = %v, want empty", got)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "alpha")); !os.IsNotExist(err) {
+		t.Fatalf("deleted space directory still exists, err=%v", err)
 	}
 }

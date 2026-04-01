@@ -50,10 +50,10 @@ type runtimePaths struct {
 	logDir  string
 	runDir  string
 
-	authFile string
+	authFile  string
 	tokenFile string
-	logFile  string
-	pidFile  string
+	logFile   string
+	pidFile   string
 }
 
 func defaultDataDir() string {
@@ -287,9 +287,9 @@ func main() {
 		})
 		paths := newRuntimePaths(*dataDir)
 		authCfg := managerAuthConfig{
-			username: strings.TrimSpace(*username),
-			password: strings.TrimSpace(*password),
-			authFile: paths.authFile,
+			username:  strings.TrimSpace(*username),
+			password:  strings.TrimSpace(*password),
+			authFile:  paths.authFile,
 			tokenFile: paths.tokenFile,
 		}
 		handleManagerCommand(mgmtPort, args, authCfg)
@@ -650,9 +650,9 @@ func connectToServer(port, providedUser, providedPass string) {
 				}
 			}
 
-			// Set default WAL based on engine type if not explicitly set
+			// WAL stays off unless the user explicitly enables it.
 			if !walExplicitlySet {
-				enableWAL = (engineType == "key-value") // Default to WAL enabled for key-value, disabled for vector
+				enableWAL = false
 			}
 
 			if engineType == "vector" && dimension <= 0 {
@@ -1166,12 +1166,23 @@ func testManagementConnectivity(baseURL, bearerToken string) bool {
 }
 
 func ensureAdminCredentials(cfg *managerAuthConfig) (string, error) {
-	reader := bufio.NewReader(os.Stdin)
+	reader, err := cliinput.New(os.Stdin, os.Stdout)
+	if err != nil {
+		return "", fmt.Errorf("failed to initialize CLI input: %w", err)
+	}
+	defer reader.Close()
+
 	if strings.TrimSpace(cfg.username) == "" {
-		cfg.username = readLine("Admin Username: ", reader)
+		cfg.username, err = readLine("Admin Username: ", reader)
+		if err != nil {
+			return "", err
+		}
 	}
 	if strings.TrimSpace(cfg.password) == "" {
-		cfg.password = readLine("Admin Password: ", reader)
+		cfg.password, err = readLine("Admin Password: ", reader)
+		if err != nil {
+			return "", err
+		}
 	}
 
 	authManager, err := auth.NewAuthManager(cfg.authFile)
