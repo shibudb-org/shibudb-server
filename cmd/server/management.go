@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/http/pprof"
 	"strings"
 	"sync"
 
@@ -28,11 +29,24 @@ func NewManagementServer(connManager *ConnectionManager, tokenMgr *auth.TokenMan
 	}
 
 	mux := http.NewServeMux()
+	authorized := func(next http.HandlerFunc) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if !ms.authorizeRequest(w, r) {
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
 	mux.HandleFunc("/health", ms.healthHandler)
 	mux.HandleFunc("/stats", ms.statsHandler)
 	mux.HandleFunc("/limit", ms.limitHandler)
 	mux.HandleFunc("/limit/increase", ms.increaseLimitHandler)
 	mux.HandleFunc("/limit/decrease", ms.decreaseLimitHandler)
+	mux.Handle("/debug/pprof/", authorized(pprof.Index))
+	mux.Handle("/debug/pprof/cmdline", authorized(pprof.Cmdline))
+	mux.Handle("/debug/pprof/profile", authorized(pprof.Profile))
+	mux.Handle("/debug/pprof/symbol", authorized(pprof.Symbol))
+	mux.Handle("/debug/pprof/trace", authorized(pprof.Trace))
 
 	ms.server = &http.Server{
 		Addr:    ":" + port,

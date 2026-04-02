@@ -2,7 +2,6 @@ package benchmark
 
 import (
 	"bufio"
-	"encoding/json"
 	"fmt"
 	"math/rand"
 	"net"
@@ -19,34 +18,33 @@ const (
 	VectorDimension = 128
 )
 
-type VectorQuery struct {
-	Type       string `json:"type"`
-	Key        string `json:"key,omitempty"`
-	Value      string `json:"value,omitempty"`
-	Space      string `json:"space"`
-	Dimension  int    `json:"dimension,omitempty"`
-	EngineType string `json:"engine_type,omitempty"`
-}
-
 func TestVectorSingleSpace(t *testing.T) {
-	RunVectorSingleSpace(t)
+	RunVectorSingleSpace(t, true)
 }
 
-func RunVectorSingleSpace(t *testing.T) {
+func TestVectorSingleSpaceNoWAL(t *testing.T) {
+	RunVectorSingleSpace(t, false)
+}
+
+func RunVectorSingleSpace(t *testing.T, enableWAL bool) {
 	fmt.Println("Starting vector engine single space concurrency test...")
 
-	if err := createVectorBenchmarkSpace(); err != nil {
+	spaceName := fmt.Sprintf("%s_%d", vectorSpace, time.Now().UnixNano())
+	if err := createVectorBenchmarkSpace(spaceName, enableWAL); err != nil {
 		t.Fatalf("Failed to create vector benchmark space: %v", err)
 	}
 
 	type metrics struct {
-		insertOps  int
-		searchOps  int
-		getOps     int
-		insertTime float64
-		searchTime float64
-		getTime    float64
-		failures   int
+		insertOps      int
+		searchOps      int
+		getOps         int
+		insertTime     float64
+		searchTime     float64
+		getTime        float64
+		failures       int
+		insertFailures int
+		searchFailures int
+		getFailures    int
 	}
 
 	var wg sync.WaitGroup
@@ -78,22 +76,24 @@ func RunVectorSingleSpace(t *testing.T) {
 			for j := 0; j < FirstPhaseOps; j++ {
 				vectorID := fmt.Sprintf("%d", clientID*1000+j)
 				vectorData := generateRandomVector(VectorDimension)
-				if err := SendVectorQuery(models.Query{Type: "INSERT_VECTOR", Key: vectorID, Value: vectorData, Space: vectorSpace}, conn, reader); err == nil {
+				if _, err := sendCheckedVectorQuery(models.Query{Type: "INSERT_VECTOR", Key: vectorID, Value: vectorData, Space: spaceName}, conn, reader); err == nil {
 					m.insertOps++
 					localExpected[vectorID] = vectorData
 				} else {
 					m.failures++
+					m.insertFailures++
 				}
 			}
 			time.Sleep(SleepBetweenPhases)
 			for j := 0; j < SecondPhaseOps; j++ {
 				vectorID := fmt.Sprintf("%d", clientID*1000+j+FirstPhaseOps)
 				vectorData := generateRandomVector(VectorDimension)
-				if err := SendVectorQuery(models.Query{Type: "INSERT_VECTOR", Key: vectorID, Value: vectorData, Space: vectorSpace}, conn, reader); err == nil {
+				if _, err := sendCheckedVectorQuery(models.Query{Type: "INSERT_VECTOR", Key: vectorID, Value: vectorData, Space: spaceName}, conn, reader); err == nil {
 					m.insertOps++
 					localExpected[vectorID] = vectorData
 				} else {
 					m.failures++
+					m.insertFailures++
 				}
 			}
 			m.insertTime = time.Since(insertStart).Seconds()
@@ -102,10 +102,11 @@ func RunVectorSingleSpace(t *testing.T) {
 			searchStart := time.Now()
 			for j := 0; j < 5; j++ {
 				queryVector := generateRandomVector(VectorDimension)
-				if err := SendVectorQuery(models.Query{Type: "SEARCH_TOPK", Value: queryVector, Space: vectorSpace, Dimension: 10}, conn, reader); err == nil {
+				if _, err := sendCheckedVectorQuery(models.Query{Type: "SEARCH_TOPK", Value: queryVector, Space: spaceName, Dimension: 10}, conn, reader); err == nil {
 					m.searchOps++
 				} else {
 					m.failures++
+					m.searchFailures++
 				}
 			}
 			m.searchTime = time.Since(searchStart).Seconds()
@@ -113,28 +114,9 @@ func RunVectorSingleSpace(t *testing.T) {
 			// GET Phase
 			getStart := time.Now()
 			for vectorID := range localExpected {
-				query := models.Query{Type: "GET_VECTOR", Key: vectorID, Space: vectorSpace}
-				data, _ := json.Marshal(query)
-
-				if _, err := conn.Write(append(data, '\n')); err != nil {
+				if _, err := getVectorEventually(models.Query{Type: "GET_VECTOR", Key: vectorID, Space: spaceName}, conn, reader); err != nil {
 					m.failures++
-					continue
-				}
-
-				resp, err := reader.ReadBytes('\n')
-				if err != nil {
-					m.failures++
-					continue
-				}
-
-				var respObj map[string]interface{}
-				if err := json.Unmarshal(resp, &respObj); err != nil {
-					m.failures++
-					continue
-				}
-
-				if respObj["status"] != "OK" {
-					m.failures++
+					m.getFailures++
 				} else {
 					m.getOps++
 				}
@@ -151,6 +133,7 @@ func RunVectorSingleSpace(t *testing.T) {
 
 	// Aggregation
 	var totalInsertOps, totalSearchOps, totalGetOps, totalFails int
+	var totalInsertFails, totalSearchFails, totalGetFails int
 	var totalInsertTime, totalSearchTime, totalGetTime float64
 	var totalClientInsertThroughput, totalClientSearchThroughput, totalClientGetThroughput float64
 	var clientCount int
@@ -172,6 +155,9 @@ func RunVectorSingleSpace(t *testing.T) {
 			totalGetTime += m.getTime
 		}
 		totalFails += m.failures
+		totalInsertFails += m.insertFailures
+		totalSearchFails += m.searchFailures
+		totalGetFails += m.getFailures
 		clientCount++
 	}
 
@@ -181,20 +167,28 @@ func RunVectorSingleSpace(t *testing.T) {
 	fmt.Println("\n📊 Vector Engine Single Space Benchmark Results:")
 	fmt.Printf("Wall clock time: %v\n", wallDuration)
 	fmt.Printf("Total Ops: %d (INSERTs: %d, SEARCHs: %d, GETs: %d)\n", totalOps, totalInsertOps, totalSearchOps, totalGetOps)
-	fmt.Printf("Failures: %d\n", totalFails)
+	fmt.Printf("Failures: %d (INSERTs: %d, SEARCHs: %d, GETs: %d)\n", totalFails, totalInsertFails, totalSearchFails, totalGetFails)
+	fmt.Printf("WAL enabled: %t\n", enableWAL)
 	fmt.Println()
 
 	// Actual system throughput (correct)
 	fmt.Printf("System throughput: %.2f ops/sec (based on wall time)\n", float64(totalOps)/wallDuration.Seconds())
+	fmt.Printf("Aggregate INSERT throughput: %.2f ops/sec\n", float64(totalInsertOps)/wallDuration.Seconds())
+	fmt.Printf("Aggregate SEARCH throughput: %.2f ops/sec\n", float64(totalSearchOps)/wallDuration.Seconds())
+	fmt.Printf("Aggregate GET throughput: %.2f ops/sec\n", float64(totalGetOps)/wallDuration.Seconds())
 
 	// Diagnostic: avg client throughput
 	fmt.Printf("Avg per-client INSERT throughput: %.2f ops/sec\n", totalClientInsertThroughput/float64(clientCount))
 	fmt.Printf("Avg per-client SEARCH throughput: %.2f ops/sec\n", totalClientSearchThroughput/float64(clientCount))
 	fmt.Printf("Avg per-client GET throughput: %.2f ops/sec\n", totalClientGetThroughput/float64(clientCount))
 	fmt.Printf("Avg per-client combined throughput: %.2f ops/sec\n", totalClientThroughput/float64(clientCount))
+
+	if totalFails > 0 {
+		t.Fatalf("vector benchmark recorded %d failed operations", totalFails)
+	}
 }
 
-func createVectorBenchmarkSpace() error {
+func createVectorBenchmarkSpace(space string, enableWAL bool) error {
 	conn, err := net.Dial("tcp", ServerAddr)
 	if err != nil {
 		return err
@@ -204,29 +198,19 @@ func createVectorBenchmarkSpace() error {
 
 	Login(conn, reader)
 
-	query := models.Query{Type: "CREATE_SPACE", Space: vectorSpace, EngineType: "vector", Dimension: VectorDimension, EnableWAL: true}
-	data, _ := json.Marshal(query)
-	_, err = conn.Write(append(data, '\n'))
-	if err != nil {
-		return err
-	}
-
-	_, err = reader.ReadBytes('\n')
-	return err
-}
-
-func SendVectorQuery(q models.Query, conn net.Conn, reader *bufio.Reader) error {
-	data, _ := json.Marshal(q)
-	_, err := conn.Write(append(data, '\n'))
-	if err != nil {
-		return err
-	}
-	_, err = reader.ReadBytes('\n')
+	_, err = sendCheckedVectorQuery(models.Query{
+		Type:       "CREATE_SPACE",
+		Space:      space,
+		EngineType: "vector",
+		Dimension:  VectorDimension,
+		IndexType:  "Flat",
+		Metric:     "L2",
+		EnableWAL:  enableWAL,
+	}, conn, reader)
 	return err
 }
 
 func generateRandomVector(dimension int) string {
-	rand.Seed(time.Now().UnixNano())
 	components := make([]string, dimension)
 	for i := 0; i < dimension; i++ {
 		components[i] = fmt.Sprintf("%.6f", rand.Float32())

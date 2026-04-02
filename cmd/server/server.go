@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -254,7 +255,12 @@ func StartServer(port string, authFilePath string, maxConnections int32, dataFol
 	if port == managementPort {
 		panic(fmt.Sprintf("client port and management port must differ (both are %s)", port))
 	}
+	runtime.SetBlockProfileRate(1)
+	runtime.SetMutexProfileFraction(1)
+	spaceRestoreStartedAt := time.Now()
+	fmt.Printf("Loading spaces and indexes from %s before opening network listeners...\n", dataFolderPath)
 	spaceManager := spaces.NewSpaceManager(dataFolderPath)
+	fmt.Printf("Finished loading spaces in %s. Opening management and client listeners...\n", formatStartupDuration(time.Since(spaceRestoreStartedAt)))
 	defer spaceManager.CloseAll()
 
 	authManager, err := auth.NewAuthManager(authFilePath)
@@ -397,6 +403,13 @@ func monitorConnections(cm *ConnectionManager) {
 			fmt.Printf("Connection status: %d/%d (%.1f%%)\n", active, max, usage)
 		}
 	}
+}
+
+func formatStartupDuration(d time.Duration) time.Duration {
+	if d < time.Second {
+		return d.Round(time.Millisecond)
+	}
+	return d.Round(100 * time.Millisecond)
 }
 
 func handleConnectionWithManager(conn net.Conn, spaceManager *spaces.SpaceManager, authManager *auth.AuthManager, connManager *ConnectionManager) {

@@ -11,10 +11,10 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/DataIntelligenceCrew/go-faiss"
+	"github.com/shibudb.org/shibudb-server/internal/maintenance"
 	"github.com/shibudb.org/shibudb-server/internal/wal"
 )
 
@@ -46,9 +46,10 @@ type VectorEngineImpl struct {
 	fileOffsets map[int64]int64 // id -> byte offset in data file
 
 	// Lifecycle / checkpointing
-	quitChan     chan struct{}
-	flushRunning int32
-	closeOnce    sync.Once
+	closeOnce         sync.Once
+	checkpointMu      sync.Mutex
+	maintenanceMu     sync.RWMutex
+	maintenanceClosed bool
 
 	lock sync.RWMutex
 
@@ -60,7 +61,6 @@ type VectorEngineImpl struct {
 	}
 	maxBatch int
 	maxDelay time.Duration
-	flushCh  chan struct{}
 }
 
 var _ VectorEngine = (*VectorEngineImpl)(nil)
@@ -106,12 +106,10 @@ func NewVectorEngine(dataPath, indexPath, walPath string, maxVectorSize int, ind
 		trainPool:     make([][]float32, 0, 1024),
 		pendingAdd:    make(map[int64][]float32),
 		fileOffsets:   make(map[int64]int64),
-		quitChan:      make(chan struct{}),
 
 		// batching defaults
 		maxBatch: 1024,
 		maxDelay: 50 * time.Millisecond,
-		flushCh:  make(chan struct{}, 1),
 	}
 
 	// Rebuild fileOffsets from data file (last record per id wins; tombstones mark deleted).
@@ -125,10 +123,6 @@ func NewVectorEngine(dataPath, indexPath, walPath string, maxVectorSize int, ind
 			return nil, fmt.Errorf("WAL replay failed: %w", err)
 		}
 	}
-
-	// Background maintenance
-	go e.autoCheckpoint()
-	go e.autoFlushData()
 
 	return e, nil
 }
@@ -194,6 +188,7 @@ func (ve *VectorEngineImpl) insertAfterWAL(id int64, vector []float32) error {
 	trained := (nTrain == 0) || ve.baseIndex.IsTrained()
 
 	if trained {
+		//TODO: we are always deleting first, check if it will cause performance issues even if the id does not exists
 		// Replace duplicate id if exists
 		sel, _ := faiss.NewIDSelectorBatch([]int64{id})
 		_, _ = ve.idMapIndex.RemoveIDs(sel)
@@ -204,6 +199,7 @@ func (ve *VectorEngineImpl) insertAfterWAL(id int64, vector []float32) error {
 		}
 		// Enqueue to persist (batched)
 		ve.enqueuePersist(id, vector)
+		maintenance.MarkVectorCheckpointDirty(ve)
 		return nil
 	}
 
@@ -238,6 +234,7 @@ func (ve *VectorEngineImpl) insertAfterWAL(id int64, vector []float32) error {
 		}
 		ve.pendingAdd = make(map[int64][]float32)
 		ve.trainPool = nil
+		maintenance.MarkVectorCheckpointDirty(ve)
 	}
 
 	return nil
@@ -375,6 +372,7 @@ func (ve *VectorEngineImpl) RemoveVector(id int64) error {
 	if err := ve.removeAfterWAL(id); err != nil {
 		return err
 	}
+	maintenance.MarkVectorCheckpointDirty(ve)
 
 	if ve.wal != nil {
 		return ve.wal.MarkCommitted()
@@ -440,7 +438,12 @@ func (ve *VectorEngineImpl) appendTombstoneToDataFile(id int64) error {
 func (ve *VectorEngineImpl) Close() error {
 	ve.closeOnce.Do(func() {
 		log.Println("Closing vector engine...")
-		close(ve.quitChan)
+
+		ve.maintenanceMu.Lock()
+		ve.maintenanceClosed = true
+		maintenance.UnregisterVectorFlush(ve)
+		maintenance.UnregisterVectorCheckpoint(ve)
+		ve.maintenanceMu.Unlock()
 
 		// Final flush of any pending data-file writes
 		ve.flushData(true)
@@ -461,31 +464,11 @@ func (ve *VectorEngineImpl) Close() error {
 
 // === Internals ===
 
-func (ve *VectorEngineImpl) autoCheckpoint() {
-	ticker := time.NewTicker(30 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ticker.C:
-			if !atomic.CompareAndSwapInt32(&ve.flushRunning, 0, 1) {
-				continue
-			}
-			if err := ve.checkpoint(); err != nil {
-				log.Printf("Checkpoint failed: %v", err)
-			}
-			atomic.StoreInt32(&ve.flushRunning, 0)
-		case <-ve.quitChan:
-			return
-		}
-	}
-}
-
 func (ve *VectorEngineImpl) checkpoint() error {
-	ve.lock.Lock()
-	defer ve.lock.Unlock()
+	ve.checkpointMu.Lock()
+	defer ve.checkpointMu.Unlock()
 
-	// Persist the (ID-mapped) index
+	// Persist a best-effort snapshot of the current ID-mapped index.
 	if err := faiss.WriteIndex(ve.idMapIndex, ve.indexFile); err != nil {
 		return fmt.Errorf("write index: %w", err)
 	}
@@ -605,30 +588,29 @@ func (ve *VectorEngineImpl) enqueuePersist(id int64, vec []float32) {
 		id  int64
 		vec []float32
 	}{id: id, vec: vec})
-	needKick := len(ve.persistBuf) >= ve.maxBatch
 	ve.persistMu.Unlock()
-
-	if needKick {
-		select {
-		case ve.flushCh <- struct{}{}:
-		default:
-		}
-	}
+	maintenance.MarkVectorFlushDirty(ve)
 }
 
-func (ve *VectorEngineImpl) autoFlushData() {
-	ticker := time.NewTicker(ve.maxDelay)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ve.quitChan:
-			ve.flushData(true) // final flush
-			return
-		case <-ve.flushCh:
-			ve.flushData(false)
-		case <-ticker.C:
-			ve.flushData(false)
-		}
+// MaintenanceFlush participates in the shared vector flush loop.
+func (ve *VectorEngineImpl) MaintenanceFlush() {
+	ve.maintenanceMu.RLock()
+	defer ve.maintenanceMu.RUnlock()
+	if ve.maintenanceClosed {
+		return
+	}
+	ve.flushData(false)
+}
+
+// MaintenanceCheckpoint participates in the shared vector checkpoint loop.
+func (ve *VectorEngineImpl) MaintenanceCheckpoint() {
+	ve.maintenanceMu.RLock()
+	defer ve.maintenanceMu.RUnlock()
+	if ve.maintenanceClosed {
+		return
+	}
+	if err := ve.checkpoint(); err != nil {
+		log.Printf("checkpoint failed: %v", err)
 	}
 }
 
@@ -646,15 +628,17 @@ func (ve *VectorEngineImpl) flushData(force bool) {
 		return
 	}
 
-	// single locked append to file + single fsync
+	// Hold the write lock only for the in-memory fileOffsets updates and
+	// the raw file writes. Release before fsync so searches are not blocked
+	// for the full duration of the (potentially slow) syscall.
 	ve.lock.Lock()
-	defer ve.lock.Unlock()
-
 	for _, it := range buf {
 		if err := ve.appendToDataFile(it.id, it.vec); err != nil {
 			log.Printf("appendToDataFile failed for id=%d: %v", it.id, err)
 		}
 	}
+	ve.lock.Unlock()
+
 	if err := ve.dataFile.Sync(); err != nil {
 		log.Printf("data file sync failed: %v", err)
 	}

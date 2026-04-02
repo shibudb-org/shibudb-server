@@ -8,23 +8,23 @@ import (
 	"os"
 	"strconv"
 	"sync"
-	"sync/atomic"
-	"time"
 
 	"github.com/shibudb.org/shibudb-server/internal/index"
+	"github.com/shibudb.org/shibudb-server/internal/maintenance"
 	"github.com/shibudb.org/shibudb-server/internal/wal"
 )
 
 type ShibuDB struct {
-	file         *os.File
-	lock         sync.RWMutex
-	index        *index.BTreeIndex
-	wal          *wal.WAL
-	batchLock    sync.Mutex
-	batch        map[string]string
-	quitChan     chan struct{}
-	flushRunning int32
-	closeOnce    sync.Once
+	file      *os.File
+	lock      sync.RWMutex
+	index     *index.BTreeIndex
+	wal       *wal.WAL
+	batchLock sync.Mutex
+	batch     map[string]string
+	closeOnce sync.Once
+
+	maintenanceMu     sync.RWMutex
+	maintenanceClosed bool
 }
 
 func OpenDBWithPathsAndWAL(dataPath, walPath, indexPath string, enableWAL bool) (*ShibuDB, error) {
@@ -47,19 +47,16 @@ func OpenDBWithPathsAndWAL(dataPath, walPath, indexPath string, enableWAL bool) 
 	}
 
 	db := &ShibuDB{
-		file:     file,
-		index:    dbIndex,
-		wal:      dbWAL,
-		quitChan: make(chan struct{}),
-		batch:    make(map[string]string),
+		file:  file,
+		index: dbIndex,
+		wal:   dbWAL,
+		batch: make(map[string]string),
 	}
 
 	db.index.BatchLoadFromMmap()
 	if enableWAL {
 		db.replayWAL()
 	}
-
-	go db.autoFlushBatch()
 
 	return db, nil
 }
@@ -85,18 +82,15 @@ func OpenDBWithWAL(filename string, walFilename string, enableWAL bool) (*ShibuD
 		}
 	}
 	db := &ShibuDB{
-		file:     file,
-		index:    dbIndex,
-		wal:      dbWAL,
-		quitChan: make(chan struct{}),
-		batch:    make(map[string]string),
+		file:  file,
+		index: dbIndex,
+		wal:   dbWAL,
+		batch: make(map[string]string),
 	}
 	db.index.BatchLoadFromMmap()
 	if enableWAL {
 		db.replayWAL()
 	}
-
-	go db.autoFlushBatch()
 
 	return db, nil
 }
@@ -119,33 +113,11 @@ func (db *ShibuDB) replayWAL() {
 	db.wal.Clear()
 }
 
-func (db *ShibuDB) autoFlushBatch() {
-	ticker := time.NewTicker(1 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ticker.C:
-			if !atomic.CompareAndSwapInt32(&db.flushRunning, 0, 1) {
-				continue
-			}
-			if err := db.FlushBatch(); err != nil {
-				log.Printf("FlushBatch failed: %v", err)
-			}
-
-			// Reset flag AFTER flush fully completes
-			atomic.StoreInt32(&db.flushRunning, 0)
-
-		case <-db.quitChan:
-			return
-		}
-	}
-}
-
 func (db *ShibuDB) PutBatch(key, value string) error {
 	db.batchLock.Lock()
 	db.batch[key] = value
 	db.batchLock.Unlock()
+	maintenance.MarkKVFlushDirty(db)
 	return nil
 }
 
@@ -322,7 +294,12 @@ func (db *ShibuDB) Delete(key string) error {
 func (db *ShibuDB) Close() error {
 	db.closeOnce.Do(func() {
 		log.Println("Closed.............")
-		close(db.quitChan)
+
+		db.maintenanceMu.Lock()
+		db.maintenanceClosed = true
+		maintenance.UnregisterKVFlush(db)
+		db.maintenanceMu.Unlock()
+
 		db.FlushBatch()
 		if db.wal != nil {
 			db.wal.Clear()
@@ -335,4 +312,16 @@ func (db *ShibuDB) Close() error {
 
 func (db *ShibuDB) Put(key, value string) error {
 	return db.PutBatch(key, value)
+}
+
+// MaintenanceFlush participates in the shared KV flush loop.
+func (db *ShibuDB) MaintenanceFlush() {
+	db.maintenanceMu.RLock()
+	defer db.maintenanceMu.RUnlock()
+	if db.maintenanceClosed {
+		return
+	}
+	if err := db.FlushBatch(); err != nil {
+		log.Printf("FlushBatch failed: %v", err)
+	}
 }

@@ -25,6 +25,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -40,6 +41,7 @@ import (
 	"github.com/shibudb.org/shibudb-server/internal/auth"
 	"github.com/shibudb.org/shibudb-server/internal/cliinput"
 	"github.com/shibudb.org/shibudb-server/internal/models"
+	"github.com/shibudb.org/shibudb-server/internal/spaces"
 )
 
 type runtimePaths struct {
@@ -138,7 +140,7 @@ func isServerRunning(pidFilePath string) (bool, int) {
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Println("Usage: shibudb [start [flags] | stop | connect [flags] | manager [flags] <command> | --version | --help]")
+		fmt.Println("Usage: shibudb [start [flags] | stop | connect [flags] | manager [flags] <command> | rebuild-index [flags] <space_name> | --version | --help]")
 		return
 	}
 
@@ -294,6 +296,16 @@ func main() {
 		}
 		handleManagerCommand(mgmtPort, args, authCfg)
 
+	case "rebuild-index":
+		fs := flag.NewFlagSet("rebuild-index", flag.ExitOnError)
+		dataDir := fs.String("data-dir", defaultDataDir(), "data directory root (used to locate space files under lib/)")
+		fs.Parse(os.Args[2:]) //nolint
+		if len(fs.Args()) != 1 {
+			fmt.Println("Usage: shibudb rebuild-index [--data-dir <path>] <space_name>")
+			return
+		}
+		rebuildIndex(newRuntimePaths(*dataDir), fs.Args()[0])
+
 	case "--help":
 		printHelp()
 
@@ -344,6 +356,7 @@ Usage:
   shibudb stop                                 Stop the ShibuDB background server
   shibudb connect [flags]                      Connect to the ShibuDB CLI client
   shibudb manager [flags] <command>            Manage connection limits at runtime
+  shibudb rebuild-index [flags] <space_name>   Rebuild one space index from on-disk data
   shibudb --version                            Show version information
   shibudb --help                               Show this help message
 
@@ -396,6 +409,8 @@ Examples:
                                       # Custom client and management ports
   shibudb manager --username admin --password admin increase 500
   shibudb manager --username admin --password admin generate-token
+  shibudb rebuild-index yd_v_global
+                                      # Rebuild one space index while the server is stopped
   kill -USR1 <pid>                     # Increase limit by 100 via signal
 
 Note: By default, ShibuDB stores runtime files under your home directory.
@@ -960,29 +975,15 @@ func startServer(port, mgmtPort string, maxConnections int32, paths runtimePaths
 	cmdArgs := buildRunSubcommandArgs(port, server.DefaultPort, mgmtPort, server.DefaultManagementPort, maxConnections, resolveDefaultMaxConnections(), paths, adminUser, adminPass)
 	cmd := exec.Command(os.Args[0], cmdArgs...)
 
+	startupLogOffset := logFileSize(paths.logFile)
 	logFile := openLogFile(paths.logFile)
+	defer logFile.Close()
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 
 	err = cmd.Start()
 	if err != nil {
 		log.Fatalf("Failed to start server: %v", err)
-	}
-
-	// Wait a moment to see if the process starts successfully
-	done := make(chan error, 1)
-	go func() {
-		done <- cmd.Wait()
-	}()
-
-	// Check if process started successfully within 2 seconds
-	select {
-	case err := <-done:
-		if err != nil {
-			log.Fatalf("Server failed to start: %v", err)
-		}
-	case <-time.After(2 * time.Second):
-		// Process is still running, which is good
 	}
 
 	// Create PID file directory and write PID
@@ -997,6 +998,16 @@ func startServer(port, mgmtPort string, maxConnections int32, paths runtimePaths
 		log.Fatalf("Failed to write PID file: %v", err)
 	}
 
+	// Stream startup logs from the background process until it signals readiness.
+	done := make(chan error, 1)
+	go func() {
+		done <- cmd.Wait()
+	}()
+	if err := streamStartupLogsUntilReady(paths.logFile, startupLogOffset, done); err != nil {
+		_ = os.Remove(paths.pidFile)
+		log.Fatalf("Server failed to start: %v", err)
+	}
+
 	displayLimit := maxConnections
 	if pl, err := server.LoadConnectionLimit(paths.libDir); err == nil && pl > 0 {
 		displayLimit = pl
@@ -1008,6 +1019,62 @@ func startServer(port, mgmtPort string, maxConnections int32, paths runtimePaths
 	}
 
 	fmt.Printf("%sShibuDB started on port %s (PID: %d, max connections: %d)%s\n", green, port, cmd.Process.Pid, displayLimit, reset)
+}
+
+func logFileSize(path string) int64 {
+	info, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0
+		}
+		return 0
+	}
+	return info.Size()
+}
+
+func streamStartupLogsUntilReady(logFilePath string, startOffset int64, done <-chan error) error {
+	file, err := os.OpenFile(logFilePath, os.O_RDONLY|os.O_CREATE, 0644)
+	if err != nil {
+		return fmt.Errorf("open startup log: %w", err)
+	}
+	defer file.Close()
+
+	if _, err := file.Seek(startOffset, io.SeekStart); err != nil {
+		return fmt.Errorf("seek startup log: %w", err)
+	}
+
+	reader := bufio.NewReader(file)
+	for {
+		line, err := reader.ReadString('\n')
+		if err == nil {
+			line = strings.TrimRight(line, "\r\n")
+			if line == "" {
+				continue
+			}
+			if isServerReadyLogLine(line) {
+				return nil
+			}
+			fmt.Println(line)
+			continue
+		}
+
+		if !errors.Is(err, io.EOF) {
+			return fmt.Errorf("read startup log: %w", err)
+		}
+
+		select {
+		case waitErr := <-done:
+			if waitErr != nil {
+				return waitErr
+			}
+			return errors.New("server exited before signaling readiness")
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+}
+
+func isServerReadyLogLine(line string) bool {
+	return strings.Contains(line, "ShibuDB server started on port ")
 }
 
 func stopServer(paths runtimePaths) {
@@ -1031,6 +1098,22 @@ func stopServer(paths runtimePaths) {
 		os.Remove(paths.pidFile)
 		fmt.Printf("%sShibuDB stopped (PID: %d).%s\n", green, pid, reset)
 	}
+}
+
+func rebuildIndex(paths runtimePaths, space string) {
+	if running, pid := isServerRunning(paths.pidFile); running {
+		fmt.Printf("%sError:%s ShibuDB server is running (PID: %d).\n", red, reset, pid)
+		fmt.Println("Stop the server before rebuilding indexes to avoid concurrent file writes.")
+		os.Exit(1)
+	}
+
+	result, err := spaces.RebuildSpaceIndex(paths.libDir, space)
+	if err != nil {
+		fmt.Printf("%sError:%s Failed to rebuild index for %q: %v\n", red, reset, space, err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("%s%s%s\n", green, result, reset)
 }
 
 type managerAuthConfig struct {

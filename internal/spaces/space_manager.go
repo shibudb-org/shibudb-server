@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/shibudb.org/shibudb-server/internal/storage"
 
@@ -27,6 +28,8 @@ const (
 	legacyMetadataFileName    = "metadata.json"
 	manifestOpCreate          = "create"
 	manifestOpDelete          = "delete"
+	spaceLoadProgressStep     = 500
+	spaceLoadProgressInterval = 5 * time.Second
 )
 
 func isPowerOf2InRange(n int) bool {
@@ -176,18 +179,41 @@ func (sm *SpaceManager) loadCurrentSpaceCatalog() (bool, error) {
 		return false, nil
 	}
 
+	names := sortedSpaceNames(discovered)
+	startedAt := time.Now()
+	lastLogAt := startedAt
+	if len(names) > 0 {
+		fmt.Printf("Restoring %d spaces from %s before accepting client connections...\n", len(names), sm.baseDir)
+	}
+
 	validSpaces := make(map[string]struct{}, len(discovered))
-	for _, name := range sortedSpaceNames(discovered) {
+	failures := 0
+	for idx, name := range names {
 		meta, err := sm.readSpaceMetaFile(filepath.Join(sm.baseDir, name, spaceMetaFileName))
 		if err != nil {
 			fmt.Printf("Warning: skipping space %q due to invalid metadata: %v\n", name, err)
+			failures++
+			maybeLogSpaceRestoreProgress(idx+1, len(names), len(validSpaces), failures, startedAt, &lastLogAt, name)
 			continue
 		}
 		if err := sm.loadSpace(meta); err != nil {
 			fmt.Printf("❌ Failed to open space '%s': %v\n", meta.Name, err)
+			failures++
+			maybeLogSpaceRestoreProgress(idx+1, len(names), len(validSpaces), failures, startedAt, &lastLogAt, meta.Name)
 			continue
 		}
 		validSpaces[meta.Name] = struct{}{}
+		maybeLogSpaceRestoreProgress(idx+1, len(names), len(validSpaces), failures, startedAt, &lastLogAt, meta.Name)
+	}
+
+	if len(names) > 0 {
+		fmt.Printf(
+			"Finished restoring spaces: loaded %d/%d (failed: %d, elapsed: %s)\n",
+			len(validSpaces),
+			len(names),
+			failures,
+			formatSpaceRestoreDuration(time.Since(startedAt)),
+		)
 	}
 
 	if manifestErr != nil || !manifestExists || !sameSpaceSet(manifestSpaces, validSpaces) {
@@ -596,6 +622,33 @@ func closeIfPossible(value interface{}) {
 	if closer, ok := value.(interface{ Close() error }); ok {
 		_ = closer.Close()
 	}
+}
+
+func maybeLogSpaceRestoreProgress(processed, total, loaded, failures int, startedAt time.Time, lastLogAt *time.Time, lastSpace string) {
+	if total == 0 {
+		return
+	}
+	if processed != total && processed%spaceLoadProgressStep != 0 && time.Since(*lastLogAt) < spaceLoadProgressInterval {
+		return
+	}
+
+	*lastLogAt = time.Now()
+	fmt.Printf(
+		"Space restore progress: %d/%d processed, %d loaded, %d failed (elapsed: %s, last: %s)\n",
+		processed,
+		total,
+		loaded,
+		failures,
+		formatSpaceRestoreDuration(time.Since(startedAt)),
+		lastSpace,
+	)
+}
+
+func formatSpaceRestoreDuration(d time.Duration) time.Duration {
+	if d < time.Second {
+		return d.Round(time.Millisecond)
+	}
+	return d.Round(100 * time.Millisecond)
 }
 
 func sameSpaceSet(left map[string]struct{}, right map[string]struct{}) bool {
