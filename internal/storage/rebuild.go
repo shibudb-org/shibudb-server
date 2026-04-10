@@ -2,6 +2,7 @@ package storage
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -37,6 +38,12 @@ type vectorRecordLocation struct {
 	offset int64
 }
 
+var errVectorRebuildTraining = errors.New("vector rebuild requires training fallback")
+
+func isVectorRebuildTrainingError(err error) bool {
+	return errors.Is(err, errVectorRebuildTraining)
+}
+
 // RebuildKeyValueIndex reconstructs a key-value index file from the append-only
 // data file. The latest record wins; records with zero-length values are
 // treated as deletions.
@@ -50,6 +57,7 @@ func RebuildKeyValueIndex(dataPath, indexPath string) (KeyValueRebuildStats, err
 	defer dataFile.Close()
 
 	latestOffsets := make(map[string]int64)
+	latestDeleted := make(map[string]bool)
 	var offset int64
 
 	for {
@@ -88,14 +96,15 @@ func RebuildKeyValueIndex(dataPath, indexPath string) (KeyValueRebuildStats, err
 		offset += int64(8) + int64(keySize) + int64(valSize)
 
 		key := string(keyBytes)
-		if valSize == 0 {
-			delete(latestOffsets, key)
-			continue
-		}
 		latestOffsets[key] = recordOffset
+		latestDeleted[key] = valSize == 0
 	}
 
-	stats.LiveKeys = len(latestOffsets)
+	for key := range latestOffsets {
+		if !latestDeleted[key] {
+			stats.LiveKeys++
+		}
+	}
 	if err := writeKeyValueIndex(indexPath, latestOffsets); err != nil {
 		return stats, err
 	}
@@ -110,6 +119,11 @@ func RebuildVectorIndex(dataPath, indexPath string, dimension int, indexDesc str
 		return stats, fmt.Errorf("invalid vector dimension %d", dimension)
 	}
 
+	info, err := os.Stat(dataPath)
+	if err != nil {
+		return stats, fmt.Errorf("stat vector data file: %w", err)
+	}
+
 	dataFile, err := os.Open(dataPath)
 	if err != nil {
 		return stats, fmt.Errorf("open vector data file: %w", err)
@@ -117,6 +131,12 @@ func RebuildVectorIndex(dataPath, indexPath string, dimension int, indexDesc str
 	defer dataFile.Close()
 
 	recordSize := 8 + 4*dimension
+	if info.Size()%int64(recordSize) != 0 {
+		return stats, fmt.Errorf(
+			"vector data file size %d is not a multiple of record size %d (dimension %d): possible dimension mismatch or corruption",
+			info.Size(), recordSize, dimension,
+		)
+	}
 	latestOffsets := make(map[int64]int64)
 	var offset int64
 
@@ -169,8 +189,8 @@ func RebuildVectorIndex(dataPath, indexPath string, dimension int, indexDesc str
 	stats.TrainingSamples = len(trainData) / dimension
 	if requiredTrainCount > 0 && stats.LiveVectors > 0 && stats.LiveVectors < requiredTrainCount {
 		return stats, fmt.Errorf(
-			"cannot rebuild %q index: need at least %d live vectors for training, found %d",
-			indexDesc, requiredTrainCount, stats.LiveVectors,
+			"%w: cannot rebuild %q index: need at least %d live vectors for training, found %d",
+			errVectorRebuildTraining, indexDesc, requiredTrainCount, stats.LiveVectors,
 		)
 	}
 
@@ -181,7 +201,7 @@ func RebuildVectorIndex(dataPath, indexPath string, dimension int, indexDesc str
 
 	if requiredTrainCount > 0 && stats.LiveVectors > 0 {
 		if err := index.Train(trainData); err != nil {
-			return stats, fmt.Errorf("train FAISS index: %w", err)
+			return stats, fmt.Errorf("%w: train FAISS index: %w", errVectorRebuildTraining, err)
 		}
 	}
 

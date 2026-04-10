@@ -3,6 +3,7 @@ package storage
 import (
 	"math/rand"
 	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
@@ -296,4 +297,45 @@ func TestVectorEngineImpl_InsertAndSearch_IVF32Flat(t *testing.T) {
 			t.Errorf("Stored vector should not match first inserted vector")
 		}
 	})
+}
+
+// Training-based indexes (IVF, PQ, …) must not use hot-segment rollover: a single
+// data file and in-memory index rebuilt on open.
+func TestVectorEngineTrainingIndex_NoSegmentRollover(t *testing.T) {
+	dataPath := filepath.Join("testdata", "vector_data_ivf_noseg.db")
+	indexPath := filepath.Join("testdata", "vector_index_ivf_noseg.faiss")
+	walPath := filepath.Join("testdata", "vector_wal_ivf_noseg.db")
+	os.MkdirAll("testdata", 0755)
+	for _, p := range []string{dataPath, indexPath, walPath} {
+		os.Remove(p)
+	}
+	t.Cleanup(func() {
+		for _, p := range []string{dataPath, indexPath, walPath} {
+			os.Remove(p)
+		}
+	})
+
+	ve, err := NewVectorEngineWithSettings(dataPath, indexPath, walPath, 4, "IVF32,Flat", faiss.MetricL2, true, SpaceSettings{
+		SegmentRolloverBytes:   256,
+		MaxSegmentsBeforeMerge: 2,
+	})
+	if err != nil {
+		t.Fatalf("NewVectorEngineWithSettings: %v", err)
+	}
+	defer ve.Close()
+
+	rand.Seed(time.Now().UnixNano())
+	for i := 0; i < 200; i++ {
+		if err := ve.InsertVector(int64(i), randomVector(4)); err != nil {
+			t.Fatalf("InsertVector %d: %v", i, err)
+		}
+	}
+	ve.MaintenanceFlush()
+
+	if len(ve.manifest.Segments) != 1 {
+		t.Fatalf("expected single vector segment for IVF, got %d segments", len(ve.manifest.Segments))
+	}
+	if ve.vectorSegmentationEnabled {
+		t.Fatal("IVF index must disable vector segmentation (vectorSegmentationEnabled=false)")
+	}
 }

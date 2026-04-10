@@ -6,9 +6,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/shibudb.org/shibudb-server/internal/auth"
+	"github.com/shibudb.org/shibudb-server/internal/spaces"
 )
 
 func TestManagementServerRequiresBearerToken(t *testing.T) {
@@ -21,7 +23,9 @@ func TestManagementServerRequiresBearerToken(t *testing.T) {
 		t.Fatalf("NewTokenManager() error = %v", err)
 	}
 
-	ms := NewManagementServer(connMgr, tokenMgr, "0")
+	sm := spaces.NewSpaceManager(dataDir)
+	defer sm.CloseAll()
+	ms := NewManagementServer(connMgr, sm, tokenMgr, "0")
 
 	tests := []struct {
 		name         string
@@ -91,7 +95,9 @@ func TestManagementServerAcceptsValidBearerToken(t *testing.T) {
 		t.Fatalf("GenerateToken() error = %v", err)
 	}
 
-	ms := NewManagementServer(connMgr, tokenMgr, "0")
+	sm := spaces.NewSpaceManager(dataDir)
+	defer sm.CloseAll()
+	ms := NewManagementServer(connMgr, sm, tokenMgr, "0")
 
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	req.Header.Set("Authorization", "Bearer "+rawToken)
@@ -127,7 +133,9 @@ func TestManagementStatsExposeBusyAndIdleConnections(t *testing.T) {
 		t.Fatalf("GenerateToken() error = %v", err)
 	}
 
-	ms := NewManagementServer(connMgr, tokenMgr, "0")
+	sm := spaces.NewSpaceManager(dataDir)
+	defer sm.CloseAll()
+	ms := NewManagementServer(connMgr, sm, tokenMgr, "0")
 
 	req := httptest.NewRequest(http.MethodGet, "/stats", nil)
 	req.Header.Set("Authorization", "Bearer "+rawToken)
@@ -155,5 +163,47 @@ func TestManagementStatsExposeBusyAndIdleConnections(t *testing.T) {
 	}
 	if got := int(payload["available_slots"]); got != 99 {
 		t.Fatalf("available_slots = %d, want 99", got)
+	}
+}
+
+func TestManagementServerUpdatesSpaceSettings(t *testing.T) {
+	dataDir := t.TempDir()
+	connMgr := NewConnectionManager(100, dataDir)
+	defer connMgr.Shutdown()
+
+	tokenMgr, err := auth.NewTokenManager(filepath.Join(dataDir, "management_tokens.json"))
+	if err != nil {
+		t.Fatalf("NewTokenManager() error = %v", err)
+	}
+	_, rawToken, err := tokenMgr.GenerateToken("admin")
+	if err != nil {
+		t.Fatalf("GenerateToken() error = %v", err)
+	}
+
+	sm := spaces.NewSpaceManager(dataDir)
+	defer sm.CloseAll()
+	if _, err := sm.CreateSpace("managed_space", "key-value", 0, "", ""); err != nil {
+		t.Fatalf("CreateSpace() error = %v", err)
+	}
+
+	ms := NewManagementServer(connMgr, sm, tokenMgr, "0")
+
+	req := httptest.NewRequest(http.MethodPut, "/spaces/settings", strings.NewReader(`{"space":"managed_space","segment_rollover_bytes":12345}`))
+	req.Header.Set("Authorization", "Bearer "+rawToken)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	ms.server.Handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	meta, ok := sm.SpaceMeta("managed_space")
+	if !ok {
+		t.Fatal("SpaceMeta() missing managed_space")
+	}
+	if meta.SegmentRolloverBytes != 12345 {
+		t.Fatalf("SegmentRolloverBytes = %d, want 12345", meta.SegmentRolloverBytes)
 	}
 }

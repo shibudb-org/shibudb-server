@@ -100,6 +100,19 @@ func (idx *BTreeIndex) Get(key string) (int64, bool) {
 	return item.(Item).Value, true
 }
 
+func (idx *BTreeIndex) SnapshotEntries() map[string]int64 {
+	idx.lock.RLock()
+	defer idx.lock.RUnlock()
+
+	entries := make(map[string]int64)
+	idx.btree.Ascend(func(i btree.Item) bool {
+		item := i.(Item)
+		entries[item.Key] = item.Value
+		return true
+	})
+	return entries
+}
+
 func (idx *BTreeIndex) Remove(key string) error {
 	idx.lock.Lock()
 	defer idx.lock.Unlock()

@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/shibudb.org/shibudb-server/internal/storage"
 )
 
 func TestIsAllowedIndexType(t *testing.T) {
@@ -213,6 +215,12 @@ func TestSpaceManager_KeyValueMetadataOmitsVectorFieldsAndDefaultsWALOff(t *test
 	if meta.Metric != "" {
 		t.Fatalf("Metric = %q, want empty for key-value", meta.Metric)
 	}
+	if meta.SegmentRolloverBytes != storage.DefaultSegmentRolloverBytes {
+		t.Fatalf("SegmentRolloverBytes = %d, want %d", meta.SegmentRolloverBytes, storage.DefaultSegmentRolloverBytes)
+	}
+	if meta.MaxSegmentsBeforeMerge != storage.DefaultMaxSegmentsBeforeMerge {
+		t.Fatalf("MaxSegmentsBeforeMerge = %d, want %d", meta.MaxSegmentsBeforeMerge, storage.DefaultMaxSegmentsBeforeMerge)
+	}
 
 	data, err := os.ReadFile(filepath.Join(dir, "kv_default", spaceMetaFileName))
 	if err != nil {
@@ -223,6 +231,84 @@ func TestSpaceManager_KeyValueMetadataOmitsVectorFieldsAndDefaultsWALOff(t *test
 		if strings.Contains(content, forbidden) {
 			t.Fatalf("key-value metadata unexpectedly contains %s: %s", forbidden, content)
 		}
+	}
+	for _, expected := range []string{`"segment_rollover_bytes"`, `"max_segments_before_merge"`} {
+		if !strings.Contains(content, expected) {
+			t.Fatalf("key-value metadata missing %s: %s", expected, content)
+		}
+	}
+}
+
+func TestSpaceManager_UpdateSpaceSettingsPersistsAndAppliesDefaults(t *testing.T) {
+	dir := t.TempDir()
+	sm := NewSpaceManager(dir)
+	defer sm.CloseAll()
+
+	if _, err := sm.CreateSpace("settings_space", "key-value", 0, "", ""); err != nil {
+		t.Fatalf("CreateSpace failed: %v", err)
+	}
+
+	if err := sm.UpdateSpaceSettings("settings_space", storage.SpaceSettings{
+		SegmentRolloverBytes:   1024,
+		MaxSegmentsBeforeMerge: 7,
+	}); err != nil {
+		t.Fatalf("UpdateSpaceSettings failed: %v", err)
+	}
+
+	meta, ok := sm.SpaceMeta("settings_space")
+	if !ok {
+		t.Fatal("SpaceMeta did not return updated space")
+	}
+	if meta.SegmentRolloverBytes != 1024 {
+		t.Fatalf("SegmentRolloverBytes = %d, want 1024", meta.SegmentRolloverBytes)
+	}
+	if meta.MaxSegmentsBeforeMerge != 7 {
+		t.Fatalf("MaxSegmentsBeforeMerge = %d, want 7", meta.MaxSegmentsBeforeMerge)
+	}
+
+	sm.CloseAll()
+	reloaded := NewSpaceManager(dir)
+	defer reloaded.CloseAll()
+
+	meta, ok = reloaded.SpaceMeta("settings_space")
+	if !ok {
+		t.Fatal("SpaceMeta missing after reload")
+	}
+	if meta.SegmentRolloverBytes != 1024 {
+		t.Fatalf("reloaded SegmentRolloverBytes = %d, want 1024", meta.SegmentRolloverBytes)
+	}
+	if meta.MaxSegmentsBeforeMerge != 7 {
+		t.Fatalf("reloaded MaxSegmentsBeforeMerge = %d, want 7", meta.MaxSegmentsBeforeMerge)
+	}
+}
+
+func TestSpaceManager_UpdateSpaceSettingsPreservesUnspecifiedValues(t *testing.T) {
+	dir := t.TempDir()
+	sm := NewSpaceManager(dir)
+	defer sm.CloseAll()
+
+	if _, err := sm.CreateSpaceWithSettings("settings_space", "key-value", 0, "", "", false, storage.SpaceSettings{
+		SegmentRolloverBytes:   4096,
+		MaxSegmentsBeforeMerge: 11,
+	}); err != nil {
+		t.Fatalf("CreateSpaceWithSettings failed: %v", err)
+	}
+
+	if err := sm.UpdateSpaceSettings("settings_space", storage.SpaceSettings{
+		SegmentRolloverBytes: 2048,
+	}); err != nil {
+		t.Fatalf("UpdateSpaceSettings failed: %v", err)
+	}
+
+	meta, ok := sm.SpaceMeta("settings_space")
+	if !ok {
+		t.Fatal("SpaceMeta missing")
+	}
+	if meta.SegmentRolloverBytes != 2048 {
+		t.Fatalf("SegmentRolloverBytes = %d, want 2048", meta.SegmentRolloverBytes)
+	}
+	if meta.MaxSegmentsBeforeMerge != 11 {
+		t.Fatalf("MaxSegmentsBeforeMerge = %d, want 11", meta.MaxSegmentsBeforeMerge)
 	}
 }
 
@@ -409,5 +495,65 @@ func TestSpaceManager_DeleteSpacePersistsAcrossRestart(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "alpha")); !os.IsNotExist(err) {
 		t.Fatalf("deleted space directory still exists, err=%v", err)
+	}
+}
+
+func TestSpaceManager_VectorTrainingIndexClearsSegmentSettings(t *testing.T) {
+	dir := t.TempDir()
+	sm := NewSpaceManager(dir)
+	defer sm.CloseAll()
+
+	if _, err := sm.CreateSpaceWithSettings("ivf_seg", "vector", 8, "IVF32,Flat", "L2", true, storage.SpaceSettings{
+		SegmentRolloverBytes:   99,
+		MaxSegmentsBeforeMerge: 3,
+	}); err != nil {
+		t.Fatalf("CreateSpaceWithSettings: %v", err)
+	}
+	meta, ok := sm.SpaceMeta("ivf_seg")
+	if !ok {
+		t.Fatal("SpaceMeta missing")
+	}
+	if meta.SegmentRolloverBytes != 0 || meta.MaxSegmentsBeforeMerge != 0 {
+		t.Fatalf("IVF space should persist zero segment settings, got rollover=%d merge=%d",
+			meta.SegmentRolloverBytes, meta.MaxSegmentsBeforeMerge)
+	}
+}
+
+func TestSpaceManager_UpdateSpaceSettingsRejectsSegmentForTrainingVector(t *testing.T) {
+	dir := t.TempDir()
+	sm := NewSpaceManager(dir)
+	defer sm.CloseAll()
+
+	if _, err := sm.CreateSpaceWithSettings("ivf_upd", "vector", 8, "IVF32,Flat", "L2", true, storage.SpaceSettings{}); err != nil {
+		t.Fatalf("CreateSpaceWithSettings: %v", err)
+	}
+	if err := sm.UpdateSpaceSettings("ivf_upd", storage.SpaceSettings{
+		SegmentRolloverBytes: 1024,
+	}); err == nil {
+		t.Fatal("expected error when updating segment settings for IVF space")
+	}
+	if err := sm.UpdateSpaceSettings("ivf_upd", storage.SpaceSettings{}); err != nil {
+		t.Fatalf("no-op update: %v", err)
+	}
+}
+
+func TestSpaceManager_VectorFlatKeepsSegmentSettings(t *testing.T) {
+	dir := t.TempDir()
+	sm := NewSpaceManager(dir)
+	defer sm.CloseAll()
+
+	if _, err := sm.CreateSpaceWithSettings("flat_seg", "vector", 4, "Flat", "L2", true, storage.SpaceSettings{
+		SegmentRolloverBytes:   2048,
+		MaxSegmentsBeforeMerge: 9,
+	}); err != nil {
+		t.Fatalf("CreateSpaceWithSettings: %v", err)
+	}
+	meta, ok := sm.SpaceMeta("flat_seg")
+	if !ok {
+		t.Fatal("SpaceMeta missing")
+	}
+	if meta.SegmentRolloverBytes != 2048 || meta.MaxSegmentsBeforeMerge != 9 {
+		t.Fatalf("Flat space should keep segment settings, got rollover=%d merge=%d",
+			meta.SegmentRolloverBytes, meta.MaxSegmentsBeforeMerge)
 	}
 }

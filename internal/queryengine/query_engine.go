@@ -189,11 +189,32 @@ func (qe *QueryEngine) Execute(query models.Query) (string, error) {
 			}
 		}
 
-		_, err = qe.spaceManager.CreateSpaceWithWAL(query.Space, query.EngineType, query.Dimension, indexType, metric, query.EnableWAL)
+		settings := storage.SpaceSettings{
+			SegmentRolloverBytes:   query.SegmentRolloverBytes,
+			MaxSegmentsBeforeMerge: query.MaxSegmentsBeforeMerge,
+		}
+		_, err = qe.spaceManager.CreateSpaceWithSettings(query.Space, query.EngineType, query.Dimension, indexType, metric, query.EnableWAL, settings)
 		if err != nil {
 			return "", err
 		}
 		return "SPACE_CREATED", nil
+
+	case models.TypeUpdateSpaceSettings:
+		if query.Space == "" {
+			return "", errors.New("space name required")
+		}
+		admin, err := qe.authManager.GetUser(query.User)
+		if err != nil || admin.Role != auth.RoleAdmin {
+			return "", errors.New("only admin can update spaces")
+		}
+		settings := storage.SpaceSettings{
+			SegmentRolloverBytes:   query.SegmentRolloverBytes,
+			MaxSegmentsBeforeMerge: query.MaxSegmentsBeforeMerge,
+		}
+		if err := qe.spaceManager.UpdateSpaceSettings(query.Space, settings); err != nil {
+			return "", err
+		}
+		return "SPACE_SETTINGS_UPDATED", nil
 
 	case models.TypeDeleteSpace:
 		if query.Data == "" {

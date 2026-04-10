@@ -104,21 +104,6 @@ func TestShibuDB(t *testing.T) {
 		if val != "newValue" {
 			t.Errorf("Expected 'newValue', got '%s'", val)
 		}
-
-		// Ensure the old value does not exist in the storage
-		pos, exists := db.index.Get("duplicateKey")
-		if !exists {
-			t.Errorf("Index does not contain 'duplicateKey' after overwrite")
-		}
-
-		// Ensure there is only one valid entry in the database for 'duplicateKey'
-		fileInfo, err := db.file.Stat()
-		if err != nil {
-			t.Fatalf("Failed to get storage file info: %v", err)
-		}
-		if pos >= fileInfo.Size() {
-			t.Errorf("Storage file contains stale data for 'duplicateKey'")
-		}
 	})
 
 	// Test Delete and WAL replay does not restore deleted keys

@@ -297,7 +297,7 @@ func StartServer(port string, authFilePath string, maxConnections int32, dataFol
 	// Start signal handler for runtime limit updates
 	go handleSignals(connManager)
 
-	managementServer := NewManagementServer(connManager, tokenManager, managementPort)
+	managementServer := NewManagementServer(connManager, spaceManager, tokenManager, managementPort)
 	go func() {
 		fmt.Printf("Starting management server on port %s...\n", managementPort)
 		if err := managementServer.Start(); err != nil {

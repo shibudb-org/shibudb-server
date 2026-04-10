@@ -103,13 +103,15 @@ func isAllowedMetric(metric string) bool {
 }
 
 type spaceMeta struct {
-	LayoutVersion int    `json:"layout_version,omitempty"`
-	Name          string `json:"name"`
-	EngineType    string `json:"engine_type"`
-	Dimension     int    `json:"dimension,omitempty"`
-	IndexType     string `json:"index_type,omitempty"`
-	Metric        string `json:"metric,omitempty"`
-	EnableWAL     bool   `json:"enable_wal,omitempty"`
+	LayoutVersion          int    `json:"layout_version,omitempty"`
+	Name                   string `json:"name"`
+	EngineType             string `json:"engine_type"`
+	Dimension              int    `json:"dimension,omitempty"`
+	IndexType              string `json:"index_type,omitempty"`
+	Metric                 string `json:"metric,omitempty"`
+	EnableWAL              bool   `json:"enable_wal,omitempty"`
+	SegmentRolloverBytes   int64  `json:"segment_rollover_bytes,omitempty"`
+	MaxSegmentsBeforeMerge int    `json:"max_segments_before_merge,omitempty"`
 }
 
 type manifestRecord struct {
@@ -400,6 +402,21 @@ func normalizeSpaceMeta(meta spaceMeta) spaceMeta {
 		meta.IndexType = ""
 		meta.Metric = ""
 	}
+	if meta.EngineType == "vector" {
+		settings := storage.NormalizeVectorSpaceSettings(meta.IndexType, storage.SpaceSettings{
+			SegmentRolloverBytes:   meta.SegmentRolloverBytes,
+			MaxSegmentsBeforeMerge: meta.MaxSegmentsBeforeMerge,
+		})
+		meta.SegmentRolloverBytes = settings.SegmentRolloverBytes
+		meta.MaxSegmentsBeforeMerge = settings.MaxSegmentsBeforeMerge
+	} else {
+		settings := storage.NormalizeSpaceSettings(storage.SpaceSettings{
+			SegmentRolloverBytes:   meta.SegmentRolloverBytes,
+			MaxSegmentsBeforeMerge: meta.MaxSegmentsBeforeMerge,
+		})
+		meta.SegmentRolloverBytes = settings.SegmentRolloverBytes
+		meta.MaxSegmentsBeforeMerge = settings.MaxSegmentsBeforeMerge
+	}
 	return meta
 }
 
@@ -418,17 +435,21 @@ func (sm *SpaceManager) removeSpaceMeta(space string) error {
 func (sm *SpaceManager) openSpaceEngine(meta spaceMeta) (interface{}, error) {
 	meta = normalizeSpaceMeta(meta)
 	spacePath := filepath.Join(sm.baseDir, meta.Name)
+	settings := storage.SpaceSettings{
+		SegmentRolloverBytes:   meta.SegmentRolloverBytes,
+		MaxSegmentsBeforeMerge: meta.MaxSegmentsBeforeMerge,
+	}
 	if meta.EngineType == "key-value" {
 		dataFile := filepath.Join(spacePath, "data.db")
 		walFile := filepath.Join(spacePath, "wal.db")
 		indexFile := filepath.Join(spacePath, "index.dat")
-		return storage.OpenDBWithPathsAndWAL(dataFile, walFile, indexFile, meta.EnableWAL)
+		return storage.OpenDBWithPathsAndWALAndSettings(dataFile, walFile, indexFile, meta.EnableWAL, settings)
 	}
 	if meta.EngineType == "vector" {
 		dataFile := filepath.Join(spacePath, "vector_data.db")
 		indexFile := filepath.Join(spacePath, "vector_index.faiss")
 		walFile := filepath.Join(spacePath, "vector_wal.db")
-		return storage.NewVectorEngine(dataFile, indexFile, walFile, meta.Dimension, meta.IndexType, getFAISSMetric(meta.Metric), meta.EnableWAL)
+		return storage.NewVectorEngineWithSettings(dataFile, indexFile, walFile, meta.Dimension, meta.IndexType, getFAISSMetric(meta.Metric), meta.EnableWAL, settings)
 	}
 	return nil, fmt.Errorf("unknown engine type: %s", meta.EngineType)
 }
@@ -453,10 +474,14 @@ func (sm *SpaceManager) UseSpace(space string) (interface{}, error) {
 
 func (sm *SpaceManager) CreateSpace(space, engineType string, dimension int, indexType string, metric string) (interface{}, error) {
 	enableWAL := false
-	return sm.CreateSpaceWithWAL(space, engineType, dimension, indexType, metric, enableWAL)
+	return sm.CreateSpaceWithSettings(space, engineType, dimension, indexType, metric, enableWAL, storage.SpaceSettings{})
 }
 
 func (sm *SpaceManager) CreateSpaceWithWAL(space, engineType string, dimension int, indexType string, metric string, enableWAL bool) (interface{}, error) {
+	return sm.CreateSpaceWithSettings(space, engineType, dimension, indexType, metric, enableWAL, storage.SpaceSettings{})
+}
+
+func (sm *SpaceManager) CreateSpaceWithSettings(space, engineType string, dimension int, indexType string, metric string, enableWAL bool, settings storage.SpaceSettings) (interface{}, error) {
 	sm.lock.Lock()
 	defer sm.lock.Unlock()
 
@@ -468,13 +493,15 @@ func (sm *SpaceManager) CreateSpaceWithWAL(space, engineType string, dimension i
 	}
 
 	meta := normalizeSpaceMeta(spaceMeta{
-		Name:          space,
-		EngineType:    engineType,
-		Dimension:     dimension,
-		IndexType:     indexType,
-		Metric:        metric,
-		EnableWAL:     enableWAL,
-		LayoutVersion: currentSpaceLayoutVersion,
+		Name:                   space,
+		EngineType:             engineType,
+		Dimension:              dimension,
+		IndexType:              indexType,
+		Metric:                 metric,
+		EnableWAL:              enableWAL,
+		SegmentRolloverBytes:   settings.SegmentRolloverBytes,
+		MaxSegmentsBeforeMerge: settings.MaxSegmentsBeforeMerge,
+		LayoutVersion:          currentSpaceLayoutVersion,
 	})
 
 	if engineType == "vector" {
@@ -525,6 +552,56 @@ func (sm *SpaceManager) CreateSpaceWithWAL(space, engineType string, dimension i
 	sm.spaces[space] = engine
 	sm.spaceMetas[space] = meta
 	return engine, nil
+}
+
+func (sm *SpaceManager) UpdateSpaceSettings(space string, settings storage.SpaceSettings) error {
+	sm.lock.Lock()
+	defer sm.lock.Unlock()
+
+	meta, exists := sm.spaceMetas[space]
+	if !exists {
+		return errors.New("space does not exist")
+	}
+
+	var applied storage.SpaceSettings
+	if meta.EngineType == "vector" && !storage.VectorSegmentsEnabled(meta.IndexType) {
+		if settings.SegmentRolloverBytes > 0 || settings.MaxSegmentsBeforeMerge > 0 {
+			return fmt.Errorf("segment settings do not apply to vector index type %q (only Flat and HNSW use segmented storage)", meta.IndexType)
+		}
+		meta.SegmentRolloverBytes = 0
+		meta.MaxSegmentsBeforeMerge = 0
+		applied = storage.NormalizeVectorSpaceSettings(meta.IndexType, storage.SpaceSettings{})
+	} else {
+		if settings.SegmentRolloverBytes > 0 {
+			meta.SegmentRolloverBytes = settings.SegmentRolloverBytes
+		}
+		if settings.MaxSegmentsBeforeMerge > 0 {
+			meta.MaxSegmentsBeforeMerge = settings.MaxSegmentsBeforeMerge
+		}
+		applied = storage.NormalizeSpaceSettings(storage.SpaceSettings{
+			SegmentRolloverBytes:   meta.SegmentRolloverBytes,
+			MaxSegmentsBeforeMerge: meta.MaxSegmentsBeforeMerge,
+		})
+		meta.SegmentRolloverBytes = applied.SegmentRolloverBytes
+		meta.MaxSegmentsBeforeMerge = applied.MaxSegmentsBeforeMerge
+	}
+
+	if engine, ok := sm.spaces[space]; ok {
+		applier, ok := engine.(storage.SpaceSettingsApplier)
+		if !ok {
+			return errors.New("space engine does not support live settings updates")
+		}
+		if err := applier.UpdateSpaceSettings(applied); err != nil {
+			return err
+		}
+	}
+
+	if err := sm.writeSpaceMeta(meta); err != nil {
+		return err
+	}
+
+	sm.spaceMetas[space] = meta
+	return nil
 }
 
 func getFAISSMetric(metric string) int {

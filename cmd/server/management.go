@@ -9,23 +9,27 @@ import (
 	"sync"
 
 	"github.com/shibudb.org/shibudb-server/internal/auth"
+	"github.com/shibudb.org/shibudb-server/internal/spaces"
+	"github.com/shibudb.org/shibudb-server/internal/storage"
 )
 
 // ManagementServer provides HTTP endpoints for runtime server management
 type ManagementServer struct {
-	connManager *ConnectionManager
-	tokenMgr    *auth.TokenManager
-	port        string
-	server      *http.Server
-	mu          sync.RWMutex
+	connManager  *ConnectionManager
+	spaceManager *spaces.SpaceManager
+	tokenMgr     *auth.TokenManager
+	port         string
+	server       *http.Server
+	mu           sync.RWMutex
 }
 
 // NewManagementServer creates a new management server
-func NewManagementServer(connManager *ConnectionManager, tokenMgr *auth.TokenManager, port string) *ManagementServer {
+func NewManagementServer(connManager *ConnectionManager, spaceManager *spaces.SpaceManager, tokenMgr *auth.TokenManager, port string) *ManagementServer {
 	ms := &ManagementServer{
-		connManager: connManager,
-		tokenMgr:    tokenMgr,
-		port:        port,
+		connManager:  connManager,
+		spaceManager: spaceManager,
+		tokenMgr:     tokenMgr,
+		port:         port,
 	}
 
 	mux := http.NewServeMux()
@@ -42,6 +46,7 @@ func NewManagementServer(connManager *ConnectionManager, tokenMgr *auth.TokenMan
 	mux.HandleFunc("/limit", ms.limitHandler)
 	mux.HandleFunc("/limit/increase", ms.increaseLimitHandler)
 	mux.HandleFunc("/limit/decrease", ms.decreaseLimitHandler)
+	mux.HandleFunc("/spaces/settings", ms.spaceSettingsHandler)
 	mux.Handle("/debug/pprof/", authorized(pprof.Index))
 	mux.Handle("/debug/pprof/cmdline", authorized(pprof.Cmdline))
 	mux.Handle("/debug/pprof/profile", authorized(pprof.Profile))
@@ -255,6 +260,61 @@ func (ms *ManagementServer) decreaseLimitHandler(w http.ResponseWriter, r *http.
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(response)
+}
+
+func (ms *ManagementServer) spaceSettingsHandler(w http.ResponseWriter, r *http.Request) {
+	if !ms.authorizeRequest(w, r) {
+		return
+	}
+	if r.Method != http.MethodPut {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+
+	var request struct {
+		Space                  string `json:"space"`
+		SegmentRolloverBytes   int64  `json:"segment_rollover_bytes"`
+		MaxSegmentsBeforeMerge int    `json:"max_segments_before_merge"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(request.Space) == "" {
+		http.Error(w, "space is required", http.StatusBadRequest)
+		return
+	}
+	if request.SegmentRolloverBytes <= 0 && request.MaxSegmentsBeforeMerge <= 0 {
+		http.Error(w, "at least one space setting must be provided", http.StatusBadRequest)
+		return
+	}
+	if ms.spaceManager == nil {
+		http.Error(w, "space manager unavailable", http.StatusInternalServerError)
+		return
+	}
+
+	err := ms.spaceManager.UpdateSpaceSettings(request.Space, storage.SpaceSettings{
+		SegmentRolloverBytes:   request.SegmentRolloverBytes,
+		MaxSegmentsBeforeMerge: request.MaxSegmentsBeforeMerge,
+	})
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"status": "failed",
+			"error":  err.Error(),
+		})
+		return
+	}
+
+	meta, _ := ms.spaceManager.SpaceMeta(request.Space)
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":                    "success",
+		"space":                     request.Space,
+		"segment_rollover_bytes":    meta.SegmentRolloverBytes,
+		"max_segments_before_merge": meta.MaxSegmentsBeforeMerge,
+		"message":                   fmt.Sprintf("Updated space settings for %s", request.Space),
+	})
 }
 
 func (ms *ManagementServer) authorizeRequest(w http.ResponseWriter, r *http.Request) bool {

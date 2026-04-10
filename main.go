@@ -382,6 +382,7 @@ Runtime Management:
 Manager Commands:
   status                    Show current connection limit and active connections
   stats                     Show detailed connection statistics
+  update-space-settings     [--segment-rollover-bytes N] [--max-segments-before-merge N] <space>
   limit <new_limit>         Set connection limit to specific value
   increase [amount]         Increase connection limit by amount (default: 100)
   decrease [amount]         Decrease connection limit by amount (default: 100)
@@ -404,6 +405,7 @@ Examples:
                                       # Connect to default port %s
   shibudb connect --port 9090 --username admin --password admin
   shibudb manager --username admin --password admin status   # Management API on default port %s
+  shibudb manager --username admin --password admin update-space-settings --segment-rollover-bytes 52428800 my_space
   shibudb start --port 9090 --management-port 19090
   shibudb manager --port 19090 --username admin --password admin limit 2000
                                       # Custom client and management ports
@@ -630,7 +632,7 @@ func connectToServer(port, providedUser, providedPass string) {
 			query = models.Query{Type: models.TypeGetUser, Data: parts[1]}
 		case "create-space":
 			if len(parts) < 2 {
-				fmt.Println("Usage: create-space <name> [--engine key-value|vector] [--dimension N] [--index-type TYPE] [--metric METRIC] [--enable-wal] [--disable-wal]")
+				fmt.Println("Usage: create-space <name> [--engine key-value|vector] [--dimension N] [--index-type TYPE] [--metric METRIC] [--enable-wal] [--disable-wal] [--segment-rollover-bytes N] [--max-segments-before-merge N]")
 				continue
 			}
 			engineType := "key-value"
@@ -639,6 +641,8 @@ func connectToServer(port, providedUser, providedPass string) {
 			metric := "L2"
 			enableWAL := false // Will be set based on engine type
 			walExplicitlySet := false
+			segmentRolloverBytes := int64(0)
+			maxSegmentsBeforeMerge := 0
 			for i := 2; i < len(parts); i++ {
 				if parts[i] == "--engine" && i+1 < len(parts) {
 					engineType = parts[i+1]
@@ -662,6 +666,18 @@ func connectToServer(port, providedUser, providedPass string) {
 				} else if parts[i] == "--disable-wal" {
 					enableWAL = false
 					walExplicitlySet = true
+				} else if parts[i] == "--segment-rollover-bytes" && i+1 < len(parts) {
+					value, err := strconv.ParseInt(parts[i+1], 10, 64)
+					if err == nil {
+						segmentRolloverBytes = value
+					}
+					i++
+				} else if parts[i] == "--max-segments-before-merge" && i+1 < len(parts) {
+					value, err := strconv.Atoi(parts[i+1])
+					if err == nil {
+						maxSegmentsBeforeMerge = value
+					}
+					i++
 				}
 			}
 
@@ -674,7 +690,47 @@ func connectToServer(port, providedUser, providedPass string) {
 				fmt.Println("For vector engine, you must specify --dimension <N> (e.g., 128)")
 				continue
 			}
-			query = models.Query{Type: models.TypeCreateSpace, Space: parts[1], User: username, EngineType: engineType, Dimension: dimension, IndexType: indexType, Metric: metric, EnableWAL: enableWAL}
+			query = models.Query{
+				Type:                   models.TypeCreateSpace,
+				Space:                  parts[1],
+				User:                   username,
+				EngineType:             engineType,
+				Dimension:              dimension,
+				IndexType:              indexType,
+				Metric:                 metric,
+				EnableWAL:              enableWAL,
+				SegmentRolloverBytes:   segmentRolloverBytes,
+				MaxSegmentsBeforeMerge: maxSegmentsBeforeMerge,
+			}
+		case "update-space-settings":
+			if len(parts) < 2 {
+				fmt.Println("Usage: update-space-settings <name> [--segment-rollover-bytes N] [--max-segments-before-merge N]")
+				continue
+			}
+			segmentRolloverBytes := int64(0)
+			maxSegmentsBeforeMerge := 0
+			for i := 2; i < len(parts); i++ {
+				if parts[i] == "--segment-rollover-bytes" && i+1 < len(parts) {
+					value, err := strconv.ParseInt(parts[i+1], 10, 64)
+					if err == nil {
+						segmentRolloverBytes = value
+					}
+					i++
+				} else if parts[i] == "--max-segments-before-merge" && i+1 < len(parts) {
+					value, err := strconv.Atoi(parts[i+1])
+					if err == nil {
+						maxSegmentsBeforeMerge = value
+					}
+					i++
+				}
+			}
+			query = models.Query{
+				Type:                   models.TypeUpdateSpaceSettings,
+				Space:                  parts[1],
+				User:                   username,
+				SegmentRolloverBytes:   segmentRolloverBytes,
+				MaxSegmentsBeforeMerge: maxSegmentsBeforeMerge,
+			}
 		case "delete-space":
 			if len(parts) < 2 {
 				fmt.Println("Usage: delete-space <name>")
@@ -1170,6 +1226,8 @@ func handleManagerCommand(managementPort string, args []string, authCfg managerA
 		getManagerStatus(baseURL, tempToken)
 	case "stats":
 		getManagerStats(baseURL, tempToken)
+	case "update-space-settings":
+		updateManagerSpaceSettings(baseURL, tempToken, args[1:])
 	case "limit":
 		if len(args) < 2 {
 			fmt.Println("Usage: shibudb manager [--port <n>] [--username <u> --password <p>] limit <new_limit>")
@@ -1334,6 +1392,7 @@ func printManagerUsage() {
 	fmt.Printf(`Manager Commands:
   status                    Show current connection limit and active connections
   stats                     Show detailed connection statistics
+  update-space-settings     [--segment-rollover-bytes N] [--max-segments-before-merge N] <space>
   limit <new_limit>         Set connection limit to specific value
   increase [amount]         Increase connection limit by amount (default: 100)
   decrease [amount]         Decrease connection limit by amount (default: 100)
@@ -1349,6 +1408,7 @@ Usage:
 
 Examples:
   shibudb manager --username admin --password admin status
+  shibudb manager --username admin --password admin update-space-settings --segment-rollover-bytes 52428800 my_space
   shibudb manager --username admin --password admin limit 2000
   shibudb manager --username admin --password admin increase 500
   shibudb manager --username admin --password admin decrease 200
@@ -1389,6 +1449,61 @@ func makeManagerRequest(method, url string, body interface{}, bearerToken string
 
 	fmt.Printf("Making request to: %s %s\n", method, url)
 	return client.Do(req)
+}
+
+func updateManagerSpaceSettings(baseURL, bearerToken string, args []string) {
+	fs := flag.NewFlagSet("update-space-settings", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	rolloverBytes := fs.Int64("segment-rollover-bytes", 0, "segment rollover threshold in bytes")
+	maxSegments := fs.Int("max-segments-before-merge", 0, "max segments before background merge")
+	usage := "Usage: shibudb manager [--port <n>] [--username <u> --password <p>] update-space-settings [--segment-rollover-bytes <bytes>] [--max-segments-before-merge <n>] <space>"
+	if err := fs.Parse(args); err != nil {
+		fmt.Printf("Error: %v\n", err)
+		fmt.Println(usage)
+		return
+	}
+	if len(fs.Args()) < 1 {
+		fmt.Println(usage)
+		return
+	}
+	if *rolloverBytes <= 0 && *maxSegments <= 0 {
+		fmt.Println("Error: provide at least one of --segment-rollover-bytes or --max-segments-before-merge (flags must come before the space name)")
+		fmt.Println(usage)
+		return
+	}
+
+	body := map[string]interface{}{
+		"space": fs.Args()[0],
+	}
+	if *rolloverBytes > 0 {
+		body["segment_rollover_bytes"] = *rolloverBytes
+	}
+	if *maxSegments > 0 {
+		body["max_segments_before_merge"] = *maxSegments
+	}
+
+	resp, err := makeManagerRequest(http.MethodPut, baseURL+"/spaces/settings", body, bearerToken)
+	if err != nil {
+		fmt.Printf("Error: Failed to connect to management server: %v\n", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	var result map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		fmt.Printf("Error: Failed to parse response: %v\n", err)
+		return
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		fmt.Printf("Error: %v\n", result["error"])
+		return
+	}
+
+	fmt.Printf("Success: %v\n", result["message"])
+	fmt.Printf("Space: %v\n", result["space"])
+	fmt.Printf("Segment Rollover Bytes: %v\n", result["segment_rollover_bytes"])
+	fmt.Printf("Max Segments Before Merge: %v\n", result["max_segments_before_merge"])
 }
 
 func getManagerStatus(baseURL, bearerToken string) {

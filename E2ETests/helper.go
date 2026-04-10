@@ -23,6 +23,10 @@ func SendQuery(q models.Query, conn net.Conn, reader *bufio.Reader) error {
 
 func CreateSpaceWithIndex(tableSpace, engineType string, dimension int, indexType string, metric string, conn net.Conn, reader *bufio.Reader) bool {
 	query := models.Query{Type: "CREATE_SPACE", Space: tableSpace, EngineType: engineType, Dimension: dimension, IndexType: indexType, Metric: metric, EnableWAL: true}
+	return CreateSpaceWithSettings(query, conn, reader)
+}
+
+func CreateSpaceWithSettings(query models.Query, conn net.Conn, reader *bufio.Reader) bool {
 	data, _ := json.Marshal(query)
 	_, err := conn.Write(append(data, '\n'))
 	if err != nil {
@@ -31,6 +35,26 @@ func CreateSpaceWithIndex(tableSpace, engineType string, dimension int, indexTyp
 	resp, err := reader.ReadString('\n')
 	if err != nil || !strings.Contains(resp, "\"status\":\"OK\"") && !strings.Contains(resp, "SPACE_CREATED") {
 		fmt.Println("Table space creation failed. Server response:", strings.TrimSpace(resp))
+		return false
+	}
+	return true
+}
+
+func UpdateSpaceSettings(space string, rolloverBytes int64, maxSegmentsBeforeMerge int, conn net.Conn, reader *bufio.Reader) bool {
+	query := models.Query{
+		Type:                   models.TypeUpdateSpaceSettings,
+		Space:                  space,
+		SegmentRolloverBytes:   rolloverBytes,
+		MaxSegmentsBeforeMerge: maxSegmentsBeforeMerge,
+	}
+	data, _ := json.Marshal(query)
+	_, err := conn.Write(append(data, '\n'))
+	if err != nil {
+		return false
+	}
+	resp, err := reader.ReadString('\n')
+	if err != nil || !strings.Contains(resp, "\"status\":\"OK\"") && !strings.Contains(resp, "SPACE_SETTINGS_UPDATED") {
+		fmt.Println("Space settings update failed. Server response:", strings.TrimSpace(resp))
 		return false
 	}
 	return true

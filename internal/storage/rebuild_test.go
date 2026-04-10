@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -201,5 +202,64 @@ func TestRebuildVectorIndexIVFFlat(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected rebuilt IVF index search hits to include %d, got %v", queryID, ids)
+	}
+}
+
+func TestRebuildVectorIndexTrainingErrorClassification(t *testing.T) {
+	dir := t.TempDir()
+	dataPath := filepath.Join(dir, "vector_data.db")
+	indexPath := filepath.Join(dir, "vector_index.faiss")
+	walPath := filepath.Join(dir, "vector_wal.db")
+
+	ve, err := NewVectorEngine(dataPath, indexPath, walPath, 8, "Flat", faiss.MetricL2, true)
+	if err != nil {
+		t.Fatalf("NewVectorEngine failed: %v", err)
+	}
+	for i := 0; i < 4; i++ {
+		if err := ve.InsertVector(int64(100+i), randomVector(8)); err != nil {
+			t.Fatalf("InsertVector %d failed: %v", i, err)
+		}
+	}
+	if err := ve.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+
+	_, err = RebuildVectorIndex(dataPath, indexPath, 8, "IVF32,Flat", faiss.MetricL2)
+	if err == nil {
+		t.Fatal("expected rebuild error for insufficient training data")
+	}
+	if !isVectorRebuildTrainingError(err) {
+		t.Fatalf("expected training-classified rebuild error, got %v", err)
+	}
+}
+
+func TestRebuildVectorIndexNonTrainingErrorClassification(t *testing.T) {
+	dir := t.TempDir()
+	dataPath := filepath.Join(dir, "vector_data.db")
+	indexPath := filepath.Join(dir, "vector_index.faiss")
+	walPath := filepath.Join(dir, "vector_wal.db")
+
+	ve, err := NewVectorEngine(dataPath, indexPath, walPath, 8, "Flat", faiss.MetricL2, true)
+	if err != nil {
+		t.Fatalf("NewVectorEngine failed: %v", err)
+	}
+	for i := 0; i < 2; i++ {
+		if err := ve.InsertVector(int64(200+i), randomVector(8)); err != nil {
+			t.Fatalf("InsertVector %d failed: %v", i, err)
+		}
+	}
+	if err := ve.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+
+	_, err = RebuildVectorIndex(dataPath, indexPath, 7, "Flat", faiss.MetricL2)
+	if err == nil {
+		t.Fatal("expected rebuild error for wrong dimension")
+	}
+	if isVectorRebuildTrainingError(err) {
+		t.Fatalf("expected non-training rebuild error, got %v", err)
+	}
+	if errors.Is(err, errVectorRebuildTraining) {
+		t.Fatalf("expected wrong-dimension error not to wrap training sentinel, got %v", err)
 	}
 }

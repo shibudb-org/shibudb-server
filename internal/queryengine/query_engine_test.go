@@ -186,3 +186,45 @@ func TestQueryEngine_CreateSpaceSurvivesRestart(t *testing.T) {
 		t.Fatalf("ListSpaces response %q does not include restart_space", res)
 	}
 }
+
+func TestQueryEngine_UpdateSpaceSettings(t *testing.T) {
+	dir := t.TempDir()
+	sm := spaces.NewSpaceManager(dir)
+	defer sm.CloseAll()
+
+	qe := NewQueryEngine(sm, &mockAuth{})
+
+	if _, err := qe.Execute(models.Query{
+		Type:       models.TypeCreateSpace,
+		Space:      "settings_space",
+		EngineType: "key-value",
+		User:       "admin",
+	}); err != nil {
+		t.Fatalf("CreateSpace failed: %v", err)
+	}
+
+	res, err := qe.Execute(models.Query{
+		Type:                   models.TypeUpdateSpaceSettings,
+		Space:                  "settings_space",
+		User:                   "admin",
+		SegmentRolloverBytes:   2048,
+		MaxSegmentsBeforeMerge: 9,
+	})
+	if err != nil {
+		t.Fatalf("UpdateSpaceSettings failed: %v", err)
+	}
+	if res != "SPACE_SETTINGS_UPDATED" {
+		t.Fatalf("result = %q, want SPACE_SETTINGS_UPDATED", res)
+	}
+
+	meta, ok := sm.SpaceMeta("settings_space")
+	if !ok {
+		t.Fatal("SpaceMeta missing after update")
+	}
+	if meta.SegmentRolloverBytes != 2048 {
+		t.Fatalf("SegmentRolloverBytes = %d, want 2048", meta.SegmentRolloverBytes)
+	}
+	if meta.MaxSegmentsBeforeMerge != 9 {
+		t.Fatalf("MaxSegmentsBeforeMerge = %d, want 9", meta.MaxSegmentsBeforeMerge)
+	}
+}

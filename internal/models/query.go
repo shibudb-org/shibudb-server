@@ -5,6 +5,7 @@ const (
 	TypeGet                   = "GET"
 	TypeDelete                = "DELETE"
 	TypeCreateSpace           = "CREATE_SPACE"
+	TypeUpdateSpaceSettings   = "UPDATE_SPACE_SETTINGS"
 	TypeListSpaces            = "LIST_SPACES"
 	TypeDeleteSpace           = "DELETE_SPACE"
 	TypeUseSpace              = "USE_SPACE"
@@ -22,18 +23,20 @@ const (
 )
 
 type Query struct {
-	Type       string  `json:"type"`
-	Key        string  `json:"key,omitempty"`
-	Value      string  `json:"value,omitempty"`
-	Space      string  `json:"space,omitempty"`
-	User       string  `json:"user,omitempty"`
-	Data       string  `json:"data,omitempty"`
-	NewUser    *User   `json:"new_user,omitempty"`
-	DeleteUser *User   `json:"delete_user,omitempty"`
-	EngineType string  `json:"engine_type,omitempty"`
-	Dimension  int     `json:"dimension,omitempty"`
-	IndexType  string  `json:"index_type,omitempty"`
-	Metric     string  `json:"metric,omitempty"`
-	Radius     float32 `json:"radius,omitempty"`
-	EnableWAL  bool    `json:"enable_wal,omitempty"`
+	Type                   string  `json:"type"`
+	Key                    string  `json:"key,omitempty"`
+	Value                  string  `json:"value,omitempty"`
+	Space                  string  `json:"space,omitempty"`
+	User                   string  `json:"user,omitempty"`
+	Data                   string  `json:"data,omitempty"`
+	NewUser                *User   `json:"new_user,omitempty"`
+	DeleteUser             *User   `json:"delete_user,omitempty"`
+	EngineType             string  `json:"engine_type,omitempty"`
+	Dimension              int     `json:"dimension,omitempty"`
+	IndexType              string  `json:"index_type,omitempty"`
+	Metric                 string  `json:"metric,omitempty"`
+	Radius                 float32 `json:"radius,omitempty"`
+	EnableWAL              bool    `json:"enable_wal,omitempty"`
+	SegmentRolloverBytes   int64   `json:"segment_rollover_bytes,omitempty"`
+	MaxSegmentsBeforeMerge int     `json:"max_segments_before_merge,omitempty"`
 }
