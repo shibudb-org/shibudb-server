@@ -739,6 +739,12 @@ func connectToServer(port, providedUser, providedPass string) {
 			query = models.Query{Type: models.TypeDeleteSpace, Data: parts[1], User: username}
 		case "list-spaces":
 			query = models.Query{Type: models.TypeListSpaces, User: username}
+		case "list-users":
+			if currentUser.Role != auth.RoleAdmin {
+				fmt.Println("Only admin can list users.")
+				continue
+			}
+			query = models.Query{Type: models.TypeListUsers}
 		case "put":
 			if len(parts) < 3 {
 				fmt.Println("Usage: put <key> <value>")
@@ -848,6 +854,17 @@ func printResponse(resp string) {
 		}
 		if val, ok := parsed["value"]; ok {
 			fmt.Printf("Value: %v\n", val)
+		}
+		if users, ok := parsed["users"]; ok {
+			if list, ok := users.([]interface{}); ok {
+				fmt.Printf("Users (%d):\n", len(list))
+				for _, u := range list {
+					if m, ok := u.(map[string]interface{}); ok {
+						perms := m["permissions"]
+						fmt.Printf("  - username: %v | role: %v | permissions: %v\n", m["username"], m["role"], perms)
+					}
+				}
+			}
 		}
 		fmt.Print(reset)
 	default:

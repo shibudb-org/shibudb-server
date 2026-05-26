@@ -486,7 +486,7 @@ func handleConnection(conn net.Conn, spaceManager *spaces.SpaceManager, authMana
 
 		// Enforce role-based access
 		switch strings.ToUpper(query.Type) {
-		case "CREATE_SPACE", "LIST_SPACES":
+		case "CREATE_SPACE", "LIST_SPACES", "LIST_USERS":
 			if user.Role != auth.RoleAdmin {
 				fmt.Fprintf(conn, `{"status":"ERROR","message":"admin access required"}`+"\n")
 				continue
@@ -531,9 +531,17 @@ func handleConnection(conn net.Conn, spaceManager *spaces.SpaceManager, authMana
 			"status": "OK",
 		}
 
-		if strings.ToUpper(query.Type) == "GET" {
+		switch strings.ToUpper(query.Type) {
+		case "GET":
 			response["value"] = result
-		} else {
+		case "LIST_USERS":
+			var users interface{}
+			if err := json.Unmarshal([]byte(result), &users); err == nil {
+				response["users"] = users
+			} else {
+				response["message"] = result
+			}
+		default:
 			response["message"] = result
 		}
 

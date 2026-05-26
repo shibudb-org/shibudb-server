@@ -292,3 +292,18 @@ func (a *AuthManager) GetUser(username string) (models.User, error) {
 	}
 	return u, nil
 }
+
+func (a *AuthManager) ListUsers() []models.User {
+	a.lock.RLock()
+	defer a.lock.RUnlock()
+
+	users := make([]models.User, 0, len(a.users))
+	for _, u := range a.users {
+		users = append(users, models.User{
+			Username:    u.Username,
+			Role:        u.Role,
+			Permissions: u.Permissions,
+		})
+	}
+	return users
+}

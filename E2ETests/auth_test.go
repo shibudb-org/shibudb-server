@@ -413,6 +413,113 @@ func TestVectorSpaceAdminAccess(t *testing.T) {
 	}
 }
 
+func TestListUsersAdminSuccess(t *testing.T) {
+	CleanUser("lu_user1", globalConn, globalReader)
+	CleanUser("lu_user2", globalConn, globalReader)
+
+	perms1 := map[string]string{"myspace": "write", "other": "read"}
+	if !CreateUser("admin", "lu_user1", "lu_pass1", "user", perms1, globalConn, globalReader) {
+		t.Fatal("failed to create lu_user1")
+	}
+	perms2 := map[string]string{}
+	if !CreateUser("admin", "lu_user2", "lu_pass2", "user", perms2, globalConn, globalReader) {
+		t.Fatal("failed to create lu_user2")
+	}
+
+	query := models.Query{Type: models.TypeListUsers, User: "admin"}
+	data, _ := json.Marshal(query)
+	globalConn.Write(append(data, '\n'))
+	resp, err := globalReader.ReadString('\n')
+	if err != nil {
+		t.Fatalf("server error: %v", err)
+	}
+
+	if !strings.Contains(resp, `"status":"OK"`) {
+		t.Fatalf("expected OK, got: %s", strings.TrimSpace(resp))
+	}
+	if !strings.Contains(resp, `"users"`) {
+		t.Errorf("response missing 'users' key: %s", strings.TrimSpace(resp))
+	}
+	if strings.Contains(resp, `"password"`) {
+		t.Errorf("response must not include password field: %s", strings.TrimSpace(resp))
+	}
+
+	var parsed map[string]interface{}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(resp)), &parsed); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	list, ok := parsed["users"].([]interface{})
+	if !ok {
+		t.Fatalf("'users' is not an array")
+	}
+
+	found1, found2 := false, false
+	for _, u := range list {
+		m, ok := u.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if _, hasPass := m["password"]; hasPass {
+			t.Errorf("user entry contains password field")
+		}
+		switch m["username"] {
+		case "lu_user1":
+			found1 = true
+			if m["role"] != "user" {
+				t.Errorf("lu_user1: expected role=user, got %v", m["role"])
+			}
+			if perms, ok := m["permissions"].(map[string]interface{}); ok {
+				if perms["myspace"] != "write" || perms["other"] != "read" {
+					t.Errorf("lu_user1: unexpected permissions: %v", perms)
+				}
+			} else {
+				t.Errorf("lu_user1: permissions not a map")
+			}
+		case "lu_user2":
+			found2 = true
+		}
+	}
+	if !found1 {
+		t.Errorf("lu_user1 not found in list response")
+	}
+	if !found2 {
+		t.Errorf("lu_user2 not found in list response")
+	}
+}
+
+func TestListUsersNonAdminDenied(t *testing.T) {
+	CleanUser("lu_nonadmin", globalConn, globalReader)
+	if !CreateUser("admin", "lu_nonadmin", "lu_nonadmin_pass", "user", map[string]string{}, globalConn, globalReader) {
+		t.Fatal("failed to create lu_nonadmin")
+	}
+
+	conn, err := net.Dial("tcp", "localhost:4444")
+	if err != nil {
+		t.Fatalf("TCP error: %v", err)
+	}
+	defer conn.Close()
+	reader := bufio.NewReader(conn)
+
+	if !Login("lu_nonadmin", "lu_nonadmin_pass", conn, reader) {
+		t.Fatal("login failed for lu_nonadmin")
+	}
+
+	query := models.Query{Type: models.TypeListUsers, User: "lu_nonadmin"}
+	data, _ := json.Marshal(query)
+	conn.Write(append(data, '\n'))
+	resp, err := reader.ReadString('\n')
+	if err != nil {
+		t.Fatalf("server error: %v", err)
+	}
+
+	if !strings.Contains(resp, `"ERROR"`) {
+		t.Errorf("expected error for non-admin LIST_USERS, got: %s", strings.TrimSpace(resp))
+	}
+	if strings.Contains(resp, `"users"`) {
+		t.Errorf("non-admin must not receive users list: %s", strings.TrimSpace(resp))
+	}
+}
+
 func TestVectorSpaceNoAccess(t *testing.T) {
 	CleanSpace("vector_test_no_access", globalConn, globalReader)
 	CleanUser("vector_test_no_access", globalConn, globalReader)

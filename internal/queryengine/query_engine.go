@@ -1,6 +1,7 @@
 package queryengine
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -15,6 +16,7 @@ import (
 // Add this interface above QueryEngine
 type AuthManagerIface interface {
 	GetUser(username string) (models.User, error)
+	ListUsers() []models.User
 	CreateUser(username, password, role string, perms map[string]string) error
 	UpdateUserPassword(username string, password string) error
 	UpdateUserRole(username string, role string) error
@@ -73,6 +75,29 @@ func (qe *QueryEngine) Execute(query models.Query) (string, error) {
 			return "", err
 		}
 		return getUserResponse(&user), nil
+	case models.TypeListUsers:
+		if query.User == "" {
+			return "", errors.New("unauthenticated")
+		}
+		admin, err := qe.authManager.GetUser(query.User)
+		if err != nil || admin.Role != auth.RoleAdmin {
+			return "", errors.New("admin access required")
+		}
+		type userInfo struct {
+			Username    string            `json:"username"`
+			Role        string            `json:"role"`
+			Permissions map[string]string `json:"permissions"`
+		}
+		all := qe.authManager.ListUsers()
+		out := make([]userInfo, len(all))
+		for i, u := range all {
+			out[i] = userInfo{Username: u.Username, Role: u.Role, Permissions: u.Permissions}
+		}
+		data, err := json.Marshal(out)
+		if err != nil {
+			return "", err
+		}
+		return string(data), nil
 	case models.TypeCreateUser:
 		log.Println("Creating user:", query)
 		if query.User == "" {
