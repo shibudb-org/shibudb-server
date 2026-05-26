@@ -37,6 +37,10 @@ func (m *mockAuth) DeleteUser(username string) error {
 	return nil
 }
 
+func (m *mockAuth) ListUsers() []models.User {
+	return []models.User{}
+}
+
 func TestQueryEngine_DeleteVector(t *testing.T) {
 	dir := t.TempDir()
 	sm := spaces.NewSpaceManager(dir)
