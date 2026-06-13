@@ -42,7 +42,7 @@ CGO_CFLAGS="-I$(pwd)/resources/lib/include" \
 CGO_CXXFLAGS="-I$(pwd)/resources/lib/include" \
 CGO_LDFLAGS="-L$(pwd)/resources/lib/mac/apple_silicon -lfaiss -lfaiss_c -lc++" \
 GOOS=darwin GOARCH=$GOARCH \
-go build -tags faiss -ldflags "-X main.Version=$VERSION -X main.BuildTime=$(date -u '+%Y-%m-%d_%H:%M:%S')" -o "$PKG_ROOT/usr/local/bin/$APP_NAME" main.go
+go build -tags faiss -ldflags "-X main.Version=$VERSION -X main.BuildTime=$(date -u '+%Y-%m-%d_%H:%M:%S')" -o "$PKG_ROOT/usr/local/bin/$APP_NAME" .
 
 # === Patch binary with rpath to find FAISS libs ===
 echo "🛠️ Adding RPATH to binary..."

@@ -112,6 +112,8 @@ type spaceMeta struct {
 	EnableWAL              bool   `json:"enable_wal,omitempty"`
 	SegmentRolloverBytes   int64  `json:"segment_rollover_bytes,omitempty"`
 	MaxSegmentsBeforeMerge int    `json:"max_segments_before_merge,omitempty"`
+
+	IndexedMetadataFields []storage.MetadataFieldSpec `json:"indexed_metadata_fields,omitempty"`
 }
 
 type manifestRecord struct {
@@ -401,6 +403,7 @@ func normalizeSpaceMeta(meta spaceMeta) spaceMeta {
 		meta.Dimension = 0
 		meta.IndexType = ""
 		meta.Metric = ""
+		meta.IndexedMetadataFields = nil
 	}
 	if meta.EngineType == "vector" {
 		settings := storage.NormalizeVectorSpaceSettings(meta.IndexType, storage.SpaceSettings{
@@ -446,6 +449,11 @@ func (sm *SpaceManager) openSpaceEngine(meta spaceMeta) (interface{}, error) {
 		return storage.OpenDBWithPathsAndWALAndSettings(dataFile, walFile, indexFile, meta.EnableWAL, settings)
 	}
 	if meta.EngineType == "vector" {
+		if meta.IndexType == "Flat" && len(meta.IndexedMetadataFields) > 0 {
+			dataFile := filepath.Join(spacePath, "flat_meta_data.db")
+			walFile := filepath.Join(spacePath, "flat_meta_wal.db")
+			return storage.NewFlatMetaVectorEngine(dataFile, walFile, meta.Dimension, getFAISSMetric(meta.Metric), meta.IndexedMetadataFields, meta.EnableWAL)
+		}
 		dataFile := filepath.Join(spacePath, "vector_data.db")
 		indexFile := filepath.Join(spacePath, "vector_index.faiss")
 		walFile := filepath.Join(spacePath, "vector_wal.db")
@@ -482,6 +490,10 @@ func (sm *SpaceManager) CreateSpaceWithWAL(space, engineType string, dimension i
 }
 
 func (sm *SpaceManager) CreateSpaceWithSettings(space, engineType string, dimension int, indexType string, metric string, enableWAL bool, settings storage.SpaceSettings) (interface{}, error) {
+	return sm.CreateSpaceWithSettingsAndMetadata(space, engineType, dimension, indexType, metric, enableWAL, settings, nil)
+}
+
+func (sm *SpaceManager) CreateSpaceWithSettingsAndMetadata(space, engineType string, dimension int, indexType string, metric string, enableWAL bool, settings storage.SpaceSettings, indexedMetadataFields []storage.MetadataFieldSpec) (interface{}, error) {
 	sm.lock.Lock()
 	defer sm.lock.Unlock()
 
@@ -501,6 +513,7 @@ func (sm *SpaceManager) CreateSpaceWithSettings(space, engineType string, dimens
 		EnableWAL:              enableWAL,
 		SegmentRolloverBytes:   settings.SegmentRolloverBytes,
 		MaxSegmentsBeforeMerge: settings.MaxSegmentsBeforeMerge,
+		IndexedMetadataFields:  indexedMetadataFields,
 		LayoutVersion:          currentSpaceLayoutVersion,
 	})
 
@@ -511,6 +524,16 @@ func (sm *SpaceManager) CreateSpaceWithSettings(space, engineType string, dimens
 		if !isAllowedMetric(metric) {
 			return nil, fmt.Errorf("metric '%s' is not allowed", metric)
 		}
+		if len(meta.IndexedMetadataFields) > 0 {
+			if meta.IndexType != "Flat" {
+				return nil, fmt.Errorf("indexed metadata fields are only supported for the Flat index type, got '%s'", meta.IndexType)
+			}
+			if err := storage.ValidateFieldSpecs(meta.IndexedMetadataFields); err != nil {
+				return nil, err
+			}
+		}
+	} else if len(meta.IndexedMetadataFields) > 0 {
+		return nil, errors.New("indexed metadata fields are only supported for vector spaces")
 	}
 
 	spacePath := filepath.Join(sm.baseDir, space)

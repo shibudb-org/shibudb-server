@@ -1,7 +1,7 @@
 # ShibuDb Makefile
 # This file provides common development and build tasks
 
-.PHONY: help build test clean install uninstall lint format check-fmt vet coverage benchmark e2e-test test-all build-all release
+.PHONY: help build test clean install uninstall lint format check-fmt vet coverage benchmark benchmark-flat-meta benchmark-vector-index e2e-test test-all build-all release
 
 # Variables
 BINARY_NAME=shibudb
@@ -101,6 +101,22 @@ benchmark-btree-index: ## Run BTree index benchmark
 		./scripts/test_linux.sh ./benchmark/ -test.bench BenchmarkConcurrentIndexOps; \
 	else \
 		./scripts/test_with_rpath.sh ./benchmark/ -test.bench BenchmarkConcurrentIndexOps; \
+	fi
+
+benchmark-flat-meta: ## Run filterable Flat vector engine (metadata filter) benchmarks
+	@echo "Running filterable Flat vector engine benchmarks..."
+	@if [ "$(shell uname -s)" = "Linux" ]; then \
+		./scripts/test_linux.sh ./internal/storage/ -test.bench BenchmarkFlatMeta -test.benchmem -test.run '^$$'; \
+	else \
+		./scripts/test_with_rpath.sh ./internal/storage/ -test.bench BenchmarkFlatMeta -test.benchmem -test.run '^$$'; \
+	fi
+
+benchmark-vector-index: ## Run FAISS vector engine benchmarks across index types (Flat/HNSW/IVF/PQ)
+	@echo "Running FAISS vector engine index-type benchmarks..."
+	@if [ "$(shell uname -s)" = "Linux" ]; then \
+		./scripts/test_linux.sh ./internal/storage/ -test.bench BenchmarkVectorEngine -test.benchmem -test.run '^$$'; \
+	else \
+		./scripts/test_with_rpath.sh ./internal/storage/ -test.bench BenchmarkVectorEngine -test.benchmem -test.run '^$$'; \
 	fi
 
 e2e-test: ## Run end-to-end tests. to run E2E test cases install shibudb on local machine and run on port 4444. Make sure the admin credentials are admin:admin

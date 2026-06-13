@@ -420,6 +420,75 @@ You can override paths with --data-dir.
 `, defPort, defMgmt, defaultConn, defMgmt, defMgmt, defMgmt, defPort, defPort, defPort, defMgmt)
 }
 
+// printConnectHelp prints the interactive command reference shown by the
+// `help` command inside the `shibudb connect` REPL.
+func printConnectHelp() {
+	fmt.Print(`ShibuDB Interactive Commands (type 'help' or '?' to show this again)
+
+Commands are case-insensitive. Some commands require an active space (set with USE).
+
+Session
+  help, ?                         Show this help
+  USE <space>                     Switch to a space (shown in the prompt)
+  list-spaces                     List spaces you can access
+  exit, quit                      Disconnect and exit
+
+Space management
+  create-space <name> [flags]     Create a space. Flags:
+                                    --engine key-value|vector   (default: key-value)
+                                    --dimension N               (required for vector spaces)
+                                    --index-type TYPE           (vector; e.g. Flat, HNSW32, IVF32, PQ8; default Flat)
+                                    --metric METRIC             (vector; L2, InnerProduct, L1, Linf, Lp,
+                                                                 Canberra, BrayCurtis, JensenShannon; default L2)
+                                    --enable-wal | --disable-wal (default: disabled)
+                                    --segment-rollover-bytes N
+                                    --max-segments-before-merge N
+                                    --metadata-fields name:type,...  (Flat vector only; type: string|int|float)
+  update-space-settings <name> [--segment-rollover-bytes N] [--max-segments-before-merge N]
+  delete-space <name>             Delete a space and its data
+
+Key-value operations (require USE on a key-value space)
+  put <key> <value>               Store a value
+  get <key>                       Retrieve a value
+  delete <key>                    Delete a key
+
+Vector operations (require USE on a vector space; IDs must be numeric)
+  insert-vector <id> <floats> [--meta key=value,...]
+                                  Insert/replace a vector (comma-separated floats).
+                                  --meta attaches metadata (Flat spaces with --metadata-fields).
+  get-vector <id>                 Retrieve a vector by id
+  delete-vector <id>              Delete a vector (not supported for HNSW index types)
+  search-topk <floats> <k> [--where <expr>]
+                                  Top-k nearest neighbors; optional metadata pre-filter.
+  range-search <floats> <radius> [--where <expr>]
+                                  Neighbors within radius; optional metadata pre-filter.
+
+Metadata filtering (Flat vector spaces created with --metadata-fields)
+  Field types: string, int, float
+  --where expression (keywords case-insensitive):
+    Comparison:  field = value | field != value | field > value | >= | < | <=
+    Membership:  field IN (v1, v2, ...)
+    Range:       field BETWEEN low AND high      (inclusive; numeric fields)
+    Boolean:     AND, OR, NOT, and ( ... ) for nesting
+    Values:      bare/quoted words are strings; numbers are numeric (quote to force string: field='123')
+  Example:
+    search-topk 0.1,0.1,0.1,0.1 10 --where (user_id=alice OR user_id=bob) AND price<40
+
+User management (admin)
+  create-user                     Create a user (interactive prompts)
+  list-users                      List users
+  get-user <username>             Show a user's details
+  update-user-role <username>     Change a user's role (interactive)
+  update-user-password <username> Change a user's password (interactive)
+  update-user-permissions <username>  Change a user's per-space permissions (interactive)
+  delete-user <username>          Delete a user
+
+Notes
+  - --metadata-fields and --meta are comma-separated and must not contain spaces.
+  - Vector ids are parsed as int64; query vector length must match the space dimension.
+`)
+}
+
 func connectToServer(port, providedUser, providedPass string) {
 	conn, err := net.Dial("tcp", "localhost:"+port)
 	if err != nil {
@@ -467,6 +536,7 @@ func connectToServer(port, providedUser, providedPass string) {
 		return
 	}
 	fmt.Println("Login successful.")
+	fmt.Println("Type 'help' to see all available commands.")
 
 	var currentUser models.User
 	respBody := make(map[string]interface{})
@@ -632,7 +702,7 @@ func connectToServer(port, providedUser, providedPass string) {
 			query = models.Query{Type: models.TypeGetUser, Data: parts[1]}
 		case "create-space":
 			if len(parts) < 2 {
-				fmt.Println("Usage: create-space <name> [--engine key-value|vector] [--dimension N] [--index-type TYPE] [--metric METRIC] [--enable-wal] [--disable-wal] [--segment-rollover-bytes N] [--max-segments-before-merge N]")
+				fmt.Println("Usage: create-space <name> [--engine key-value|vector] [--dimension N] [--index-type TYPE] [--metric METRIC] [--enable-wal] [--disable-wal] [--segment-rollover-bytes N] [--max-segments-before-merge N] [--metadata-fields name:type,...]")
 				continue
 			}
 			engineType := "key-value"
@@ -643,6 +713,7 @@ func connectToServer(port, providedUser, providedPass string) {
 			walExplicitlySet := false
 			segmentRolloverBytes := int64(0)
 			maxSegmentsBeforeMerge := 0
+			metadataFieldsSpec := ""
 			for i := 2; i < len(parts); i++ {
 				if parts[i] == "--engine" && i+1 < len(parts) {
 					engineType = parts[i+1]
@@ -678,6 +749,9 @@ func connectToServer(port, providedUser, providedPass string) {
 						maxSegmentsBeforeMerge = value
 					}
 					i++
+				} else if parts[i] == "--metadata-fields" && i+1 < len(parts) {
+					metadataFieldsSpec = parts[i+1]
+					i++
 				}
 			}
 
@@ -688,6 +762,11 @@ func connectToServer(port, providedUser, providedPass string) {
 
 			if engineType == "vector" && dimension <= 0 {
 				fmt.Println("For vector engine, you must specify --dimension <N> (e.g., 128)")
+				continue
+			}
+			indexedFields, ferr := parseMetadataFields(metadataFieldsSpec)
+			if ferr != nil {
+				fmt.Printf("Invalid --metadata-fields: %v\n", ferr)
 				continue
 			}
 			query = models.Query{
@@ -701,6 +780,7 @@ func connectToServer(port, providedUser, providedPass string) {
 				EnableWAL:              enableWAL,
 				SegmentRolloverBytes:   segmentRolloverBytes,
 				MaxSegmentsBeforeMerge: maxSegmentsBeforeMerge,
+				IndexedMetadataFields:  indexedFields,
 			}
 		case "update-space-settings":
 			if len(parts) < 2 {
@@ -760,11 +840,21 @@ func connectToServer(port, providedUser, providedPass string) {
 				fmt.Println("No space selected. Use 'USE <space>' first.")
 				continue
 			}
-			if len(parts) < 3 {
-				fmt.Println("Usage: insert-vector <id> <comma-separated-floats>")
+			ivBase, metaStr, hasMeta := splitTrailingFlag(line, "--meta")
+			ivFields := strings.Fields(ivBase)
+			if len(ivFields) < 3 {
+				fmt.Println("Usage: insert-vector <id> <comma-separated-floats> [--meta key=value,key=value]")
 				continue
 			}
-			query = models.Query{Type: models.TypeInsertVector, Key: parts[1], Value: parts[2], Space: space, User: username}
+			query = models.Query{Type: models.TypeInsertVector, Key: ivFields[1], Value: ivFields[2], Space: space, User: username}
+			if hasMeta {
+				meta, merr := parseMetaValues(metaStr)
+				if merr != nil {
+					fmt.Printf("Invalid --meta: %v\n", merr)
+					continue
+				}
+				query.Metadata = meta
+			}
 		case "delete-vector":
 			if space == "" {
 				fmt.Println("No space selected. Use 'USE <space>' first.")
@@ -780,16 +870,26 @@ func connectToServer(port, providedUser, providedPass string) {
 				fmt.Println("No space selected. Use 'USE <space>' first.")
 				continue
 			}
-			if len(parts) < 3 {
-				fmt.Println("Usage: search-topk <comma-separated-floats> <k>")
+			stkBase, whereStr, hasWhere := splitTrailingFlag(line, "--where")
+			stkFields := strings.Fields(stkBase)
+			if len(stkFields) < 3 {
+				fmt.Println("Usage: search-topk <comma-separated-floats> <k> [--where <expression>]")
 				continue
 			}
-			k, err := strconv.Atoi(parts[2])
+			k, err := strconv.Atoi(stkFields[2])
 			if err != nil || k <= 0 {
 				fmt.Println("Invalid value for k")
 				continue
 			}
-			query = models.Query{Type: models.TypeSearchTopK, Value: parts[1], Space: space, User: username, Dimension: k}
+			query = models.Query{Type: models.TypeSearchTopK, Value: stkFields[1], Space: space, User: username, Dimension: k}
+			if hasWhere {
+				filter, werr := parseWhere(whereStr)
+				if werr != nil {
+					fmt.Printf("Invalid --where expression: %v\n", werr)
+					continue
+				}
+				query.Filter = filter
+			}
 		case "get-vector":
 			if space == "" {
 				fmt.Println("No space selected. Use 'USE <space>' first.")
@@ -805,18 +905,32 @@ func connectToServer(port, providedUser, providedPass string) {
 				fmt.Println("No space selected. Use 'USE <space>' first.")
 				continue
 			}
-			if len(parts) < 3 {
-				fmt.Println("Usage: range-search <comma-separated-floats> <radius>")
+			rsBase, whereStr, hasWhere := splitTrailingFlag(line, "--where")
+			rsFields := strings.Fields(rsBase)
+			if len(rsFields) < 3 {
+				fmt.Println("Usage: range-search <comma-separated-floats> <radius> [--where <expression>]")
 				continue
 			}
-			radius, err := strconv.ParseFloat(parts[2], 32)
+			radius, err := strconv.ParseFloat(rsFields[2], 32)
 			if err != nil {
 				fmt.Println("Invalid value for radius")
 				continue
 			}
-			query = models.Query{Type: models.TypeRangeSearch, Value: parts[1], Space: space, User: username, Radius: float32(radius)}
+			query = models.Query{Type: models.TypeRangeSearch, Value: rsFields[1], Space: space, User: username, Radius: float32(radius)}
+			if hasWhere {
+				filter, werr := parseWhere(whereStr)
+				if werr != nil {
+					fmt.Printf("Invalid --where expression: %v\n", werr)
+					continue
+				}
+				query.Filter = filter
+			}
+		case "help", "?":
+			printConnectHelp()
+			continue
 		default:
 			fmt.Println("Unknown command:", parts[0])
+			fmt.Println("Type 'help' to see all available commands.")
 			continue
 		}
 

@@ -60,7 +60,7 @@ clientBinary="$tempDir/shibudb_client"
 echo -e "${BLUE}🔧 Building client binary...${NC}"
 
 # Build the client binary
-buildCmd="go build -o $clientBinary main.go"
+buildCmd="go build -o $clientBinary ."
 echo "Running: $buildCmd"
 if ! eval $buildCmd; then
     echo -e "${RED}Error building client binary${NC}"

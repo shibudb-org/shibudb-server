@@ -218,7 +218,7 @@ func (qe *QueryEngine) Execute(query models.Query) (string, error) {
 			SegmentRolloverBytes:   query.SegmentRolloverBytes,
 			MaxSegmentsBeforeMerge: query.MaxSegmentsBeforeMerge,
 		}
-		_, err = qe.spaceManager.CreateSpaceWithSettings(query.Space, query.EngineType, query.Dimension, indexType, metric, query.EnableWAL, settings)
+		_, err = qe.spaceManager.CreateSpaceWithSettingsAndMetadata(query.Space, query.EngineType, query.Dimension, indexType, metric, query.EnableWAL, settings, query.IndexedMetadataFields)
 		if err != nil {
 			return "", err
 		}
@@ -320,7 +320,13 @@ func (qe *QueryEngine) Execute(query models.Query) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		err = engine.InsertVector(id, vector)
+		if filterable, ok := eng.(storage.FilterableVectorEngine); ok {
+			err = filterable.InsertVectorWithMetadata(id, vector, query.Metadata)
+		} else if len(query.Metadata) > 0 {
+			return "", errors.New("metadata is only supported for Flat spaces declared with indexed metadata fields")
+		} else {
+			err = engine.InsertVector(id, vector)
+		}
 		if err != nil {
 			return "", err
 		}
@@ -375,7 +381,20 @@ func (qe *QueryEngine) Execute(query models.Query) (string, error) {
 		if k <= 0 {
 			k = 1
 		}
-		ids, dists, err := engine.SearchTopK(vector, k)
+		var ids []int64
+		var dists []float32
+		if query.Filter != nil {
+			filterable, ok := eng.(storage.FilterableVectorEngine)
+			if !ok {
+				return "", errors.New("metadata filtering is only supported for Flat spaces declared with indexed metadata fields")
+			}
+			if err := storage.ValidateFilter(query.Filter, filterable.IndexedFields()); err != nil {
+				return "", err
+			}
+			ids, dists, err = filterable.SearchTopKFiltered(vector, k, query.Filter)
+		} else {
+			ids, dists, err = engine.SearchTopK(vector, k)
+		}
 		if err != nil {
 			return "", err
 		}
@@ -404,7 +423,20 @@ func (qe *QueryEngine) Execute(query models.Query) (string, error) {
 		if radius <= 0 {
 			radius = 1.0 // default radius if not set
 		}
-		ids, dists, err := engine.RangeSearch(vector, radius)
+		var ids []int64
+		var dists []float32
+		if query.Filter != nil {
+			filterable, ok := eng.(storage.FilterableVectorEngine)
+			if !ok {
+				return "", errors.New("metadata filtering is only supported for Flat spaces declared with indexed metadata fields")
+			}
+			if err := storage.ValidateFilter(query.Filter, filterable.IndexedFields()); err != nil {
+				return "", err
+			}
+			ids, dists, err = filterable.RangeSearchFiltered(vector, radius, query.Filter)
+		} else {
+			ids, dists, err = engine.RangeSearch(vector, radius)
+		}
 		if err != nil {
 			return "", err
 		}

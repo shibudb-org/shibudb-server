@@ -33,20 +33,28 @@ shibudb rebuild-index [--data-dir <path>] <space_name>
 
 ## Interactive database commands (inside `shibudb connect`)
 
-Commands are case-insensitive.
+Commands are case-insensitive. Type `HELP` (or `?`) at the prompt to print the full command reference.
+
+### General
+
+```text
+HELP, ?                          Print the interactive command reference
+EXIT, QUIT                       Disconnect and exit
+```
 
 ### Space management
 
 ```text
 USE <space>
 LIST-SPACES
-CREATE-SPACE <name> [--engine key-value|vector] [--dimension N] [--index-type TYPE] [--metric METRIC] [--enable-wal] [--disable-wal] [--segment-rollover-bytes N] [--max-segments-before-merge N]
+CREATE-SPACE <name> [--engine key-value|vector] [--dimension N] [--index-type TYPE] [--metric METRIC] [--enable-wal] [--disable-wal] [--segment-rollover-bytes N] [--max-segments-before-merge N] [--metadata-fields name:type,...]
 DELETE-SPACE <name>
 ```
 
 Notes:
 - `CREATE-SPACE ... --engine vector` requires `--dimension N`.
 - WAL is **disabled by default** unless `--enable-wal` is provided.
+- `--metadata-fields` declares indexed metadata fields for filtering and is **only valid with `--index-type Flat`**. Format is comma-separated `name:type` (no spaces); `type` is `string`, `int`, or `float`. See [Metadata Filtering](VECTOR_ENGINE.md#metadata-filtering).
 
 ### Key-value operations (require `USE <space>` on a key-value space)
 
@@ -61,16 +69,21 @@ DELETE <key>
 Vector IDs must be numeric (parsed as `int64`).
 
 ```text
-INSERT-VECTOR <id> <comma-separated-floats>
+INSERT-VECTOR <id> <comma-separated-floats> [--meta key=value,...]
 DELETE-VECTOR <id>
 GET-VECTOR <id>
-SEARCH-TOPK <comma-separated-floats> <k>
-RANGE-SEARCH <comma-separated-floats> <radius>
+SEARCH-TOPK <comma-separated-floats> <k> [--where <expression>]
+RANGE-SEARCH <comma-separated-floats> <radius> [--where <expression>]
 ```
 
 Notes:
 - Query vector length must match the space dimension.
 - `DELETE-VECTOR` is not supported for HNSW index types.
+- `--meta` and `--where` are only available on `Flat` spaces created with `--metadata-fields`.
+  `--meta` is comma-separated `key=value` (no spaces); numeric values are inferred, quote to force a string.
+- `--where` is a boolean filter expression supporting `= != > >= < <=`, `IN (...)`,
+  `BETWEEN low AND high`, `AND`/`OR`/`NOT`, and parentheses. Full grammar and examples:
+  [Metadata Filtering](VECTOR_ENGINE.md#metadata-filtering).
 
 ### User management commands (admin-only)
 

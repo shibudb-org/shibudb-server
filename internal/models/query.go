@@ -1,5 +1,7 @@
 package models
 
+import "github.com/shibudb.org/shibudb-server/internal/storage"
+
 const (
 	TypePut                   = "PUT"
 	TypeGet                   = "GET"
@@ -40,4 +42,9 @@ type Query struct {
 	EnableWAL              bool    `json:"enable_wal,omitempty"`
 	SegmentRolloverBytes   int64   `json:"segment_rollover_bytes,omitempty"`
 	MaxSegmentsBeforeMerge int     `json:"max_segments_before_merge,omitempty"`
+
+	// Filterable Flat vector space fields.
+	IndexedMetadataFields []storage.MetadataFieldSpec `json:"indexed_metadata_fields,omitempty"`
+	Metadata              map[string]any              `json:"metadata,omitempty"`
+	Filter                *storage.MetadataFilter     `json:"filter,omitempty"`
 }

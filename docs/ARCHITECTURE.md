@@ -119,12 +119,15 @@ The storage layer manages data persistence and retrieval.
 **Key Components:**
 - **Space Manager**: Manages data spaces (namespaces)
 - **Key-Value Storage**: Handles traditional key-value operations
-- **Vector Storage**: Manages vector data and similarity search
+- **Vector Storage**: Manages vector data and similarity search. Includes a FAISS-backed engine
+  (Flat/HNSW/IVF/PQ) and a custom **filterable Flat engine** that stores per-vector metadata and
+  supports pre-filtered search.
 
 **Responsibilities:**
 - Organize data into logical spaces
 - Store and retrieve key-value pairs
 - Manage vector data and indexes
+- Pre-filter vector search by indexed metadata (filterable Flat spaces)
 - Handle data compression and optimization
 
 ### 5. Index Layer
@@ -203,6 +206,11 @@ Client Request → Network Layer → Query Engine → Auth Check → Vector Inde
 5. **Vector Index**: Uses FAISS for similarity search
 6. **Similarity Search**: Finds similar vectors
 7. **Response**: Returns ranked results
+
+**Optional metadata pre-filtering** (filterable `Flat` spaces): when the query includes a `filter`,
+the engine first evaluates it against the metadata indexes (inverted index for string fields, B-tree
+for numeric fields) to produce a candidate ID set, then computes exact distances over only those
+candidates. See [Vector Engine — Metadata Filtering](VECTOR_ENGINE.md#metadata-filtering).
 
 ## Data Organization
 

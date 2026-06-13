@@ -63,7 +63,7 @@ fi
 # Build binary for AMD64
 echo "🔨 Building $APP_NAME binary for AMD64..."
 GOOS=linux GOARCH=amd64 \
-go build -tags faiss -ldflags "-X main.Version=$VERSION -X main.BuildTime=$(date -u '+%Y-%m-%d_%H:%M:%S')" -o "$PKG_ROOT/usr/local/bin/$APP_NAME" main.go
+go build -tags faiss -ldflags "-X main.Version=$VERSION -X main.BuildTime=$(date -u '+%Y-%m-%d_%H:%M:%S')" -o "$PKG_ROOT/usr/local/bin/$APP_NAME" .
 
 # Add logs and data folders
 mkdir -p "$PKG_ROOT/usr/local/var/log/$APP_NAME"

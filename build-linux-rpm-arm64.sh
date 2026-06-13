@@ -64,7 +64,7 @@ CGO_CFLAGS="-I${FAISS_INCLUDE_DIR}" \
 CGO_CXXFLAGS="-I${FAISS_INCLUDE_DIR}" \
 CGO_LDFLAGS="-L${FAISS_LIB_DIR} -lfaiss -lfaiss_c -lstdc++ -lm -lgomp -lopenblas ${RPATH_FLAGS}" \
 GOOS=linux GOARCH=arm64 \
-go build -tags faiss -ldflags "-X main.Version=$VERSION -X main.BuildTime=$(date -u '+%Y-%m-%d_%H:%M:%S')" -o "$PKG_ROOT/usr/local/bin/$APP_NAME" main.go
+go build -tags faiss -ldflags "-X main.Version=$VERSION -X main.BuildTime=$(date -u '+%Y-%m-%d_%H:%M:%S')" -o "$PKG_ROOT/usr/local/bin/$APP_NAME" .
 
 # Add logs and data folders
 mkdir -p "$PKG_ROOT/usr/local/var/log/$APP_NAME"

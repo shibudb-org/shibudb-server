@@ -10,6 +10,7 @@
 - [Delete Vector](#delete-vector---remove-vectors)
 - [Advanced Search Operations](#advanced-search-operations)
 - [Distance Metrics](#distance-metrics)
+- [Metadata Filtering](#metadata-filtering)
 - [Performance Optimization](#performance-optimization)
 - [Best Practices](#best-practices)
 - [Examples and Use Cases](#examples-and-use-cases)
@@ -27,6 +28,7 @@ The Vector Engine in ShibuDb provides high-performance similarity search capabil
 - **Automatic Training**: Index training happens automatically
 - **Batch Operations**: Efficient bulk vector insertion
 - **Real-time Search**: Fast similarity search with configurable parameters
+- **Metadata Filtering**: Declare indexed metadata fields on a `Flat` space and pre-filter searches with a `--where` expression (see [Metadata Filtering](#metadata-filtering))
 
 ### Architecture
 
@@ -258,6 +260,7 @@ Note: Only numerical IDs are supported for vector spaces.
 - High memory usage
 - Slower for large datasets
 - No training required
+- **Supports metadata filtering**: declare indexed metadata fields at creation and pre-filter searches (see [Metadata Filtering](#metadata-filtering)). This is the only index type that supports filtering.
 
 ### 2. HNSW Index (Hierarchical Navigable Small World)
 
@@ -627,6 +630,110 @@ CREATE-SPACE embeddings --engine vector --dimension 768 --metric InnerProduct
 # Good for robust similarity (outlier-resistant)
 CREATE-SPACE robust --engine vector --dimension 128 --metric L1
 ```
+
+## Metadata Filtering
+
+For multi-tenant or partitioned datasets, a plain top-k search over the entire space can return
+results from the wrong tenant/partition and hurt recall. ShibuDb lets you declare **indexed
+metadata fields** on a `Flat` vector space, attach metadata to each vector, and then **pre-filter**
+a search so similarity is only computed over the matching subset (e.g. a single `user_id`).
+
+This is an **exact** search over the filtered candidate set, so accuracy is preserved while the
+candidate set is reduced first.
+
+### Requirements and Limitations
+
+- **Index type must be `Flat`.** Metadata filtering is not available for HNSW, IVF, or PQ spaces
+  (declaring `--metadata-fields` on a non-Flat space is rejected).
+- Field types are `string`, `int`, or `float`.
+- Numeric values (`int` and `float`) are stored internally as `float64`. Integers larger than
+  2^53 may lose precision — use a `string` field for such identifiers.
+- `--metadata-fields` and `--meta` are comma-separated and **must not contain spaces**.
+- Only fields declared at creation are indexed; filtering on an undeclared field returns an error.
+
+### 1. Declare Indexed Fields (at space creation)
+
+```bash
+# Types: string | int | float
+CREATE-SPACE products --engine vector --dimension 4 --index-type Flat --metric L2 \
+    --metadata-fields user_id:string,category:string,price:float,year:int
+USE products
+```
+
+### 2. Attach Metadata (on insert)
+
+```bash
+# key=value pairs; numeric values are inferred, quote to force a string (e.g. user_id='123')
+INSERT-VECTOR 1 0.1,0.1,0.1,0.1 --meta user_id=alice,category=books,price=12.5,year=2020
+INSERT-VECTOR 2 0.2,0.2,0.2,0.2 --meta user_id=bob,category=books,price=40,year=2022
+INSERT-VECTOR 3 0.15,0.15,0.15,0.15 --meta user_id=alice,category=toys,price=5,year=2023
+```
+
+Re-inserting an existing ID updates both its vector and metadata (upsert).
+
+### 3. Filtered Search (`--where`)
+
+Both `SEARCH-TOPK` and `RANGE-SEARCH` accept an optional trailing `--where <expression>`:
+
+```bash
+SEARCH-TOPK 0.1,0.1,0.1,0.1 10 --where user_id=alice
+SEARCH-TOPK 0.1,0.1,0.1,0.1 10 --where user_id=alice AND price<10
+SEARCH-TOPK 0.1,0.1,0.1,0.1 10 --where (user_id=alice OR user_id=bob) AND category=books
+SEARCH-TOPK 0.1,0.1,0.1,0.1 10 --where year BETWEEN 2021 AND 2023
+SEARCH-TOPK 0.1,0.1,0.1,0.1 10 --where category IN (books,toys) AND NOT user_id=bob
+RANGE-SEARCH 0.1,0.1,0.1,0.1 1.0 --where user_id=alice
+```
+
+A search without `--where` scans the whole space as usual.
+
+### `--where` Expression Grammar
+
+Keywords (`AND`, `OR`, `NOT`, `IN`, `BETWEEN`) are case-insensitive.
+
+| Category | Syntax | Notes |
+|----------|--------|-------|
+| Equality | `field = value`, `field != value` | `!=` is `NOT(field = value)` |
+| Comparison | `field > value`, `>=`, `<`, `<=` | numeric (`int`/`float`) fields only |
+| Set membership | `field IN (v1, v2, ...)` | matches any listed value |
+| Numeric range | `field BETWEEN low AND high` | inclusive; numeric fields only |
+| Composition | `AND`, `OR`, `NOT`, `( ... )` | parentheses for nesting/precedence |
+
+**Values:** bare words (`alice`) and quoted strings (`'alice'`, `"alice"`) are treated as strings;
+numeric literals (`40`, `12.5`) are treated as numbers. A string field whose value looks numeric
+should be quoted (e.g. `user_id='123'`).
+
+### How It Works
+
+- **String fields** are kept in an inverted index (value → set of vector IDs).
+- **Numeric fields** are kept in an ordered B-tree (value → set of vector IDs) for efficient
+  range queries.
+- Sets of IDs use roaring bitmaps, so `AND`/`OR`/`NOT` are fast set intersection/union/difference.
+- The filter is evaluated first to produce a candidate ID set, then exact distances are computed
+  for those candidates only and ranked. All eight distance metrics are supported.
+- Vectors and metadata are persisted to an append-only data file (plus the optional WAL when the
+  space is created with `--enable-wal`); the indexes are rebuilt from this data on startup.
+
+### Errors
+
+```bash
+# Filtering on an undeclared field
+SEARCH-TOPK 0.1,0.1,0.1,0.1 10 --where region=us
+# ERROR: filter field "region" is not an indexed metadata field
+
+# Comparison/range on a string value
+SEARCH-TOPK 0.1,0.1,0.1,0.1 10 --where price>cheap
+# ERROR: range op "gt" on "price" requires a number
+
+# Filtering on a non-Flat (or non-filterable) space
+# ERROR: metadata filtering is only supported for Flat spaces declared with indexed metadata fields
+
+# Declaring --metadata-fields on a non-Flat index
+# ERROR: indexed metadata fields are only supported for the Flat index type, got 'HNSW32'
+```
+
+> Wire protocol: these map to the `indexed_metadata_fields` (CREATE_SPACE), `metadata`
+> (INSERT_VECTOR), and `filter` (SEARCH_TOPK / RANGE_SEARCH) fields of the JSON query. The `--where`
+> DSL is a client-side convenience that compiles to the structured `filter` AST.
 
 ## Performance Optimization
 

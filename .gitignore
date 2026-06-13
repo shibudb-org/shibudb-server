@@ -26,6 +26,7 @@ go.work.sum
 *.db
 *.dat
 *.faiss
+data_segments.manifest.json
 
 #.idea
 .idea/*
@@ -40,3 +41,7 @@ cmd/server/testdata/
 
 # Test data directory for E2E tests
 test-data/
+testdata/
+
+#build file
+build

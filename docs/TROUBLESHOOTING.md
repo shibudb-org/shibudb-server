@@ -51,6 +51,16 @@ HNSW index types do not support vector deletion. Use Flat / IVF / PQ index types
 
 Your query vector must have exactly `<space dimension>` values. Recreate the space with the correct dimension or send the correct-length vector.
 
+## Metadata filtering (`--meta` / `--where`) errors
+
+- **“metadata filtering is only supported for Flat spaces declared with indexed metadata fields”**: the space was not created with `--index-type Flat` and `--metadata-fields`. Recreate it with both.
+- **“indexed metadata fields are only supported for the Flat index type”**: you passed `--metadata-fields` with a non-Flat `--index-type`. Use `--index-type Flat`.
+- **“filter field "X" is not an indexed metadata field”**: `X` was not declared in `--metadata-fields`. Only declared fields can be filtered.
+- **“range op "gt"/"lt"/... on "X" requires a number”**: a comparison/`BETWEEN` was used on a string value. Use a numeric (`int`/`float`) field, or quote string equality (`field='value'`).
+- **No results when you expect some**: a string field whose value looks numeric may have been stored/queried as a number. Quote it (e.g. `user_id='123'`). Also remember `--meta`/`--metadata-fields` must not contain spaces.
+
+See [Vector Engine — Metadata Filtering](VECTOR_ENGINE.md#metadata-filtering) for the full grammar.
+
 ## Where are my files?
 
 Default data directory root:

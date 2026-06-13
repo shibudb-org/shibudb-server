@@ -9,6 +9,7 @@ ShibuDb is a lightweight database system with vector search capabilities powered
 ## ✨ Key Features
 
 - **🔍 Vector Search**: Advanced similarity search using FAISS
+- **🏷️ Metadata Filtering**: Pre-filter vector search by indexed metadata fields on Flat spaces (`--where` filters)
 - **🗄️ Multi-Space Architecture**: Organize data into separate spaces
 - **🔐 Role-Based Access Control**: Secure authentication and authorization
 - **⚡ High Performance**: Optimized storage with B-tree indexing
@@ -116,14 +117,16 @@ make connect-local-client
 - Port: `4444`
 
 **Available CLI Commands:**
+- `help` or `?` - Show the full interactive command reference
 - `USE <space>` - Switch to a specific space
-- `create-space <name> [--engine key-value|vector] [--dimension N]` - Create a new space
+- `create-space <name> [--engine key-value|vector] [--dimension N] [--index-type TYPE] [--metric METRIC] [--metadata-fields name:type,...]` - Create a new space
 - `put <key> <value>` - Store a key-value pair
 - `get <key>` - Retrieve a value by key
 - `delete <key>` - Delete a key-value pair
-- `insert-vector <id> <comma-separated-floats>` - Insert a vector
+- `insert-vector <id> <comma-separated-floats> [--meta key=value,...]` - Insert a vector (optionally with indexed metadata)
 - `delete-vector <id>` - Delete a vector (Not supported for index type HNSW)
-- `search-topk <comma-separated-floats> <k>` - Search for top-k similar vectors
+- `search-topk <comma-separated-floats> <k> [--where <expression>]` - Search for top-k similar vectors (optionally pre-filtered by metadata)
+- `range-search <comma-separated-floats> <radius> [--where <expression>]` - Search within a radius (optionally pre-filtered by metadata)
 - `create-user` - Create a new user (admin only)
 - `list-spaces` - List all available spaces
 - `exit` or `quit` - Exit the client
@@ -146,6 +149,45 @@ make connect-local-client
 [vectors]> insert-vector vec1 1.0,2.0,3.0,4.0
 [vectors]> search-topk 1.1,2.1,3.1,4.1 5
 ```
+
+**Metadata Filtering (Flat index):**
+
+Declare indexed metadata fields when creating a `Flat` vector space, attach metadata on
+insert, then pre-filter searches with a `--where` expression. This restricts the similarity
+search to matching vectors (e.g. per-tenant data) for better recall and speed.
+
+```bash
+# Declare indexed fields (name:type, types: string | int | float)
+[admin]> create-space products --engine vector --dimension 4 --index-type Flat --metric L2 \
+            --metadata-fields user_id:string,category:string,price:float,year:int
+[admin]> USE products
+
+# Attach metadata on insert (key=value; numeric values are inferred, quote to force a string)
+[products]> insert-vector 1 0.1,0.1,0.1,0.1 --meta user_id=alice,category=books,price=12.5,year=2020
+[products]> insert-vector 2 0.2,0.2,0.2,0.2 --meta user_id=bob,category=books,price=40,year=2022
+[products]> insert-vector 3 0.15,0.15,0.15,0.15 --meta user_id=alice,category=toys,price=5,year=2023
+
+# Filtered search
+[products]> search-topk 0.1,0.1,0.1,0.1 10 --where user_id=alice
+[products]> search-topk 0.1,0.1,0.1,0.1 10 --where user_id=alice AND price<10
+[products]> search-topk 0.1,0.1,0.1,0.1 10 --where (user_id=alice OR user_id=bob) AND category=books
+[products]> search-topk 0.1,0.1,0.1,0.1 10 --where year BETWEEN 2021 AND 2023
+[products]> search-topk 0.1,0.1,0.1,0.1 10 --where category IN (books,toys) AND NOT user_id=bob
+[products]> range-search 0.1,0.1,0.1,0.1 1.0 --where user_id=alice
+```
+
+`--where` expression grammar (keywords are case-insensitive):
+- Comparison: `field = value`, `field != value`, `field > value`, `>=`, `<`, `<=`
+- Set membership: `field IN (v1, v2, ...)`
+- Numeric range: `field BETWEEN low AND high`
+- Boolean composition: `AND`, `OR`, `NOT`, and `( ... )` for nesting
+- Values: bare words and quoted strings (`'x'` / `"x"`) are strings; numbers are numeric. Comparison/range operators require numeric (`int`/`float`) fields.
+
+Notes:
+- `--metadata-fields`, `--meta`, and `--where` are only available on vector spaces created with `--index-type Flat`.
+- The `--metadata-fields` and `--meta` lists must not contain spaces (they are comma-separated).
+
+See [Vector Engine — Metadata Filtering](docs/VECTOR_ENGINE.md#metadata-filtering) for the full grammar, internals, and error reference.
 
 ## 📦 Installation Options
 

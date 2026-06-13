@@ -26,7 +26,7 @@ CGO_CFLAGS="-I$(pwd)/resources/lib/include" \
 CGO_CXXFLAGS="-I$(pwd)/resources/lib/include" \
 CGO_LDFLAGS="-L$(pwd)/resources/lib/mac/apple_silicon -lfaiss -lfaiss_c -lc++" \
 GOOS=darwin GOARCH=arm64 \
-go build -tags faiss -ldflags "-X main.Version=$VERSION -X main.BuildTime=$(date -u '+%Y-%m-%d_%H:%M:%S')" -o "$DIST_CONTENT_DIR/$APP_NAME" main.go
+go build -tags faiss -ldflags "-X main.Version=$VERSION -X main.BuildTime=$(date -u '+%Y-%m-%d_%H:%M:%S')" -o "$DIST_CONTENT_DIR/$APP_NAME" .
 
 # === Patch RPATH to find FAISS libraries in Homebrew lib directory ===
 echo "🔧 Patching RPATH for Homebrew layout..."

@@ -55,3 +55,13 @@ type VectorEngine interface {
 	GetVectorByID(id int64) ([]float32, error)
 	Close() error
 }
+
+// FilterableVectorEngine is a VectorEngine that stores per-vector metadata for
+// a set of declared indexed fields and supports metadata-filtered search.
+type FilterableVectorEngine interface {
+	VectorEngine
+	IndexedFields() []MetadataFieldSpec
+	InsertVectorWithMetadata(id int64, vector []float32, metadata map[string]any) error
+	SearchTopKFiltered(query []float32, k int, filter *MetadataFilter) ([]int64, []float32, error)
+	RangeSearchFiltered(query []float32, radius float32, filter *MetadataFilter) ([]int64, []float32, error)
+}
