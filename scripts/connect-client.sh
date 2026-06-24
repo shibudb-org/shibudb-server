@@ -28,6 +28,7 @@ currentDir=$(pwd)
 
 # Set CGO environment variables based on platform
 export CGO_ENABLED=1
+export CGO_CFLAGS="-I$currentDir/resources/lib/include"
 export CGO_CXXFLAGS="-I$currentDir/resources/lib/include"
 
 # Detect OS and architecture
@@ -37,6 +38,7 @@ ARCH=$(uname -m)
 if [[ "$OS" == "Darwin" ]]; then
     # macOS
     export CGO_LDFLAGS="-L$currentDir/resources/lib/mac/apple_silicon -lfaiss -lfaiss_c -lc++"
+    export DYLD_LIBRARY_PATH="$currentDir/resources/lib/mac/apple_silicon:${DYLD_LIBRARY_PATH:-}"
 elif [[ "$OS" == "Linux" ]]; then
     # Linux
     if [[ "$ARCH" == "x86_64" ]]; then

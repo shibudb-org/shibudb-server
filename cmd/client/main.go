@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/shibudb.org/shibudb-server/internal/cliinput"
+	"github.com/shibudb.org/shibudb-server/internal/cliparse"
 	"github.com/shibudb.org/shibudb-server/internal/models"
 )
 
@@ -50,7 +51,7 @@ func main() {
 			break
 		}
 
-		parts := strings.Fields(line)
+		parts := cliparse.Tokenize(line)
 		if len(parts) < 2 {
 			fmt.Println("Usage: put/get/delete <key> [value]")
 			continue
@@ -63,7 +64,7 @@ func main() {
 				fmt.Println("Usage: put <key> <value>")
 				continue
 			}
-			query = models.Query{Type: models.TypePut, Key: parts[1], Value: parts[2]}
+			query = models.Query{Type: models.TypePut, Key: parts[1], Value: cliparse.PutValue(parts)}
 		case "get":
 			query = models.Query{Type: models.TypeGet, Key: parts[1]}
 		case "delete":

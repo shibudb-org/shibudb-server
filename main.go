@@ -40,6 +40,7 @@ import (
 	"github.com/shibudb.org/shibudb-server/cmd/server"
 	"github.com/shibudb.org/shibudb-server/internal/auth"
 	"github.com/shibudb.org/shibudb-server/internal/cliinput"
+	"github.com/shibudb.org/shibudb-server/internal/cliparse"
 	"github.com/shibudb.org/shibudb-server/internal/models"
 	"github.com/shibudb.org/shibudb-server/internal/spaces"
 )
@@ -587,7 +588,10 @@ func connectToServer(port, providedUser, providedPass string) {
 			continue
 		}
 
-		parts := strings.Fields(line)
+		parts := cliparse.Tokenize(line)
+		if len(parts) == 0 {
+			continue
+		}
 
 		var commandsRequiringSpace = map[string]bool{
 			"put":    true,
@@ -830,10 +834,18 @@ func connectToServer(port, providedUser, providedPass string) {
 				fmt.Println("Usage: put <key> <value>")
 				continue
 			}
-			query = models.Query{Type: models.TypePut, Key: parts[1], Value: parts[2], Space: space, User: username}
+			query = models.Query{Type: models.TypePut, Key: parts[1], Value: cliparse.PutValue(parts), Space: space, User: username}
 		case "get":
+			if len(parts) < 2 {
+				fmt.Println("Usage: get <key>")
+				continue
+			}
 			query = models.Query{Type: models.TypeGet, Key: parts[1], Space: space, User: username}
 		case "delete":
+			if len(parts) < 2 {
+				fmt.Println("Usage: delete <key>")
+				continue
+			}
 			query = models.Query{Type: models.TypeDelete, Key: parts[1], Space: space, User: username}
 		case "insert-vector":
 			if space == "" {
