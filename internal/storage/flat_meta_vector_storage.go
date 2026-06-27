@@ -719,7 +719,7 @@ func (e *FlatMetaVectorEngine) replayWAL() error {
 			return fmt.Errorf("invalid WAL key length: expected 8, got %d", len(keyBytes))
 		}
 		id := int64(binary.LittleEndian.Uint64(keyBytes))
-		if entry.Flag == 'D' {
+		if entry.Flag == wal.EntryDeleted {
 			e.lock.Lock()
 			_, existed := e.metadata[id]
 			e.indexRemoveLocked(id)
