@@ -62,7 +62,7 @@ func TestWAL(t *testing.T) {
 		printWALState("After MarkCommitted")
 	})
 
-	// Test Replay after committing
+	// Test Replay after commit
 	t.Run("ReplayAfterCommit", func(t *testing.T) {
 		printWALState("Before ReplayAfterCommit")
 		entries, err := w.Replay()
