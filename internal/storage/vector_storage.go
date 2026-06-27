@@ -659,17 +659,14 @@ func (ve *VectorEngineImpl) replayWAL() error {
 	}
 
 	for _, entry := range records {
-		if len(entry) != 2 {
-			continue
-		}
-		keyBytes := []byte(entry[0])
+		keyBytes := []byte(entry.Key)
 		if len(keyBytes) != 8 {
 			return fmt.Errorf("invalid WAL key length: expected 8, got %d", len(keyBytes))
 		}
 		id := int64(binary.LittleEndian.Uint64(keyBytes))
 
 		// Check if this is a deletion (empty value)
-		if len(entry[1]) == 0 {
+		if entry.Flag == wal.EntryDeleted {
 			// IMPORTANT: do not write to WAL here again — just remove.
 			if err := ve.removeAfterWAL(id); err != nil {
 				return fmt.Errorf("replay remove id=%d: %w", id, err)
@@ -677,7 +674,7 @@ func (ve *VectorEngineImpl) replayWAL() error {
 			continue
 		}
 
-		vec, err := bytesToFloat32Array([]byte(entry[1]))
+		vec, err := bytesToFloat32Array([]byte(entry.Value))
 		if err != nil {
 			return fmt.Errorf("WAL decode: %w", err)
 		}

@@ -205,17 +205,14 @@ func (db *ShibuDB) replayWAL() {
 		return
 	}
 	for _, entry := range entries {
-		if len(entry) != 2 {
-			continue
-		}
-		if entry[1] == "" {
-			if err := db.Delete(entry[0]); err != nil && !errors.Is(err, errKeyDeleted) && !errors.Is(err, errKeyNotFound) {
-				log.Printf("WAL replay delete failed for %q: %v", entry[0], err)
+		if entry.Flag == wal.EntryDeleted {
+			if err := db.Delete(entry.Key); err != nil && !errors.Is(err, errKeyDeleted) && !errors.Is(err, errKeyNotFound) {
+				log.Printf("WAL replay delete failed for %q: %v", entry.Key, err)
 			}
 			continue
 		}
-		if err := db.PutBatch(entry[0], entry[1]); err != nil {
-			log.Printf("WAL replay put failed for %q: %v", entry[0], err)
+		if err := db.PutBatch(entry.Key, entry.Value); err != nil {
+			log.Printf("WAL replay put failed for %q: %v", entry.Key, err)
 		}
 	}
 	if err := db.FlushBatch(); err != nil {
