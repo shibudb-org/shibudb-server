@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"encoding/binary"
 	"math/rand"
 	"os"
 	"reflect"
@@ -294,6 +295,44 @@ func TestVectorEngineImpl_InsertAndSearch_IVF32PQ4(t *testing.T) {
 		}
 		if reflect.DeepEqual(stored, vec1) {
 			t.Errorf("Stored vector should not match first inserted vector")
+		}
+	})
+	t.Run("Replay after insert and write delete to WAL", func(t *testing.T) {
+		// Create a fresh engine for this test
+		cleanDataPath := "testdata/vector_data_ivf_pq_insert_after_remove.db"
+		cleanIndexPath := "testdata/vector_index_ivf_pq_insert_after_remove.faiss"
+		cleanWalPath := "testdata/vector_wal_ivf_pq_insert_after_remove.db"
+
+		os.Remove(cleanDataPath)
+		os.Remove(cleanIndexPath)
+		os.Remove(cleanWalPath)
+
+		cleanVe, err := NewVectorEngine(cleanDataPath, cleanIndexPath, cleanWalPath, maxVectorSize, indexDesc, metric, true)
+		if err != nil {
+			t.Skipf("Failed to create clean engine: %v", err)
+		}
+		defer cleanVe.Close()
+		defer func() {
+			os.Remove(cleanDataPath)
+			os.Remove(cleanIndexPath)
+			os.Remove(cleanWalPath)
+		}()
+		id := int64(8888)
+		if err := cleanVe.InsertVector(id, randomVector(maxVectorSize)); err != nil {
+			t.Errorf("InsertVector failed: %v", err)
+		}
+		key := make([]byte, 8)
+		binary.LittleEndian.PutUint64(key, uint64(id))
+		if err := cleanVe.wal.WriteDelete(string(key)); err != nil {
+			t.Errorf("write delete to wal failed: %v", err)
+		}
+		if err := cleanVe.replayWAL(); err != nil {
+			t.Errorf("replayWAL failed: %v", err)
+		}
+
+		// Vector should be removed after replaying WAL
+		if _, err = cleanVe.GetVectorByID(id); err == nil {
+			t.Error("Expected error when getting removed vector")
 		}
 	})
 }

@@ -133,6 +133,49 @@ func TestShibuDB(t *testing.T) {
 		}
 	})
 
+	// Test Delete followed by Put on the same key with a different value
+	// and WAL replay gives us the new value
+	t.Run("DeleteKeyPutKeyAndWALReplay", func(t *testing.T) {
+		db, err = OpenDBWithPathsAndWAL("test_storage.db", "test_wal.db", "test_index.dat", true)
+		if err != nil {
+			t.Fatalf("Failed to open test DB: %v", err)
+		}
+
+		// Put and flush a key
+		db.PutBatch("deleteAndPutMe", "tempValue")
+		db.FlushBatch()
+
+		// Delete the key
+		err := db.Delete("deleteAndPutMe")
+		if err != nil {
+			t.Errorf("Delete failed: %v", err)
+		}
+
+		// Re-insert the key
+		err = db.Put("deleteAndPutMe", "newValue")
+		if err != nil {
+			t.Errorf("Put failed: %v", err)
+		}
+
+		// Close and reopen the database to simulate crash recovery
+		db.Close()
+		db, err = OpenDBWithPathsAndWAL("test_storage.db", "test_wal.db", "test_index.dat", true)
+		if err != nil {
+			t.Fatalf("Failed to reopen DB for WAL replay test: %v", err)
+		}
+		defer db.Close()
+
+		// Try to get the deleted key
+		val, err := db.Get("deleteAndPutMe")
+		if err != nil {
+			t.Errorf("Failed to retrieve key after delete followed by put: %v", err)
+
+		}
+		if val != "newValue" {
+			t.Errorf("Expected 'newValue', got '%s'", val)
+		}
+	})
+
 	// Test Multiple Entries in Single Flush
 	t.Run("FlushMultipleEntries", func(t *testing.T) {
 		// Add multiple entries

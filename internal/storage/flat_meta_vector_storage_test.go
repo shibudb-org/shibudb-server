@@ -319,6 +319,45 @@ func TestFlatMetaWALReplay(t *testing.T) {
 	assertIDSet(t, ids, 7)
 }
 
+func TestFlatMetaWALDeleteAndReplay(t *testing.T) {
+	dir := t.TempDir()
+	dataPath := filepath.Join(dir, "flat_meta_data.db")
+	walPath := filepath.Join(dir, "flat_meta_wal.db")
+	specs := []MetadataFieldSpec{
+		{Name: "user_id", Type: MetadataTypeString},
+		{Name: "age", Type: MetadataTypeInt},
+	}
+
+	e1, err := NewFlatMetaVectorEngine(dataPath, walPath, 2, faiss.MetricL2, specs, true)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	const id = 4
+	if err := e1.InsertVectorWithMetadata(id, []float32{0, 0}, map[string]any{"user_id": "eve", "age": 35.0}); err != nil {
+		t.Fatalf("insert %d: %v", id, err)
+	}
+
+	key := make([]byte, 8)
+	binary.LittleEndian.PutUint64(key, uint64(id))
+	if err := e1.wal.WriteDelete(string(key)); err != nil {
+		t.Fatalf("write delete to wal %d: %v", id, err)
+	}
+
+	if err := e1.Close(); err != nil { // Close flushes the append-only data file.
+		t.Fatalf("close: %v", err)
+	}
+
+	e2, err := NewFlatMetaVectorEngine(dataPath, walPath, 2, faiss.MetricL2, specs, true)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	t.Cleanup(func() { _ = e2.Close() })
+
+	if _, err := e2.GetVectorByID(id); err == nil {
+		t.Fatalf("expected id %d to be removed after restart due to pending delete entry in WAL", id)
+	}
+}
+
 func TestFlatMetaValidation(t *testing.T) {
 	specs := []MetadataFieldSpec{
 		{Name: "user_id", Type: MetadataTypeString},

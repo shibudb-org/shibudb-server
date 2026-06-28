@@ -20,9 +20,9 @@ type WALEntry struct {
 }
 
 const (
-	EntryPending  byte = 'P'
-	EntryCommited byte = 'C'
-	EntryDeleted  byte = 'D'
+	EntryPending   byte = 'P'
+	EntryCommitted byte = 'C'
+	EntryDeleted   byte = 'D'
 )
 
 func OpenWAL(filename string) (*WAL, error) {
@@ -73,7 +73,7 @@ func (w *WAL) WriteEntry(key, value string) error {
 }
 
 // Utility to read the WAL entry header starting at the current offset in the file.
-// It is not thread-safe and must be called from a thread safe context
+// It is not thread-safe and must be called from a thread safe context.
 func (w *WAL) readHeader() (keySize uint32, valSize uint32, commitFlag byte, err error) {
 	header := make([]byte, 9)
 	_, err = io.ReadFull(w.file, header)
@@ -90,7 +90,7 @@ func (w *WAL) WriteDelete(key string) error {
 	w.lock.Lock()
 	defer w.lock.Unlock()
 
-	_, err := w.file.Seek(0, io.SeekEnd) // Ensure we start at the absolute end
+	offset, err := w.file.Seek(0, io.SeekEnd) // Ensure we start at the absolute end
 	if err != nil {
 		return err
 	}
@@ -109,7 +109,15 @@ func (w *WAL) WriteDelete(key string) error {
 		return err
 	}
 
-	return w.file.Sync()
+	err = w.file.Sync()
+	if err != nil {
+		return err
+	}
+
+	if w.oldestPendingOffset < 0 {
+		w.oldestPendingOffset = offset
+	}
+	return nil
 }
 
 func (w *WAL) MarkCommitted() error {
@@ -121,7 +129,7 @@ func (w *WAL) MarkCommitted() error {
 		return nil
 	}
 
-	commitByte := []byte{EntryCommited}
+	commitByte := []byte{EntryCommitted}
 	offset := w.oldestPendingOffset
 	for offset >= 0 {
 		_, err := w.file.Seek(offset, io.SeekStart)
@@ -132,6 +140,10 @@ func (w *WAL) MarkCommitted() error {
 		if err == io.EOF {
 			break
 		}
+		if err != nil {
+			return err
+		}
+
 		_, err = w.file.Seek(-1, io.SeekCurrent)
 		if err != nil {
 			return err
@@ -168,7 +180,7 @@ func (w *WAL) Replay() ([]*WALEntry, error) {
 			return nil, err
 		}
 
-		if commitFlag == EntryCommited {
+		if commitFlag == EntryCommitted {
 			// Skip bytes for key and value since the transaction is commited
 			_, err := w.file.Seek(int64(keySize)+int64(valSize), io.SeekCurrent)
 			if err != nil {

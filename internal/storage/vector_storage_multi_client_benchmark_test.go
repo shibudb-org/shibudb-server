@@ -256,7 +256,7 @@ func runVectorEngineMultiClientInsertBenchmark(t *testing.T, enableWAL bool) {
 	avgIndex := totalIndexTime / time.Duration(insertCount)
 	avgWALCommit := totalWALCommitTime / time.Duration(insertCount)
 	avgExplicitSync := (totalWALWriteTime + totalWALCommitTime) / time.Duration(insertCount)
-	syncShare := 100 * float64((totalWALWriteTime+totalWALCommitTime).Nanoseconds()) / float64(totalInsertTime.Nanoseconds())
+	syncShare := 100 * float64((totalWALWriteTime + totalWALCommitTime).Nanoseconds()) / float64(totalInsertTime.Nanoseconds())
 
 	mode := "WAL enabled"
 	if !enableWAL {

@@ -140,6 +140,18 @@ func TestWAL(t *testing.T) {
 		printWALState("After WriteDelete")
 	})
 
+	t.Run("CommitAndReplayAfterDelete", func(t *testing.T) {
+		printWALState("Before CommitAndReplayAfterDelete")
+		err := w.MarkCommitted()
+		if err != nil {
+			t.Errorf("MarkCommitted failed: %v", err)
+		}
+		entries, err := w.Replay()
+		if len(entries) != 0 {
+			t.Errorf("Expected no entries after commit, but got: %v", entries)
+		}
+		printWALState("After CommitAndReplayAfterDelete")
+	})
 	// Test Clear()
 	t.Run("Clear", func(t *testing.T) {
 		printWALState("Before Clear")

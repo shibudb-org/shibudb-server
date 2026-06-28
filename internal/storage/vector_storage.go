@@ -523,7 +523,7 @@ func (ve *VectorEngineImpl) RemoveVector(id int64) error {
 	if ve.wal != nil {
 		key := make([]byte, 8)
 		binary.LittleEndian.PutUint64(key, uint64(id))
-		if err := ve.wal.WriteEntry(string(key), ""); err != nil {
+		if err := ve.wal.WriteDelete(string(key)); err != nil {
 			return err
 		}
 	}

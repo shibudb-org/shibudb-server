@@ -176,7 +176,7 @@ func (e *FlatMetaVectorEngine) RemoveVector(id int64) error {
 	if e.wal != nil {
 		key := make([]byte, 8)
 		binary.LittleEndian.PutUint64(key, uint64(id))
-		if err := e.wal.WriteEntry(string(key), ""); err != nil {
+		if err := e.wal.WriteDelete(string(key)); err != nil {
 			return err
 		}
 	}
