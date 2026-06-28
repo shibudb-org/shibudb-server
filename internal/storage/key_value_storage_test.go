@@ -1,10 +1,13 @@
 package storage
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"testing"
 	"time"
+
+	"github.com/shibudb.org/shibudb-server/internal/maintenance"
 )
 
 func TestShibuDB(t *testing.T) {
@@ -118,13 +121,15 @@ func TestShibuDB(t *testing.T) {
 			t.Errorf("Delete failed: %v", err)
 		}
 
-		// Close and reopen the database to simulate crash recovery
+		// Close and reopen the database to simulate crash recovery.
+		// Note: we intentionally do not defer Close on the reopened handle here;
+		// subsequent subtests reuse `db`, and it is closed later by
+		// ConcurrentPutAndAutoFlush (and the outer cleanup).
 		db.Close()
 		db, err = OpenDBWithPathsAndWAL("test_storage.db", "test_wal.db", "test_index.dat", true)
 		if err != nil {
 			t.Fatalf("Failed to reopen DB for WAL replay test: %v", err)
 		}
-		defer db.Close()
 
 		// Try to get the deleted key
 		_, err = db.Get("deleteMe")
@@ -136,6 +141,8 @@ func TestShibuDB(t *testing.T) {
 	// Test Delete followed by Put on the same key with a different value
 	// and WAL replay gives us the new value
 	t.Run("DeleteKeyPutKeyAndWALReplay", func(t *testing.T) {
+		// Close the handle left open by the previous subtest before reopening.
+		db.Close()
 		db, err = OpenDBWithPathsAndWAL("test_storage.db", "test_wal.db", "test_index.dat", true)
 		if err != nil {
 			t.Fatalf("Failed to open test DB: %v", err)
@@ -157,13 +164,14 @@ func TestShibuDB(t *testing.T) {
 			t.Errorf("Put failed: %v", err)
 		}
 
-		// Close and reopen the database to simulate crash recovery
+		// Close and reopen the database to simulate crash recovery.
+		// Note: no defer Close here; subsequent subtests reuse `db`, and it is
+		// closed later by ConcurrentPutAndAutoFlush (and the outer cleanup).
 		db.Close()
 		db, err = OpenDBWithPathsAndWAL("test_storage.db", "test_wal.db", "test_index.dat", true)
 		if err != nil {
 			t.Fatalf("Failed to reopen DB for WAL replay test: %v", err)
 		}
-		defer db.Close()
 
 		// Try to get the deleted key
 		val, err := db.Get("deleteAndPutMe")
@@ -253,4 +261,128 @@ func TestShibuDB(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestDeleteBatchedSemantics covers the batched Delete path: the not-found
+// contract, deleting a key that is only staged in the batch (never flushed), and
+// the no-resurrection ordering guarantee when a PUT and DELETE of the same key
+// land in one batch.
+func TestDeleteBatchedSemantics(t *testing.T) {
+	dataPath := "test_delbatch_storage.db"
+	walPath := "test_delbatch_wal.db"
+	indexPath := "test_delbatch_index.dat"
+	cleanup := func() {
+		for _, p := range []string{dataPath, walPath, indexPath} {
+			os.Remove(p)
+		}
+	}
+	cleanup()
+	defer cleanup()
+
+	db, err := OpenDBWithPathsAndWAL(dataPath, walPath, indexPath, true)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer db.Close()
+
+	// Deleting a non-existent key still returns errKeyNotFound.
+	if err := db.Delete("ghost"); !errors.Is(err, errKeyNotFound) {
+		t.Errorf("Delete(ghost) = %v, want errKeyNotFound", err)
+	}
+
+	// Delete works on a key that is only staged in the batch (never flushed) -
+	// the old segment-only existence check would have reported "not found".
+	if err := db.PutBatch("pending", "v"); err != nil {
+		t.Fatalf("PutBatch(pending): %v", err)
+	}
+	if err := db.Delete("pending"); err != nil {
+		t.Errorf("Delete of pending (unflushed) key failed: %v", err)
+	}
+	if _, err := db.Get("pending"); !errors.Is(err, errKeyDeleted) {
+		t.Errorf("Get(pending) after delete = %v, want errKeyDeleted", err)
+	}
+
+	// No resurrection: persist v1, then PUT v2 and DELETE in the same batch.
+	// After flushing, the key must remain deleted regardless of file offsets.
+	if err := db.PutBatch("k", "v1"); err != nil {
+		t.Fatalf("PutBatch(k, v1): %v", err)
+	}
+	if err := db.FlushBatch(); err != nil {
+		t.Fatalf("FlushBatch: %v", err)
+	}
+	if err := db.PutBatch("k", "v2"); err != nil {
+		t.Fatalf("PutBatch(k, v2): %v", err)
+	}
+	if err := db.Delete("k"); err != nil {
+		t.Fatalf("Delete(k): %v", err)
+	}
+	if err := db.FlushBatch(); err != nil {
+		t.Fatalf("FlushBatch after put+delete: %v", err)
+	}
+	if _, err := db.Get("k"); !errors.Is(err, errKeyDeleted) {
+		t.Errorf("Get(k) after put+delete in one batch = %v, want errKeyDeleted (no resurrection)", err)
+	}
+}
+
+// TestPutBatchWALDurabilityAfterCrash verifies that with WAL enabled, a PUT that
+// has been acknowledged survives a crash even if it was never flushed to the data
+// file or cleanly closed. We tear the engine down WITHOUT flushing the batch or
+// clearing the WAL (simulating a crash), then reopen and confirm WAL replay
+// recovers every acknowledged write.
+func TestPutBatchWALDurabilityAfterCrash(t *testing.T) {
+	dataPath := "test_durability_storage.db"
+	walPath := "test_durability_wal.db"
+	indexPath := "test_durability_index.dat"
+	cleanup := func() {
+		for _, p := range []string{dataPath, walPath, indexPath} {
+			os.Remove(p)
+		}
+	}
+	cleanup()
+	defer cleanup()
+
+	db, err := OpenDBWithPathsAndWAL(dataPath, walPath, indexPath, true)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+
+	want := map[string]string{"a": "1", "b": "2", "c": "3"}
+	for k, v := range want {
+		if err := db.PutBatch(k, v); err != nil {
+			t.Fatalf("PutBatch(%s): %v", k, err)
+		}
+	}
+
+	// Simulate a crash: stop the engine without flushing the batch or clearing
+	// the WAL, so the only durable copy of the writes is the WAL on disk.
+	db.maintenanceMu.Lock()
+	db.maintenanceClosed = true
+	maintenance.UnregisterKVFlush(db)
+	db.maintenanceMu.Unlock()
+	close(db.backgroundStop)
+	db.backgroundWG.Wait()
+	db.lock.Lock()
+	for _, segment := range db.segments {
+		_ = segment.dataFile.Close()
+	}
+	db.lock.Unlock()
+	_ = db.wal.Close()
+
+	// Reopen: WAL replay must recover every acknowledged PUT.
+	db2, err := OpenDBWithPathsAndWAL(dataPath, walPath, indexPath, true)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer db2.Close()
+
+	for k, v := range want {
+		got, err := db2.Get(k)
+		if err != nil {
+			t.Errorf("after crash recovery, Get(%s) failed: %v", k, err)
+			continue
+		}
+		if got != v {
+			t.Errorf("after crash recovery, Get(%s) = %q, want %q", k, got, v)
+		}
+	}
 }

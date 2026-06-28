@@ -3,13 +3,16 @@ package storage
 import (
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"math"
 	"os"
+	"path/filepath"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/DataIntelligenceCrew/go-faiss"
 	"github.com/RoaringBitmap/roaring/roaring64"
@@ -22,13 +25,20 @@ import (
 // metadata and in-memory secondary indexes. A filtered query resolves the
 // filter to a candidate ID set and scans distances over only those candidates;
 // an unfiltered query scans all live vectors. Vectors and indexes live in
-// memory; durability is provided by an append-only data file plus the WAL, and
-// the in-memory indexes are rebuilt by scanning the data file on open.
+// memory; durability is provided by a set of append-only segment data files plus
+// the WAL, and the in-memory indexes are rebuilt by scanning the segments on
+// open.
+//
+// Persistence uses the same segmented layout as the key-value and Flat/HNSW
+// vector engines: writes land in the active (hot) segment, which is sealed and
+// rolled over to a fresh file once it exceeds SegmentRolloverBytes, and a
+// background worker compacts the oldest cold segments once the segment count
+// exceeds MaxSegmentsBeforeMerge. Because all live state is kept in memory,
+// segments carry no per-segment on-disk index; reads never touch the files.
 //
 // Numeric metadata (int and float) is indexed and compared as float64, which is
 // exact for integers up to 2^53.
 type FlatMetaVectorEngine struct {
-	dataPath  string
 	dim       int
 	metric    int
 	specs     []MetadataFieldSpec
@@ -37,6 +47,8 @@ type FlatMetaVectorEngine struct {
 	wal *wal.WAL
 
 	lock sync.RWMutex
+
+	settings SpaceSettings
 
 	// In-memory state (guarded by lock).
 	vectors  map[int64][]float32
@@ -47,15 +59,41 @@ type FlatMetaVectorEngine struct {
 	// numIdx: field -> ordered tree of value -> set of ids (equality / IN / range).
 	numIdx map[string]*btree.BTreeG[flatMetaNumEntry]
 
-	// Append-only persistence buffer (guarded by persistMu); file writes by fileMu.
+	// Segmented append-only persistence (segments + manifest guarded by lock).
+	layout          SegmentLayout
+	primaryDataPath string
+	manifest        *SegmentManifest
+	segments        []*flatMetaSegment
+
+	// Append-only persistence buffer (guarded by persistMu).
 	persistMu  sync.Mutex
 	persistBuf []flatMetaPersistItem
-	fileMu     sync.Mutex
-	dataFile   *os.File
+
+	mergeQueue     chan struct{}
+	backgroundStop chan struct{}
+	backgroundWG   sync.WaitGroup
 
 	closeOnce         sync.Once
 	maintenanceMu     sync.RWMutex
 	maintenanceClosed bool
+}
+
+// flatMetaSegment is one append-only data file. It carries no on-disk index:
+// the engine keeps the full live working set in memory, so reads never read
+// segment files; the file handle is used only for appends (active segment) and
+// for compaction reads during a merge.
+type flatMetaSegment struct {
+	meta     SegmentMeta
+	dataFile *os.File
+}
+
+// flatMetaRecord is one decoded data-file record produced by streamFlatMetaDataFile.
+type flatMetaRecord struct {
+	id        int64
+	tombstone bool
+	raw       []byte
+	meta      []byte
+	vec       []float32
 }
 
 type flatMetaNumEntry struct {
@@ -79,8 +117,15 @@ var _ VectorEngine = (*FlatMetaVectorEngine)(nil)
 var _ FilterableVectorEngine = (*FlatMetaVectorEngine)(nil)
 var _ SpaceSettingsApplier = (*FlatMetaVectorEngine)(nil)
 
-// NewFlatMetaVectorEngine opens (or creates) a filterable Flat vector space.
+// NewFlatMetaVectorEngine opens (or creates) a filterable Flat vector space with
+// default segment settings.
 func NewFlatMetaVectorEngine(dataPath, walPath string, dim, metric int, specs []MetadataFieldSpec, enableWAL bool) (*FlatMetaVectorEngine, error) {
+	return NewFlatMetaVectorEngineWithSettings(dataPath, walPath, dim, metric, specs, enableWAL, SpaceSettings{})
+}
+
+// NewFlatMetaVectorEngineWithSettings opens (or creates) a filterable Flat vector
+// space using the provided segment rollover/merge settings.
+func NewFlatMetaVectorEngineWithSettings(dataPath, walPath string, dim, metric int, specs []MetadataFieldSpec, enableWAL bool, settings SpaceSettings) (*FlatMetaVectorEngine, error) {
 	if dim <= 0 {
 		return nil, fmt.Errorf("invalid vector dimension %d", dim)
 	}
@@ -98,17 +143,21 @@ func NewFlatMetaVectorEngine(dataPath, walPath string, dim, metric int, specs []
 	}
 
 	e := &FlatMetaVectorEngine{
-		dataPath:  dataPath,
-		dim:       dim,
-		metric:    metric,
-		specs:     append([]MetadataFieldSpec(nil), specs...),
-		specTypes: fieldSpecTypes(specs),
-		wal:       w,
-		vectors:   make(map[int64][]float32),
-		metadata:  make(map[int64]map[string]any),
-		liveIDs:   roaring64.New(),
-		stringIdx: make(map[string]map[string]*roaring64.Bitmap),
-		numIdx:    make(map[string]*btree.BTreeG[flatMetaNumEntry]),
+		dim:             dim,
+		metric:          metric,
+		specs:           append([]MetadataFieldSpec(nil), specs...),
+		specTypes:       fieldSpecTypes(specs),
+		wal:             w,
+		settings:        NormalizeSpaceSettings(settings),
+		vectors:         make(map[int64][]float32),
+		metadata:        make(map[int64]map[string]any),
+		liveIDs:         roaring64.New(),
+		stringIdx:       make(map[string]map[string]*roaring64.Bitmap),
+		numIdx:          make(map[string]*btree.BTreeG[flatMetaNumEntry]),
+		layout:          NewSegmentLayout(filepath.Dir(dataPath), "flat_meta", ".db", ".idx"),
+		primaryDataPath: dataPath,
+		mergeQueue:      make(chan struct{}, 1),
+		backgroundStop:  make(chan struct{}),
 	}
 	for _, spec := range specs {
 		if spec.Type == MetadataTypeString {
@@ -118,30 +167,134 @@ func NewFlatMetaVectorEngine(dataPath, walPath string, dim, metric int, specs []
 		}
 	}
 
-	dataFile, err := os.OpenFile(dataPath, os.O_RDWR|os.O_CREATE, 0666)
+	manifest, err := e.loadOrCreateManifest()
 	if err != nil {
 		if w != nil {
 			_ = w.Close()
 		}
 		return nil, err
 	}
-	e.dataFile = dataFile
+	e.manifest = manifest
 
-	if err := e.rebuildFromDataFile(); err != nil {
-		_ = dataFile.Close()
+	if err := e.loadSegments(); err != nil {
 		if w != nil {
 			_ = w.Close()
 		}
 		return nil, err
 	}
 
+	e.startBackgroundWorkers()
+
 	if enableWAL {
 		if err := e.replayWAL(); err != nil {
-			_ = dataFile.Close()
 			return nil, fmt.Errorf("WAL replay failed: %w", err)
 		}
 	}
 	return e, nil
+}
+
+func (e *FlatMetaVectorEngine) loadOrCreateManifest() (*SegmentManifest, error) {
+	path := e.layout.ManifestPath()
+	if _, err := os.Stat(path); err == nil {
+		return LoadOrCreateSegmentManifest(e.layout)
+	} else if !os.IsNotExist(err) {
+		return nil, err
+	}
+
+	now := time.Now().UnixNano()
+	manifest := &SegmentManifest{
+		Version:         currentSegmentManifestVersion,
+		NextSegmentID:   2,
+		ActiveSegmentID: 1,
+		Segments: []SegmentMeta{{
+			ID:              1,
+			State:           SegmentStateHot,
+			DataFile:        filepath.Base(e.primaryDataPath),
+			CreatedAtUnixNs: now,
+		}},
+	}
+	if info, err := os.Stat(e.primaryDataPath); err == nil {
+		manifest.Segments[0].SizeBytes = info.Size()
+	}
+	if err := WriteSegmentManifest(e.layout, manifest); err != nil {
+		return nil, err
+	}
+	return manifest, nil
+}
+
+// loadSegments opens every segment data file and rebuilds the in-memory state by
+// replaying the segments oldest-to-newest (last writer wins, tombstones drop).
+func (e *FlatMetaVectorEngine) loadSegments() error {
+	e.lock.Lock()
+	defer e.lock.Unlock()
+
+	e.segments = nil
+	if len(e.manifest.Segments) == 0 {
+		return errors.New("segment manifest has no segments")
+	}
+
+	e.manifest.ActiveSegmentID = e.manifest.Segments[len(e.manifest.Segments)-1].ID
+	for idx, meta := range e.manifest.Segments {
+		desc := e.layout.Descriptor(meta)
+		flags := os.O_RDWR
+		// Only the active/hot segment is allowed to be created on open. Cold
+		// segment files must exist; recreating them would hide data loss.
+		if meta.ID == e.manifest.ActiveSegmentID {
+			flags |= os.O_CREATE
+			meta.State = SegmentStateHot
+		} else {
+			meta.State = SegmentStateCold
+		}
+		dataFile, err := os.OpenFile(desc.DataPath, flags, 0666)
+		if err != nil {
+			return err
+		}
+		if info, err := dataFile.Stat(); err == nil {
+			meta.SizeBytes = info.Size()
+		}
+		e.manifest.Segments[idx] = meta
+		e.segments = append(e.segments, &flatMetaSegment{meta: meta, dataFile: dataFile})
+	}
+
+	if err := e.rebuildInMemoryLocked(); err != nil {
+		return err
+	}
+	return WriteSegmentManifest(e.layout, e.manifest)
+}
+
+// rebuildInMemoryLocked replays all segment data files in order to reconstruct
+// the in-memory vectors, metadata and secondary indexes. Caller holds e.lock.
+func (e *FlatMetaVectorEngine) rebuildInMemoryLocked() error {
+	for _, segment := range e.segments {
+		desc := e.layout.Descriptor(segment.meta)
+		err := streamFlatMetaDataFile(desc.DataPath, e.dim, func(rec flatMetaRecord) error {
+			if rec.tombstone {
+				e.indexRemoveLocked(rec.id)
+				return nil
+			}
+			var raw map[string]any
+			if len(rec.meta) > 0 {
+				if err := json.Unmarshal(rec.meta, &raw); err != nil {
+					return fmt.Errorf("decode metadata for id %d: %w", rec.id, err)
+				}
+			}
+			norm, err := e.coerceMetadata(raw)
+			if err != nil {
+				return fmt.Errorf("metadata for id %d: %w", rec.id, err)
+			}
+			e.indexInsertLocked(rec.id, rec.vec, norm)
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (e *FlatMetaVectorEngine) startBackgroundWorkers() {
+	e.backgroundWG.Add(1)
+	go e.mergeWorker()
 }
 
 func (e *FlatMetaVectorEngine) IndexedFields() []MetadataFieldSpec {
@@ -204,18 +357,26 @@ func (e *FlatMetaVectorEngine) Close() error {
 
 		e.flushData(true)
 
+		close(e.backgroundStop)
+		e.backgroundWG.Wait()
+
 		if e.wal != nil {
 			_ = e.wal.Close()
 		}
-		e.fileMu.Lock()
-		_ = e.dataFile.Close()
-		e.fileMu.Unlock()
+		e.lock.Lock()
+		for _, segment := range e.segments {
+			_ = segment.dataFile.Close()
+		}
+		e.lock.Unlock()
 	})
 	return nil
 }
 
-func (e *FlatMetaVectorEngine) UpdateSpaceSettings(_ SpaceSettings) error {
-	// Segment settings do not apply to the in-memory flat engine.
+func (e *FlatMetaVectorEngine) UpdateSpaceSettings(settings SpaceSettings) error {
+	e.lock.Lock()
+	defer e.lock.Unlock()
+	e.settings = NormalizeSpaceSettings(settings)
+	e.scheduleMergeCheckLocked()
 	return nil
 }
 
@@ -635,30 +796,48 @@ func (e *FlatMetaVectorEngine) flushData(force bool) {
 		return
 	}
 
-	e.fileMu.Lock()
-	defer e.fileMu.Unlock()
+	// Hold the write lock for the in-memory segment/manifest updates and the raw
+	// file writes, then release it before fsync so searches are not blocked for
+	// the full duration of the (potentially slow) syscall.
+	e.lock.Lock()
+	active := e.activeSegmentLocked()
+	if active == nil {
+		e.lock.Unlock()
+		return
+	}
+	dataFile := active.dataFile
 	for _, item := range buf {
-		if err := e.appendRecordLocked(item); err != nil {
+		if err := appendFlatMetaRecord(dataFile, item); err != nil {
 			log.Printf("flat-meta append failed for id=%d: %v", item.id, err)
 		}
 	}
-	if err := e.dataFile.Sync(); err != nil {
+	if info, err := dataFile.Stat(); err == nil {
+		active.meta.SizeBytes = info.Size()
+		e.updateSegmentMetaLocked(active.meta)
+	}
+	rotateErr := e.rotateHotSegmentLocked()
+	e.lock.Unlock()
+
+	if err := dataFile.Sync(); err != nil {
 		log.Printf("flat-meta data file sync failed: %v", err)
+	}
+	if rotateErr != nil {
+		log.Printf("flat-meta hot segment rotation failed: %v", rotateErr)
 	}
 }
 
-// appendRecordLocked writes one record; caller holds fileMu.
+// appendFlatMetaRecord appends one record to file.
 // Layout: [id:8][flag:1][metaLen:4][meta][vector: dim*4 (live only)].
-func (e *FlatMetaVectorEngine) appendRecordLocked(item flatMetaPersistItem) error {
+func appendFlatMetaRecord(file *os.File, item flatMetaPersistItem) error {
 	header := make([]byte, 13)
 	binary.LittleEndian.PutUint64(header[0:8], uint64(item.id))
 	if item.tombstone {
 		header[8] = flatMetaDataFlagTombstone
 		binary.LittleEndian.PutUint32(header[9:13], 0)
-		if _, err := e.dataFile.Seek(0, io.SeekEnd); err != nil {
+		if _, err := file.Seek(0, io.SeekEnd); err != nil {
 			return err
 		}
-		_, err := e.dataFile.Write(header)
+		_, err := file.Write(header)
 		return err
 	}
 
@@ -672,34 +851,264 @@ func (e *FlatMetaVectorEngine) appendRecordLocked(item flatMetaPersistItem) erro
 		binary.LittleEndian.PutUint32(vecBytes[i*4:], math.Float32bits(v))
 	}
 	body = append(body, vecBytes...)
-	if _, err := e.dataFile.Seek(0, io.SeekEnd); err != nil {
+	if _, err := file.Seek(0, io.SeekEnd); err != nil {
 		return err
 	}
-	_, err := e.dataFile.Write(body)
+	_, err := file.Write(body)
 	return err
 }
 
-func (e *FlatMetaVectorEngine) rebuildFromDataFile() error {
-	liveVecs, liveMeta, err := scanFlatMetaDataFile(e.dataPath, e.dim)
+// === segment management (lock held) ===
+
+func (e *FlatMetaVectorEngine) activeSegmentLocked() *flatMetaSegment {
+	for _, segment := range e.segments {
+		if segment.meta.ID == e.manifest.ActiveSegmentID {
+			return segment
+		}
+	}
+	return nil
+}
+
+func (e *FlatMetaVectorEngine) updateSegmentMetaLocked(meta SegmentMeta) {
+	for idx := range e.segments {
+		if e.segments[idx].meta.ID == meta.ID {
+			e.segments[idx].meta = meta
+			break
+		}
+	}
+	for idx := range e.manifest.Segments {
+		if e.manifest.Segments[idx].ID == meta.ID {
+			e.manifest.Segments[idx] = meta
+			break
+		}
+	}
+}
+
+func (e *FlatMetaVectorEngine) segmentByIDLocked(id int64) *flatMetaSegment {
+	for _, segment := range e.segments {
+		if segment.meta.ID == id {
+			return segment
+		}
+	}
+	return nil
+}
+
+func (e *FlatMetaVectorEngine) segmentIndexByIDLocked(id int64) int {
+	for idx, segment := range e.segments {
+		if segment.meta.ID == id {
+			return idx
+		}
+	}
+	return -1
+}
+
+func (e *FlatMetaVectorEngine) scheduleMergeCheckLocked() {
+	select {
+	case e.mergeQueue <- struct{}{}:
+	default:
+	}
+}
+
+// rotateHotSegmentLocked seals the active segment and opens a fresh hot segment
+// once the active file exceeds the rollover threshold. The sealed segment is
+// marked cold directly: flat-meta keeps no per-segment on-disk index, so there
+// is no separate indexing phase before it becomes eligible for merging.
+func (e *FlatMetaVectorEngine) rotateHotSegmentLocked() error {
+	active := e.activeSegmentLocked()
+	if active == nil {
+		return errors.New("no active segment")
+	}
+	if active.meta.SizeBytes < e.settings.SegmentRolloverBytes {
+		return nil
+	}
+
+	active.meta.State = SegmentStateCold
+	active.meta.SealedAtUnixNs = time.Now().UnixNano()
+	e.updateSegmentMetaLocked(active.meta)
+
+	newID := e.manifest.NextSegmentID
+	e.manifest.NextSegmentID++
+	newMeta := SegmentMeta{
+		ID:              newID,
+		State:           SegmentStateHot,
+		DataFile:        e.layout.DataFileName(newID),
+		CreatedAtUnixNs: time.Now().UnixNano(),
+	}
+	newDataFile, err := os.OpenFile(e.layout.DataPath(newID), os.O_RDWR|os.O_CREATE, 0666)
 	if err != nil {
 		return err
 	}
-	e.lock.Lock()
-	defer e.lock.Unlock()
-	for id, vec := range liveVecs {
-		var raw map[string]any
-		if len(liveMeta[id]) > 0 {
-			if err := json.Unmarshal(liveMeta[id], &raw); err != nil {
-				return fmt.Errorf("decode metadata for id %d: %w", id, err)
+
+	e.manifest.ActiveSegmentID = newID
+	e.manifest.Segments = append(e.manifest.Segments, newMeta)
+	e.segments = append(e.segments, &flatMetaSegment{meta: newMeta, dataFile: newDataFile})
+	if err := WriteSegmentManifest(e.layout, e.manifest); err != nil {
+		return err
+	}
+
+	e.scheduleMergeCheckLocked()
+	return nil
+}
+
+// === background merge ===
+
+func (e *FlatMetaVectorEngine) mergeWorker() {
+	defer e.backgroundWG.Done()
+	for {
+		select {
+		case <-e.backgroundStop:
+			return
+		case <-e.mergeQueue:
+			for e.tryMergeOldestColdSegments() {
 			}
 		}
-		norm, err := e.coerceMetadata(raw)
-		if err != nil {
-			return fmt.Errorf("metadata for id %d: %w", id, err)
-		}
-		e.indexInsertLocked(id, vec, norm)
 	}
-	return nil
+}
+
+func (e *FlatMetaVectorEngine) tryMergeOldestColdSegments() bool {
+	e.lock.Lock()
+	if len(e.segments) <= e.settings.MaxSegmentsBeforeMerge {
+		e.lock.Unlock()
+		return false
+	}
+
+	var first, second *flatMetaSegment
+	for _, segment := range e.segments {
+		if segment.meta.ID == e.manifest.ActiveSegmentID {
+			continue
+		}
+		if segment.meta.State != SegmentStateCold {
+			continue
+		}
+		if first == nil {
+			first = segment
+			continue
+		}
+		second = segment
+		break
+	}
+	if first == nil || second == nil {
+		e.lock.Unlock()
+		return false
+	}
+
+	first.meta.State = SegmentStateMerging
+	second.meta.State = SegmentStateMerging
+	e.updateSegmentMetaLocked(first.meta)
+	e.updateSegmentMetaLocked(second.meta)
+	newID := second.meta.ID
+	firstDesc := e.layout.Descriptor(first.meta)
+	secondDesc := e.layout.Descriptor(second.meta)
+	_ = WriteSegmentManifest(e.layout, e.manifest)
+	e.lock.Unlock()
+
+	mergedMeta, mergedFile, err := e.mergeSegments(newID, firstDesc, secondDesc)
+	if err != nil {
+		log.Printf("merge flat-meta segments %d and %d failed: %v", first.meta.ID, second.meta.ID, err)
+		e.lock.Lock()
+		if segment := e.segmentByIDLocked(first.meta.ID); segment != nil {
+			segment.meta.State = SegmentStateCold
+			e.updateSegmentMetaLocked(segment.meta)
+		}
+		if segment := e.segmentByIDLocked(second.meta.ID); segment != nil {
+			segment.meta.State = SegmentStateCold
+			e.updateSegmentMetaLocked(segment.meta)
+		}
+		_ = WriteSegmentManifest(e.layout, e.manifest)
+		e.lock.Unlock()
+		return false
+	}
+
+	e.lock.Lock()
+	defer e.lock.Unlock()
+	firstIdx := e.segmentIndexByIDLocked(first.meta.ID)
+	secondIdx := e.segmentIndexByIDLocked(second.meta.ID)
+	if firstIdx < 0 || secondIdx < 0 || secondIdx <= firstIdx {
+		_ = mergedFile.Close()
+		return false
+	}
+
+	_ = e.segments[firstIdx].dataFile.Close()
+	_ = e.segments[secondIdx].dataFile.Close()
+	_ = os.Remove(firstDesc.DataPath)
+
+	mergedSegment := &flatMetaSegment{meta: mergedMeta, dataFile: mergedFile}
+	e.segments = append(append([]*flatMetaSegment{}, mergedSegment), e.segments[secondIdx+1:]...)
+	e.manifest.Segments = append(append([]SegmentMeta{}, mergedMeta), e.manifest.Segments[secondIdx+1:]...)
+	_ = WriteSegmentManifest(e.layout, e.manifest)
+	return len(e.segments) > e.settings.MaxSegmentsBeforeMerge
+}
+
+// mergeSegments compacts two segment data files into a new one keyed on newID,
+// keeping the latest record per id (including tombstones). It returns the new
+// segment meta and an open handle to the merged file.
+func (e *FlatMetaVectorEngine) mergeSegments(newID int64, firstDesc, secondDesc SegmentDescriptor) (SegmentMeta, *os.File, error) {
+	latestRecords, err := collectLatestFlatMetaRecords(e.dim, firstDesc.DataPath, secondDesc.DataPath)
+	if err != nil {
+		return SegmentMeta{}, nil, err
+	}
+
+	mergedDataPath := e.layout.DataPath(newID)
+	if err := writeMergedFlatMetaDataFile(mergedDataPath, latestRecords); err != nil {
+		return SegmentMeta{}, nil, err
+	}
+	dataFile, err := os.OpenFile(mergedDataPath, os.O_RDWR|os.O_CREATE, 0666)
+	if err != nil {
+		return SegmentMeta{}, nil, err
+	}
+
+	meta := SegmentMeta{
+		ID:              newID,
+		State:           SegmentStateCold,
+		DataFile:        filepath.Base(mergedDataPath),
+		CreatedAtUnixNs: time.Now().UnixNano(),
+	}
+	if info, err := dataFile.Stat(); err == nil {
+		meta.SizeBytes = info.Size()
+	}
+	return meta, dataFile, nil
+}
+
+func collectLatestFlatMetaRecords(dim int, paths ...string) (map[int64][]byte, error) {
+	records := make(map[int64][]byte)
+	for _, path := range paths {
+		err := streamFlatMetaDataFile(path, dim, func(rec flatMetaRecord) error {
+			records[rec.id] = append([]byte(nil), rec.raw...)
+			return nil
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+	return records, nil
+}
+
+func writeMergedFlatMetaDataFile(dataPath string, records map[int64][]byte) error {
+	if err := os.MkdirAll(filepath.Dir(dataPath), 0755); err != nil {
+		return err
+	}
+	tmpPath := dataPath + ".merge.tmp"
+	file, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0666)
+	if err != nil {
+		return err
+	}
+	for _, record := range records {
+		if _, err := file.Write(record); err != nil {
+			_ = file.Close()
+			return err
+		}
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	if err := os.Remove(dataPath); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return os.Rename(tmpPath, dataPath)
 }
 
 func (e *FlatMetaVectorEngine) replayWAL() error {
@@ -752,54 +1161,61 @@ func (e *FlatMetaVectorEngine) replayWAL() error {
 	return e.wal.Clear()
 }
 
-// scanFlatMetaDataFile reads the append-only data file and returns the latest
-// live vector and metadata bytes per id (tombstones drop the id).
-func scanFlatMetaDataFile(path string, dim int) (map[int64][]float32, map[int64][]byte, error) {
+// streamFlatMetaDataFile reads an append-only data file record by record (in file
+// order) and invokes fn for each. A truncated trailing record (e.g. from a crash
+// mid-append) is treated as end-of-file. A missing file is not an error.
+func streamFlatMetaDataFile(path string, dim int, fn func(flatMetaRecord) error) error {
 	file, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return map[int64][]float32{}, map[int64][]byte{}, nil
+			return nil
 		}
-		return nil, nil, err
+		return err
 	}
 	defer file.Close()
 
-	reader := io.Reader(file)
-	vectors := make(map[int64][]float32)
-	metas := make(map[int64][]byte)
 	header := make([]byte, 13)
 	for {
-		if _, err := io.ReadFull(reader, header); err != nil {
+		if _, err := io.ReadFull(file, header); err != nil {
 			if err == io.EOF || err == io.ErrUnexpectedEOF {
 				break
 			}
-			return nil, nil, err
+			return err
 		}
 		id := int64(binary.LittleEndian.Uint64(header[0:8]))
 		flag := header[8]
 		metaLen := binary.LittleEndian.Uint32(header[9:13])
 
 		metaBuf := make([]byte, metaLen)
-		if _, err := io.ReadFull(reader, metaBuf); err != nil {
+		if _, err := io.ReadFull(file, metaBuf); err != nil {
 			break
 		}
 		if flag == flatMetaDataFlagTombstone {
-			delete(vectors, id)
-			delete(metas, id)
+			raw := make([]byte, 0, 13+len(metaBuf))
+			raw = append(raw, header...)
+			raw = append(raw, metaBuf...)
+			if err := fn(flatMetaRecord{id: id, tombstone: true, raw: raw, meta: metaBuf}); err != nil {
+				return err
+			}
 			continue
 		}
 		vecBuf := make([]byte, 4*dim)
-		if _, err := io.ReadFull(reader, vecBuf); err != nil {
+		if _, err := io.ReadFull(file, vecBuf); err != nil {
 			break
 		}
 		vec := make([]float32, dim)
 		for i := 0; i < dim; i++ {
 			vec[i] = math.Float32frombits(binary.LittleEndian.Uint32(vecBuf[i*4:]))
 		}
-		vectors[id] = vec
-		metas[id] = metaBuf
+		raw := make([]byte, 0, 13+len(metaBuf)+len(vecBuf))
+		raw = append(raw, header...)
+		raw = append(raw, metaBuf...)
+		raw = append(raw, vecBuf...)
+		if err := fn(flatMetaRecord{id: id, tombstone: false, raw: raw, meta: metaBuf, vec: vec}); err != nil {
+			return err
+		}
 	}
-	return vectors, metas, nil
+	return nil
 }
 
 func encodeFlatMetaWALValue(meta []byte, vec []float32) []byte {

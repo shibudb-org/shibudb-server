@@ -452,7 +452,7 @@ func (sm *SpaceManager) openSpaceEngine(meta spaceMeta) (interface{}, error) {
 		if meta.IndexType == "Flat" && len(meta.IndexedMetadataFields) > 0 {
 			dataFile := filepath.Join(spacePath, "flat_meta_data.db")
 			walFile := filepath.Join(spacePath, "flat_meta_wal.db")
-			return storage.NewFlatMetaVectorEngine(dataFile, walFile, meta.Dimension, getFAISSMetric(meta.Metric), meta.IndexedMetadataFields, meta.EnableWAL)
+			return storage.NewFlatMetaVectorEngineWithSettings(dataFile, walFile, meta.Dimension, getFAISSMetric(meta.Metric), meta.IndexedMetadataFields, meta.EnableWAL, settings)
 		}
 		dataFile := filepath.Join(spacePath, "vector_data.db")
 		indexFile := filepath.Join(spacePath, "vector_index.faiss")

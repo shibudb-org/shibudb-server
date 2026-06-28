@@ -281,6 +281,86 @@ func TestFlatMetaPersistenceRebuild(t *testing.T) {
 	assertIDSet(t, ids, 1, 3)
 }
 
+func TestFlatMetaSegmentRolloverAndMerge(t *testing.T) {
+	dir := t.TempDir()
+	dataPath := filepath.Join(dir, "flat_meta_data.db")
+	walPath := filepath.Join(dir, "flat_meta_wal.db")
+	specs := []MetadataFieldSpec{{Name: "grp", Type: MetadataTypeString}}
+
+	// Tiny rollover so each pair of inserts seals a segment, and a small merge
+	// threshold so the background worker compacts aggressively.
+	settings := SpaceSettings{SegmentRolloverBytes: 64, MaxSegmentsBeforeMerge: 3}
+	e, err := NewFlatMetaVectorEngineWithSettings(dataPath, walPath, 2, faiss.MetricL2, specs, false, settings)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+
+	const n = 40
+	for i := 1; i <= n; i++ {
+		if err := e.InsertVectorWithMetadata(int64(i), []float32{float32(i), float32(i)}, map[string]any{"grp": "g"}); err != nil {
+			t.Fatalf("insert %d: %v", i, err)
+		}
+		// Force the append + size-based rollover synchronously for determinism.
+		e.flushData(true)
+	}
+
+	e.lock.RLock()
+	segCount := len(e.segments)
+	e.lock.RUnlock()
+	if segCount < 2 {
+		t.Fatalf("expected multiple segments after rollover, got %d", segCount)
+	}
+
+	// The background merge worker should compact down to <= MaxSegmentsBeforeMerge.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		e.lock.RLock()
+		segCount = len(e.segments)
+		e.lock.RUnlock()
+		if segCount <= settings.MaxSegmentsBeforeMerge {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("merge did not reduce segment count: still %d (> %d)", segCount, settings.MaxSegmentsBeforeMerge)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Overwrite one vector and delete another so last-writer-wins and tombstones
+	// must be resolved across multiple segments on rebuild.
+	if err := e.InsertVectorWithMetadata(1, []float32{100, 100}, map[string]any{"grp": "g"}); err != nil {
+		t.Fatalf("update 1: %v", err)
+	}
+	if err := e.RemoveVector(2); err != nil {
+		t.Fatalf("remove 2: %v", err)
+	}
+	if err := e.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	// Reopen: in-memory state is rebuilt by replaying every segment in order.
+	e2, err := NewFlatMetaVectorEngineWithSettings(dataPath, walPath, 2, faiss.MetricL2, specs, false, settings)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	t.Cleanup(func() { _ = e2.Close() })
+
+	if _, err := e2.GetVectorByID(2); err == nil {
+		t.Fatalf("expected id 2 to remain removed after restart")
+	}
+	got, err := e2.GetVectorByID(1)
+	if err != nil || !reflect.DeepEqual(got, []float32{100, 100}) {
+		t.Fatalf("expected updated vector for id 1, got %v err=%v", got, err)
+	}
+	ids, _, err := e2.SearchTopKFiltered([]float32{0, 0}, n, &MetadataFilter{Op: FilterOpEq, Field: "grp", Value: "g"})
+	if err != nil {
+		t.Fatalf("search after restart: %v", err)
+	}
+	if len(ids) != n-1 {
+		t.Fatalf("expected %d live vectors after restart, got %d (%v)", n-1, len(ids), ids)
+	}
+}
+
 func TestFlatMetaWALReplay(t *testing.T) {
 	dir := t.TempDir()
 	dataPath := filepath.Join(dir, "flat_meta_data.db")

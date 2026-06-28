@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -255,8 +254,6 @@ func StartServer(port string, authFilePath string, maxConnections int32, dataFol
 	if port == managementPort {
 		panic(fmt.Sprintf("client port and management port must differ (both are %s)", port))
 	}
-	runtime.SetBlockProfileRate(1)
-	runtime.SetMutexProfileFraction(1)
 	spaceRestoreStartedAt := time.Now()
 	fmt.Printf("Loading spaces and indexes from %s before opening network listeners...\n", dataFolderPath)
 	spaceManager := spaces.NewSpaceManager(dataFolderPath)

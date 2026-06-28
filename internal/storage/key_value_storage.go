@@ -22,12 +22,21 @@ type kvSegment struct {
 	index    map[string]int64
 }
 
+// kvBatchEntry is a single staged write in the in-memory batch. A deleted entry
+// is a tombstone: it is persisted as a delete record by FlushBatch and shadows
+// any value for the key in older segments.
+type kvBatchEntry struct {
+	value   string
+	deleted bool
+}
+
 type ShibuDB struct {
 	lock      sync.RWMutex
 	wal       *wal.WAL
+	walMu     sync.Mutex
 	settings  SpaceSettings
 	batchLock sync.Mutex
-	batch     map[string]string
+	batch     map[string]kvBatchEntry
 	closeOnce sync.Once
 
 	maintenanceMu     sync.RWMutex
@@ -62,7 +71,7 @@ func OpenDBWithPathsAndWALAndSettings(dataPath, walPath, indexPath string, enabl
 	db := &ShibuDB{
 		wal:              dbWAL,
 		settings:         NormalizeSpaceSettings(settings),
-		batch:            make(map[string]string),
+		batch:            make(map[string]kvBatchEntry),
 		layout:           NewSegmentLayout(filepath.Dir(dataPath), "data", ".db", ".idx"),
 		primaryDataPath:  dataPath,
 		primaryIndexPath: indexPath,
@@ -222,75 +231,108 @@ func (db *ShibuDB) replayWAL() {
 }
 
 func (db *ShibuDB) PutBatch(key, value string) error {
+	// With WAL enabled, the write must be durable before we acknowledge it:
+	// persist (and fsync) the WAL record first, then stage it in the in-memory
+	// batch for the asynchronous data-file flush. walMu serializes WAL appends
+	// against the checkpoint clear in FlushBatch so a flush cannot drop a record
+	// for a write that raced with it. The fsync happens before batchLock is
+	// taken, so reads contending on batchLock are not blocked on the disk.
+	if db.wal != nil {
+		db.walMu.Lock()
+		if err := db.wal.WriteEntry(key, value); err != nil {
+			db.walMu.Unlock()
+			return err
+		}
+		db.batchLock.Lock()
+		db.batch[key] = kvBatchEntry{value: value}
+		db.batchLock.Unlock()
+		db.walMu.Unlock()
+		maintenance.MarkKVFlushDirty(db)
+		return nil
+	}
+
 	db.batchLock.Lock()
-	db.batch[key] = value
+	db.batch[key] = kvBatchEntry{value: value}
 	db.batchLock.Unlock()
 	maintenance.MarkKVFlushDirty(db)
 	return nil
 }
 
 func (db *ShibuDB) FlushBatch() error {
+	// Hold walMu for the whole flush so no new WAL records are appended between
+	// draining the batch and clearing the WAL below. This keeps the invariant
+	// that the WAL contains exactly the records not yet persisted to the data
+	// file, which makes the checkpoint clear safe (no acked write is lost).
+	if db.wal != nil {
+		db.walMu.Lock()
+		defer db.walMu.Unlock()
+	}
+
 	db.batchLock.Lock()
-	batchCopy := make(map[string]string, len(db.batch))
+	batchCopy := make(map[string]kvBatchEntry, len(db.batch))
 	for k, v := range db.batch {
 		batchCopy[k] = v
 	}
-	db.batch = make(map[string]string)
+	db.batch = make(map[string]kvBatchEntry)
 	db.batchLock.Unlock()
-
-	if len(batchCopy) == 0 {
-		return nil
-	}
 
 	db.lock.Lock()
 	defer db.lock.Unlock()
 
-	active := db.activeSegmentLocked()
-	if active == nil {
-		return errors.New("no active segment")
-	}
+	if len(batchCopy) > 0 {
+		active := db.activeSegmentLocked()
+		if active == nil {
+			return errors.New("no active segment")
+		}
 
-	if db.wal != nil {
-		for key, value := range batchCopy {
-			if err := db.wal.WriteEntry(key, value); err != nil {
+		for key, entry := range batchCopy {
+			var pos int64
+			var err error
+			if entry.deleted {
+				pos, err = appendDeleteRecord(active.dataFile, key)
+			} else {
+				pos, err = appendKeyValueRecord(active.dataFile, key, entry.value)
+			}
+			if err != nil {
 				return err
 			}
+			active.index[key] = pos
 		}
-	}
 
-	for key, value := range batchCopy {
-		pos, err := appendKeyValueRecord(active.dataFile, key, value)
-		if err != nil {
+		if err := active.dataFile.Sync(); err != nil {
 			return err
 		}
-		active.index[key] = pos
+		if info, err := active.dataFile.Stat(); err == nil {
+			active.meta.SizeBytes = info.Size()
+			db.updateSegmentMetaLocked(active.meta)
+		}
 	}
 
-	if err := active.dataFile.Sync(); err != nil {
-		return err
-	}
-	if info, err := active.dataFile.Stat(); err == nil {
-		active.meta.SizeBytes = info.Size()
-		db.updateSegmentMetaLocked(active.meta)
-	}
-
+	// Every batched PUT is now durable in the data file, and Delete persists its
+	// tombstone synchronously, so all records currently in the WAL are redundant.
+	// Clearing here (under walMu + db.lock) is the single checkpoint point, which
+	// guarantees no acked write is dropped: walMu blocks new PUT appends and
+	// db.lock blocks Delete appends while we clear.
 	if db.wal != nil {
-		if err := db.wal.MarkCommitted(); err != nil {
+		if err := db.wal.Clear(); err != nil {
 			return err
-		}
-		if db.wal.ShouldCheckpoint() {
-			_ = db.wal.Clear()
 		}
 	}
 
-	return db.rotateHotSegmentLocked()
+	if len(batchCopy) > 0 {
+		return db.rotateHotSegmentLocked()
+	}
+	return nil
 }
 
 func (db *ShibuDB) Get(key string) (string, error) {
 	db.batchLock.Lock()
-	if val, exists := db.batch[key]; exists {
+	if entry, exists := db.batch[key]; exists {
 		db.batchLock.Unlock()
-		return val, nil
+		if entry.deleted {
+			return "", errKeyDeleted
+		}
+		return entry.value, nil
 	}
 	db.batchLock.Unlock()
 
@@ -319,10 +361,10 @@ func (db *ShibuDB) Get(key string) (string, error) {
 }
 
 func (db *ShibuDB) Delete(key string) error {
-	db.lock.Lock()
-	defer db.lock.Unlock()
-
-	exists, err := db.keyExistsLocked(key)
+	// Preserve the "key not found" contract, but check existence under a read
+	// lock (no exclusive lock, no fsync) so deletes don't serialize behind every
+	// other write the way the old synchronous path did.
+	exists, err := db.keyExists(key)
 	if err != nil {
 		return err
 	}
@@ -330,41 +372,46 @@ func (db *ShibuDB) Delete(key string) error {
 		return errKeyNotFound
 	}
 
-	active := db.activeSegmentLocked()
-	if active == nil {
-		return errors.New("no active segment")
-	}
-
+	// Durable, batched delete: same model as PutBatch. Persist a delete record to
+	// the WAL (fsync) before acking, then stage a tombstone in the batch for the
+	// asynchronous data-file flush. This removes the per-delete data-file fsync
+	// and the exclusive lock, and routes puts and deletes through the same ordered
+	// batch so a put and delete of the same key resolve last-writer-wins instead
+	// of racing on data-file offsets (which previously could resurrect a key).
 	if db.wal != nil {
+		db.walMu.Lock()
 		if err := db.wal.WriteDelete(key); err != nil {
+			db.walMu.Unlock()
 			return err
 		}
+		db.batchLock.Lock()
+		db.batch[key] = kvBatchEntry{deleted: true}
+		db.batchLock.Unlock()
+		db.walMu.Unlock()
+		maintenance.MarkKVFlushDirty(db)
+		return nil
 	}
 
-	pos, err := appendDeleteRecord(active.dataFile, key)
-	if err != nil {
-		return err
-	}
-	active.index[key] = pos
+	db.batchLock.Lock()
+	db.batch[key] = kvBatchEntry{deleted: true}
+	db.batchLock.Unlock()
+	maintenance.MarkKVFlushDirty(db)
+	return nil
+}
 
-	if err := active.dataFile.Sync(); err != nil {
-		return err
+// keyExists reports whether key currently resolves to a live value, checking the
+// in-memory batch first (most recent state) and then the persisted segments.
+func (db *ShibuDB) keyExists(key string) (bool, error) {
+	db.batchLock.Lock()
+	if entry, ok := db.batch[key]; ok {
+		db.batchLock.Unlock()
+		return !entry.deleted, nil
 	}
-	if info, err := active.dataFile.Stat(); err == nil {
-		active.meta.SizeBytes = info.Size()
-		db.updateSegmentMetaLocked(active.meta)
-	}
+	db.batchLock.Unlock()
 
-	if db.wal != nil {
-		if err := db.wal.MarkCommitted(); err != nil {
-			return err
-		}
-		if db.wal.ShouldCheckpoint() {
-			_ = db.wal.Clear()
-		}
-	}
-
-	return db.rotateHotSegmentLocked()
+	db.lock.RLock()
+	defer db.lock.RUnlock()
+	return db.keyExistsLocked(key)
 }
 
 func (db *ShibuDB) Close() error {

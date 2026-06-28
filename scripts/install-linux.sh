@@ -281,13 +281,77 @@ install_files() {
 	$SUDO install -m 0644 "$SOURCE_DIR/LICENSE" "$SHARE_DIR/LICENSE" 2>/dev/null || true
 	$SUDO install -m 0644 "$SOURCE_DIR/README.md" "$SHARE_DIR/README.md" 2>/dev/null || true
 
-	if [[ -d /etc/ld.so.conf.d ]]; then
-		echo "$LIB_DIR" | $SUDO tee /etc/ld.so.conf.d/$APP_NAME.conf >/dev/null
+	register_libraries
+}
+
+find_ldconfig() {
+	# ldconfig commonly lives in /sbin or /usr/sbin, which are not on a normal
+	# user's PATH (notably on Debian/Ubuntu). Resolve it explicitly so the
+	# registration step is not silently skipped.
+	local candidate
+	if candidate="$(command -v ldconfig 2>/dev/null)"; then
+		echo "$candidate"
+		return 0
+	fi
+	for candidate in /sbin/ldconfig /usr/sbin/ldconfig /usr/bin/ldconfig /bin/ldconfig; do
+		if [[ -x "$candidate" ]]; then
+			echo "$candidate"
+			return 0
+		fi
+	done
+	return 1
+}
+
+register_libraries() {
+	# Make $LIB_DIR resolvable by the dynamic linker at runtime. We always
+	# write the ld.so.conf.d entry (creating the directory if needed) and run
+	# ldconfig, then verify the result so the installer never reports success
+	# while libfaiss.so remains unresolvable.
+	local ldconfig_bin
+	if ! ldconfig_bin="$(find_ldconfig)"; then
+		cat >&2 <<EOF
+
+Warning: ldconfig was not found, so $LIB_DIR could not be registered with the
+dynamic linker. If "$APP_NAME" fails with "libfaiss.so: cannot open shared
+object file", run it with:
+
+  LD_LIBRARY_PATH=$LIB_DIR $BIN_DIR/$APP_NAME
+
+EOF
+		return
 	fi
 
-	if command -v ldconfig >/dev/null 2>&1; then
-		$SUDO ldconfig
+	$SUDO install -d /etc/ld.so.conf.d
+	echo "$LIB_DIR" | $SUDO tee /etc/ld.so.conf.d/$APP_NAME.conf >/dev/null
+	$SUDO "$ldconfig_bin"
+
+	if "$ldconfig_bin" -p | grep -q '\blibfaiss\.so\b' && \
+		"$ldconfig_bin" -p | grep -q '\blibfaiss_c\.so\b'; then
+		return
 	fi
+
+	# The conf entry should have made these resolvable. If the cache still does
+	# not list them (e.g. an unusual ldconfig setup), fail loudly with the exact
+	# remediation instead of leaving a broken install behind.
+	cat >&2 <<EOF
+
+ShibuDB build completed, but the FAISS libraries in $LIB_DIR are not yet
+resolvable by the dynamic linker. The following files were installed:
+
+$(ls -l "$LIB_DIR"/libfaiss.so "$LIB_DIR"/libfaiss_c.so 2>&1)
+
+Try the following and rerun "$APP_NAME":
+
+  echo $LIB_DIR | sudo tee /etc/ld.so.conf.d/$APP_NAME.conf
+  sudo ldconfig
+  ldconfig -p | grep libfaiss
+
+If that still does not work, run with an explicit library path:
+
+  LD_LIBRARY_PATH=$LIB_DIR $BIN_DIR/$APP_NAME
+
+EOF
+	exit 1
 }
 
 check_faiss_runtime_compatibility() {
