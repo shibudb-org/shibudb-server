@@ -12,7 +12,7 @@ import (
 func BenchmarkShibuDB(b *testing.B) {
 	os.Remove("benchmark_storage.db")
 	os.Remove("benchmark_wal.db")
-	db, err := storage.OpenDBWithPathsAndWAL("benchmark_storage.db", "benchmark_wal.db", "benchmark_index.dat", true)
+	db, err := storage.OpenDBWithPathsAndWAL("benchmark_storage.db", "benchmark_wal.db", "benchmark_index.dat", true, "btree")
 	if err != nil {
 		b.Fatalf("Failed to open database: %v", err)
 	}

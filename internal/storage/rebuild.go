@@ -47,7 +47,7 @@ func isVectorRebuildTrainingError(err error) bool {
 // RebuildKeyValueIndex reconstructs a key-value index file from the append-only
 // data file. The latest record wins; records with zero-length values are
 // treated as deletions.
-func RebuildKeyValueIndex(dataPath, indexPath string) (KeyValueRebuildStats, error) {
+func RebuildKeyValueIndex(dataPath, indexPath string, indexType string) (KeyValueRebuildStats, error) {
 	stats := KeyValueRebuildStats{IndexPath: indexPath}
 
 	dataFile, err := os.Open(dataPath)
@@ -105,7 +105,7 @@ func RebuildKeyValueIndex(dataPath, indexPath string) (KeyValueRebuildStats, err
 			stats.LiveKeys++
 		}
 	}
-	if err := writeKeyValueIndex(indexPath, latestOffsets); err != nil {
+	if err := writeKeyValueIndex(indexPath, latestOffsets, indexType); err != nil {
 		return stats, err
 	}
 	return stats, nil
@@ -238,7 +238,7 @@ func RebuildVectorIndex(dataPath, indexPath string, dimension int, indexDesc str
 	return stats, nil
 }
 
-func writeKeyValueIndex(indexPath string, latestOffsets map[string]int64) error {
+func writeKeyValueIndex(indexPath string, latestOffsets map[string]int64, indexType string) error {
 	if err := os.MkdirAll(filepath.Dir(indexPath), 0755); err != nil {
 		return fmt.Errorf("create index dir: %w", err)
 	}
@@ -248,7 +248,7 @@ func writeKeyValueIndex(indexPath string, latestOffsets map[string]int64) error 
 		return fmt.Errorf("remove old temp index: %w", err)
 	}
 
-	idx, err := kvindex.NewBTreeIndex(tmpPath)
+	idx, err := kvindex.NewKeyValueIndex(tmpPath, indexType)
 	if err != nil {
 		return fmt.Errorf("create temp index: %w", err)
 	}

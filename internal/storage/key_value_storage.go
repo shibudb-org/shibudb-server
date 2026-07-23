@@ -52,13 +52,14 @@ type ShibuDB struct {
 	mergeQueue      chan struct{}
 	backgroundStop  chan struct{}
 	backgroundWG    sync.WaitGroup
+	indexType       string
 }
 
-func OpenDBWithPathsAndWAL(dataPath, walPath, indexPath string, enableWAL bool) (*ShibuDB, error) {
-	return OpenDBWithPathsAndWALAndSettings(dataPath, walPath, indexPath, enableWAL, SpaceSettings{})
+func OpenDBWithPathsAndWAL(dataPath, walPath, indexPath string, enableWAL bool, indexType string) (*ShibuDB, error) {
+	return OpenDBWithPathsAndWALAndSettings(dataPath, walPath, indexPath, enableWAL, indexType, SpaceSettings{})
 }
 
-func OpenDBWithPathsAndWALAndSettings(dataPath, walPath, indexPath string, enableWAL bool, settings SpaceSettings) (*ShibuDB, error) {
+func OpenDBWithPathsAndWALAndSettings(dataPath, walPath, indexPath string, enableWAL bool, indexType string, settings SpaceSettings) (*ShibuDB, error) {
 	var dbWAL *wal.WAL
 	var err error
 	if enableWAL {
@@ -78,6 +79,7 @@ func OpenDBWithPathsAndWALAndSettings(dataPath, walPath, indexPath string, enabl
 		indexBuildQueue:  make(chan int64, 32),
 		mergeQueue:       make(chan struct{}, 1),
 		backgroundStop:   make(chan struct{}),
+		indexType:        indexType,
 	}
 
 	manifest, err := db.loadOrCreateManifest()
@@ -104,16 +106,16 @@ func OpenDBWithPathsAndWALAndSettings(dataPath, walPath, indexPath string, enabl
 	return db, nil
 }
 
-func OpenDB(filename string, walFilename string) (*ShibuDB, error) {
-	return OpenDBWithWAL(filename, walFilename, true)
+func OpenDB(filename string, walFilename string, indexType string) (*ShibuDB, error) {
+	return OpenDBWithWAL(filename, walFilename, true, indexType)
 }
 
-func OpenDBWithWAL(filename string, walFilename string, enableWAL bool) (*ShibuDB, error) {
-	return OpenDBWithWALAndSettings(filename, walFilename, enableWAL, SpaceSettings{})
+func OpenDBWithWAL(filename string, walFilename string, enableWAL bool, indexType string) (*ShibuDB, error) {
+	return OpenDBWithWALAndSettings(filename, walFilename, enableWAL, indexType, SpaceSettings{})
 }
 
-func OpenDBWithWALAndSettings(filename string, walFilename string, enableWAL bool, settings SpaceSettings) (*ShibuDB, error) {
-	return OpenDBWithPathsAndWALAndSettings(filename, walFilename, filepath.Join(filepath.Dir(filename), "index.dat"), enableWAL, settings)
+func OpenDBWithWALAndSettings(filename string, walFilename string, enableWAL bool, indexType string, settings SpaceSettings) (*ShibuDB, error) {
+	return OpenDBWithPathsAndWALAndSettings(filename, walFilename, filepath.Join(filepath.Dir(filename), "index.dat"), enableWAL, indexType, settings)
 }
 
 func (db *ShibuDB) loadOrCreateManifest() (*SegmentManifest, error) {
@@ -170,7 +172,7 @@ func (db *ShibuDB) loadSegments() error {
 			entries, err = scanKeyValueDataFile(desc.DataPath)
 			meta.State = SegmentStateHot
 		} else {
-			entries, err = loadOrBuildKeyValueSegmentIndex(desc)
+			entries, err = loadOrBuildKeyValueSegmentIndex(desc, db.indexType)
 			meta.State = SegmentStateCold
 		}
 		if err != nil {
@@ -501,7 +503,7 @@ func (db *ShibuDB) buildIndexForSegment(id int64) {
 	_ = WriteSegmentManifest(db.layout, db.manifest)
 	db.lock.Unlock()
 
-	if _, err := RebuildKeyValueIndex(dataPath, indexPath); err != nil {
+	if _, err := RebuildKeyValueIndex(dataPath, indexPath, db.indexType); err != nil {
 		log.Printf("build key-value segment index failed for segment %d: %v", id, err)
 		db.lock.Lock()
 		if segment := db.segmentByIDLocked(id); segment != nil {
@@ -618,11 +620,11 @@ func (db *ShibuDB) mergeSegments(newID int64, firstDesc, secondDesc SegmentDescr
 	if err := writeMergedKeyValueDataFile(mergedDataPath, latestRecords); err != nil {
 		return SegmentMeta{}, nil, nil, err
 	}
-	if _, err := RebuildKeyValueIndex(mergedDataPath, mergedIndexPath); err != nil {
+	if _, err := RebuildKeyValueIndex(mergedDataPath, mergedIndexPath, db.indexType); err != nil {
 		return SegmentMeta{}, nil, nil, err
 	}
 
-	entries, err := loadKeyValueIndexEntries(mergedIndexPath)
+	entries, err := loadKeyValueIndexEntries(mergedIndexPath, db.indexType)
 	if err != nil {
 		return SegmentMeta{}, nil, nil, err
 	}
@@ -872,29 +874,29 @@ func scanKeyValueDataFile(dataPath string) (map[string]int64, error) {
 	return offsets, nil
 }
 
-func loadOrBuildKeyValueSegmentIndex(desc SegmentDescriptor) (map[string]int64, error) {
+func loadOrBuildKeyValueSegmentIndex(desc SegmentDescriptor, indexType string) (map[string]int64, error) {
 	if _, err := os.Stat(desc.IndexPath); err != nil {
 		if !os.IsNotExist(err) {
 			return nil, err
 		}
-		if _, rebuildErr := RebuildKeyValueIndex(desc.DataPath, desc.IndexPath); rebuildErr != nil {
+		if _, rebuildErr := RebuildKeyValueIndex(desc.DataPath, desc.IndexPath, indexType); rebuildErr != nil {
 			return nil, rebuildErr
 		}
-		return loadKeyValueIndexEntries(desc.IndexPath)
+		return loadKeyValueIndexEntries(desc.IndexPath, indexType)
 	}
 
-	entries, err := loadKeyValueIndexEntries(desc.IndexPath)
+	entries, err := loadKeyValueIndexEntries(desc.IndexPath, indexType)
 	if err == nil {
 		return entries, nil
 	}
-	if _, rebuildErr := RebuildKeyValueIndex(desc.DataPath, desc.IndexPath); rebuildErr != nil {
+	if _, rebuildErr := RebuildKeyValueIndex(desc.DataPath, desc.IndexPath, indexType); rebuildErr != nil {
 		return nil, rebuildErr
 	}
-	return loadKeyValueIndexEntries(desc.IndexPath)
+	return loadKeyValueIndexEntries(desc.IndexPath, indexType)
 }
 
-func loadKeyValueIndexEntries(indexPath string) (map[string]int64, error) {
-	idx, err := kvindex.NewBTreeIndex(indexPath)
+func loadKeyValueIndexEntries(indexPath string, indexType string) (map[string]int64, error) {
+	idx, err := kvindex.NewKeyValueIndex(indexPath, indexType)
 	if err != nil {
 		return nil, err
 	}

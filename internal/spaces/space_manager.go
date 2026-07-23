@@ -401,7 +401,9 @@ func normalizeSpaceMeta(meta spaceMeta) spaceMeta {
 		}
 	case "key-value":
 		meta.Dimension = 0
-		meta.IndexType = ""
+		if meta.IndexType == "" {
+			meta.IndexType = "btree"
+		}
 		meta.Metric = ""
 		meta.IndexedMetadataFields = nil
 	}
@@ -446,7 +448,7 @@ func (sm *SpaceManager) openSpaceEngine(meta spaceMeta) (interface{}, error) {
 		dataFile := filepath.Join(spacePath, "data.db")
 		walFile := filepath.Join(spacePath, "wal.db")
 		indexFile := filepath.Join(spacePath, "index.dat")
-		return storage.OpenDBWithPathsAndWALAndSettings(dataFile, walFile, indexFile, meta.EnableWAL, settings)
+		return storage.OpenDBWithPathsAndWALAndSettings(dataFile, walFile, indexFile, meta.EnableWAL, meta.IndexType, settings)
 	}
 	if meta.EngineType == "vector" {
 		if meta.IndexType == "Flat" && len(meta.IndexedMetadataFields) > 0 {
@@ -531,6 +533,13 @@ func (sm *SpaceManager) CreateSpaceWithSettingsAndMetadata(space, engineType str
 			if err := storage.ValidateFieldSpecs(meta.IndexedMetadataFields); err != nil {
 				return nil, err
 			}
+		}
+	} else if engineType == "key-value" {
+		if meta.IndexType != "btree" && meta.IndexType != "hashmap" {
+			return nil, fmt.Errorf("index type '%s' is not allowed for key-value engines", meta.IndexType)
+		}
+		if len(meta.IndexedMetadataFields) > 0 {
+			return nil, errors.New("indexed metadata fields are only supported for vector spaces")
 		}
 	} else if len(meta.IndexedMetadataFields) > 0 {
 		return nil, errors.New("indexed metadata fields are only supported for vector spaces")

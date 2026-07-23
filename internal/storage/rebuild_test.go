@@ -15,7 +15,7 @@ func TestRebuildKeyValueIndex(t *testing.T) {
 	walPath := filepath.Join(dir, "wal.db")
 	indexPath := filepath.Join(dir, "index.dat")
 
-	db, err := OpenDBWithPathsAndWAL(dataPath, walPath, indexPath, true)
+	db, err := OpenDBWithPathsAndWAL(dataPath, walPath, indexPath, true, "btree")
 	if err != nil {
 		t.Fatalf("OpenDBWithPathsAndWAL failed: %v", err)
 	}
@@ -47,7 +47,7 @@ func TestRebuildKeyValueIndex(t *testing.T) {
 		t.Fatalf("corrupt index write failed: %v", err)
 	}
 
-	stats, err := RebuildKeyValueIndex(dataPath, indexPath)
+	stats, err := RebuildKeyValueIndex(dataPath, indexPath, "btree")
 	if err != nil {
 		t.Fatalf("RebuildKeyValueIndex failed: %v", err)
 	}
@@ -58,7 +58,7 @@ func TestRebuildKeyValueIndex(t *testing.T) {
 		t.Fatalf("expected 1 live key, got %d", stats.LiveKeys)
 	}
 
-	rebuilt, err := OpenDBWithPathsAndWAL(dataPath, walPath, indexPath, true)
+	rebuilt, err := OpenDBWithPathsAndWAL(dataPath, walPath, indexPath, true, "btree")
 	if err != nil {
 		t.Fatalf("reopen rebuilt DB failed: %v", err)
 	}

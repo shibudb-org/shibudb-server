@@ -53,6 +53,7 @@ DELETE-SPACE <name>
 
 Notes:
 - `CREATE-SPACE ... --engine vector` requires `--dimension N`.
+- `--index-type` for `--engine key-value` defaults to `btree` (supports `btree` or `hashmap`).
 - WAL is **disabled by default** unless `--enable-wal` is provided.
 - `--metadata-fields` declares indexed metadata fields for filtering and is **only valid with `--index-type Flat`**. Format is comma-separated `name:type` (no spaces); `type` is `string`, `int`, or `float`. See [Metadata Filtering](VECTOR_ENGINE.md#metadata-filtering).
 

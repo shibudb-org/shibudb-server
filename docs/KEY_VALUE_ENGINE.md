@@ -15,11 +15,11 @@
 
 ## Overview
 
-The Key-Value Engine in ShibuDb provides fast, reliable storage for simple key-value pairs. It's built on top of a B-tree index for efficient lookups and includes Write-Ahead Logging (WAL) for data durability.
+The Key-Value Engine in ShibuDb provides fast, reliable storage for simple key-value pairs. It supports configurable index structures (B-Tree or HashMap) for efficient lookups and includes Write-Ahead Logging (WAL) for data durability.
 
 ### Key Features
 
-- **High Performance**: B-tree indexing for fast key lookups
+- **High Performance**: Configurable indexing (B-Tree or HashMap) for ultra-fast key lookups
 - **Data Durability**: Write-Ahead Logging ensures data persistence
 - **Atomic Operations**: Each PUT/GET/DELETE operation is atomic
 - **Space Isolation**: Data is organized in separate spaces
@@ -31,7 +31,7 @@ The Key-Value Engine in ShibuDb provides fast, reliable storage for simple key-v
 ┌─────────────────────────────────────┐
 │           Key-Value Space           │
 ├─────────────────────────────────────┤
-│  B-Tree Index (for fast lookups)    │
+│  B-Tree/HashMap Index (for lookups) │
 ├─────────────────────────────────────┤
 │  In-Memory Buffer (for performance) │
 ├─────────────────────────────────────┤
@@ -57,10 +57,14 @@ CREATE-SPACE durable_users --engine key-value --enable-wal
 
 # Create with WAL disabled (default; for maximum performance)
 CREATE-SPACE fast_cache --engine key-value --disable-wal
+
+# Create with a HashMap index for pure O(1) point-lookups
+CREATE-SPACE fast_sessions --engine key-value --index-type hashmap
 ```
 
 **Parameters:**
 - `--engine key-value`: Specifies key-value engine type
+- `--index-type`: Configures the index architecture (`btree` or `hashmap`, defaults to `btree`)
 - `--enable-wal`: Enable Write-Ahead Logging for enhanced durability
 - `--disable-wal`: Disable Write-Ahead Logging (default)
 
@@ -134,6 +138,22 @@ CREATE-SPACE durable_data --engine key-value --disable-wal
 - Development and testing environments
 - Applications where some data loss is acceptable
 - Real-time processing with strict latency requirements
+
+### Index Configuration for Key-Value Spaces
+
+Key-value spaces support two different index structures to optimize for different workloads:
+
+#### B-Tree Index (Default)
+- **Performance**: O(log n) lookups.
+- **Behavior**: Used by default for all existing and new spaces unless explicitly configured otherwise.
+- **Use Case**: General purpose storage.
+
+#### HashMap Index
+- **Performance**: O(1) point-lookups. Extremely fast under highly concurrent random read/write workloads.
+- **Behavior**: Uses Go's highly optimized `sync.Map` to eliminate mutex contention. Fixed at space creation time.
+- **Use Case**: Purely point-lookup oriented applications where ordered traversal is never needed (e.g., caches, session tracking, configuration stores).
+
+*Note: You cannot auto-migrate existing B-Tree spaces. The index type is permanently fixed at space creation.*
 
 ### Deleting a Space
 

@@ -195,7 +195,7 @@ func TestSpaceManager_KeyValueMetadataOmitsVectorFieldsAndDefaultsWALOff(t *test
 	sm := NewSpaceManager(dir)
 	defer sm.CloseAll()
 
-	if _, err := sm.CreateSpace("kv_default", "key-value", 128, "Flat", "L2"); err != nil {
+	if _, err := sm.CreateSpace("kv_default", "key-value", 128, "btree", "L2"); err != nil {
 		t.Fatalf("CreateSpace failed: %v", err)
 	}
 
@@ -209,8 +209,8 @@ func TestSpaceManager_KeyValueMetadataOmitsVectorFieldsAndDefaultsWALOff(t *test
 	if meta.Dimension != 0 {
 		t.Fatalf("Dimension = %d, want 0 for key-value", meta.Dimension)
 	}
-	if meta.IndexType != "" {
-		t.Fatalf("IndexType = %q, want empty for key-value", meta.IndexType)
+	if meta.IndexType != "btree" {
+		t.Fatalf("IndexType = %q, want btree for key-value", meta.IndexType)
 	}
 	if meta.Metric != "" {
 		t.Fatalf("Metric = %q, want empty for key-value", meta.Metric)
@@ -227,7 +227,7 @@ func TestSpaceManager_KeyValueMetadataOmitsVectorFieldsAndDefaultsWALOff(t *test
 		t.Fatalf("os.ReadFile failed: %v", err)
 	}
 	content := string(data)
-	for _, forbidden := range []string{`"dimension"`, `"index_type"`, `"metric"`, `"enable_wal"`} {
+	for _, forbidden := range []string{`"dimension"`, `"metric"`, `"enable_wal"`} {
 		if strings.Contains(content, forbidden) {
 			t.Fatalf("key-value metadata unexpectedly contains %s: %s", forbidden, content)
 		}

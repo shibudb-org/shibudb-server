@@ -2,32 +2,21 @@ package index
 
 import (
 	"encoding/binary"
-	"github.com/google/btree"
 	"golang.org/x/sys/unix"
 	"os"
 	"sync"
 	"syscall"
 )
 
-type BTreeIndex struct {
-	lock        sync.RWMutex
+type HashMapIndex struct {
+	data        sync.Map
 	mmapLock    sync.Mutex
-	btree       *btree.BTree
 	file        *os.File
 	mmapData    []byte
 	writeOffset int
 }
 
-type Item struct {
-	Key   string
-	Value int64
-}
-
-func (i Item) Less(other btree.Item) bool {
-	return i.Key < other.(Item).Key
-}
-
-func NewBTreeIndex(filename string) (*BTreeIndex, error) {
+func NewHashMapIndex(filename string) (*HashMapIndex, error) {
 	file, err := os.OpenFile(filename, os.O_RDWR|os.O_CREATE, 0666)
 	if err != nil {
 		return nil, err
@@ -47,8 +36,7 @@ func NewBTreeIndex(filename string) (*BTreeIndex, error) {
 		return nil, err
 	}
 
-	idx := &BTreeIndex{
-		btree:    btree.New(2),
+	idx := &HashMapIndex{
 		file:     file,
 		mmapData: mmapData,
 	}
@@ -57,10 +45,8 @@ func NewBTreeIndex(filename string) (*BTreeIndex, error) {
 	return idx, nil
 }
 
-func (idx *BTreeIndex) BatchLoadFromMmap() int {
-	idx.lock.Lock()
+func (idx *HashMapIndex) BatchLoadFromMmap() int {
 	idx.mmapLock.Lock()
-	defer idx.lock.Unlock()
 	defer idx.mmapLock.Unlock()
 
 	offset := 0
@@ -77,56 +63,45 @@ func (idx *BTreeIndex) BatchLoadFromMmap() int {
 		offset += int(keySize)
 
 		if key != "" {
-			idx.btree.ReplaceOrInsert(Item{Key: key, Value: int64(pos)})
+			idx.data.Store(key, int64(pos))
 		}
 	}
 	return offset
 }
 
-func (idx *BTreeIndex) Add(key string, pos int64) error {
-	idx.lock.Lock()
-	defer idx.lock.Unlock()
-
-	idx.btree.ReplaceOrInsert(Item{Key: key, Value: pos})
+func (idx *HashMapIndex) Add(key string, pos int64) error {
+	idx.data.Store(key, pos) // sync.Map handles locking intrinsically
 	return idx.appendIndexEntry(key, pos)
 }
 
-func (idx *BTreeIndex) Get(key string) (int64, bool) {
-	idx.lock.RLock()
-	defer idx.lock.RUnlock()
-
-	item := idx.btree.Get(Item{Key: key})
-	if item == nil {
+func (idx *HashMapIndex) Get(key string) (int64, bool) {
+	val, ok := idx.data.Load(key)
+	if !ok {
 		return 0, false
 	}
-	return item.(Item).Value, true
+	return val.(int64), true
 }
 
-func (idx *BTreeIndex) SnapshotEntries() map[string]int64 {
-	idx.lock.RLock()
-	defer idx.lock.RUnlock()
-
+func (idx *HashMapIndex) SnapshotEntries() map[string]int64 {
 	entries := make(map[string]int64)
-	idx.btree.Ascend(func(i btree.Item) bool {
-		item := i.(Item)
-		entries[item.Key] = item.Value
+	idx.data.Range(func(key, value interface{}) bool {
+		entries[key.(string)] = value.(int64)
 		return true
 	})
 	return entries
 }
 
-func (idx *BTreeIndex) Remove(key string) error {
-	idx.lock.Lock()
-	defer idx.lock.Unlock()
-
-	item := idx.btree.Delete(Item{Key: key})
-	if item == nil {
+func (idx *HashMapIndex) Remove(key string) error {
+	_, ok := idx.data.Load(key)
+	if !ok {
 		return nil
 	}
+	idx.data.Delete(key)
+
 	return idx.persistIndex()
 }
 
-func (idx *BTreeIndex) persistIndex() error {
+func (idx *HashMapIndex) persistIndex() error {
 	if err := syscall.Munmap(idx.mmapData); err != nil {
 		return err
 	}
@@ -144,15 +119,14 @@ func (idx *BTreeIndex) persistIndex() error {
 	idx.mmapData = mmapData
 	idx.writeOffset = 0
 
-	idx.btree.Ascend(func(i btree.Item) bool {
-		item := i.(Item)
-		_ = idx.appendIndexEntry(item.Key, item.Value)
+	idx.data.Range(func(key, value interface{}) bool {
+		_ = idx.appendIndexEntry(key.(string), value.(int64))
 		return true
 	})
 	return unix.Msync(idx.mmapData, unix.MS_SYNC)
 }
 
-func (idx *BTreeIndex) appendIndexEntry(key string, pos int64) error {
+func (idx *HashMapIndex) appendIndexEntry(key string, pos int64) error {
 	keyBytes := []byte(key)
 	keySize := uint32(len(keyBytes))
 	entrySize := 8 + len(keyBytes)
@@ -189,6 +163,6 @@ func (idx *BTreeIndex) appendIndexEntry(key string, pos int64) error {
 	return nil
 }
 
-func (idx *BTreeIndex) Close() error {
+func (idx *HashMapIndex) Close() error {
 	return syscall.Munmap(idx.mmapData)
 }

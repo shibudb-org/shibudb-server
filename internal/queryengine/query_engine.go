@@ -212,6 +212,11 @@ func (qe *QueryEngine) Execute(query models.Query) (string, error) {
 			if indexType == "" {
 				indexType = "Flat"
 			}
+		} else if query.EngineType == "key-value" {
+			// Legacy default override: older clients and tests may pass "Flat" implicitly
+			if indexType == "" || indexType == "Flat" {
+				indexType = "btree"
+			}
 		}
 
 		settings := storage.SpaceSettings{

@@ -1,7 +1,7 @@
 # ShibuDb Makefile
 # This file provides common development and build tasks
 
-.PHONY: help build test clean install uninstall lint format check-fmt vet coverage benchmark benchmark-flat-meta benchmark-vector-index e2e-test test-all build-all release
+.PHONY: help build test clean install uninstall lint format check-fmt vet coverage benchmark benchmark-flat-meta benchmark-vector-index e2e-test test-all build-all release benchmark-hashmap-index
 
 # Variables
 BINARY_NAME=shibudb
@@ -101,6 +101,14 @@ benchmark-btree-index: ## Run BTree index benchmark
 		./scripts/test_linux.sh ./benchmark/ -test.bench BenchmarkConcurrentIndexOps; \
 	else \
 		./scripts/test_with_rpath.sh ./benchmark/ -test.bench BenchmarkConcurrentIndexOps; \
+	fi
+
+benchmark-hashmap-index: ## Run HashMap index benchmark
+	@echo "Running HashMap index benchmark..."
+	@if [ "$(shell uname -s)" = "Linux" ]; then \
+		./scripts/test_linux.sh ./benchmark/ -test.bench BenchmarkConcurrentIndexOps_HashMap; \
+	else \
+		./scripts/test_with_rpath.sh ./benchmark/ -test.bench BenchmarkConcurrentIndexOps_HashMap; \
 	fi
 
 benchmark-flat-meta: ## Run filterable Flat vector engine (metadata filter) benchmarks
