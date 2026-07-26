@@ -19,7 +19,7 @@ import (
 type kvSegment struct {
 	meta     SegmentMeta
 	dataFile *os.File
-	index    map[string]int64
+	index    kvindex.KeyValueIndex
 }
 
 // kvBatchEntry is a single staged write in the in-memory batch. A deleted entry
@@ -48,11 +48,10 @@ type ShibuDB struct {
 	manifest         *SegmentManifest
 	segments         []*kvSegment
 
-	indexBuildQueue chan int64
-	mergeQueue      chan struct{}
-	backgroundStop  chan struct{}
-	backgroundWG    sync.WaitGroup
-	indexType       string
+	mergeQueue     chan struct{}
+	backgroundStop chan struct{}
+	backgroundWG   sync.WaitGroup
+	indexType      string
 }
 
 func OpenDBWithPathsAndWAL(dataPath, walPath, indexPath string, enableWAL bool, indexType string) (*ShibuDB, error) {
@@ -76,7 +75,6 @@ func OpenDBWithPathsAndWALAndSettings(dataPath, walPath, indexPath string, enabl
 		layout:           NewSegmentLayout(filepath.Dir(dataPath), "data", ".db", ".idx"),
 		primaryDataPath:  dataPath,
 		primaryIndexPath: indexPath,
-		indexBuildQueue:  make(chan int64, 32),
 		mergeQueue:       make(chan struct{}, 1),
 		backgroundStop:   make(chan struct{}),
 		indexType:        indexType,
@@ -167,12 +165,18 @@ func (db *ShibuDB) loadSegments() error {
 			return err
 		}
 
-		var entries map[string]int64
+		var segIndex kvindex.KeyValueIndex
 		if idx == len(db.manifest.Segments)-1 {
-			entries, err = scanKeyValueDataFile(desc.DataPath)
+			// Hot segment: the index can lag the data file after a crash
+			// (records are fsynced before index entries), so always rebuild
+			// it from the data file. The hot segment is bounded by the
+			// rollover size, so this scan is cheap.
+			if _, err = RebuildKeyValueIndex(desc.DataPath, desc.IndexPath, db.indexType); err == nil {
+				segIndex, err = kvindex.NewKeyValueIndex(desc.IndexPath, db.indexType)
+			}
 			meta.State = SegmentStateHot
 		} else {
-			entries, err = loadOrBuildKeyValueSegmentIndex(desc, db.indexType)
+			segIndex, err = loadOrBuildKeyValueSegmentIndex(desc, db.indexType)
 			meta.State = SegmentStateCold
 		}
 		if err != nil {
@@ -187,7 +191,7 @@ func (db *ShibuDB) loadSegments() error {
 		db.segments = append(db.segments, &kvSegment{
 			meta:     meta,
 			dataFile: dataFile,
-			index:    entries,
+			index:    segIndex,
 		})
 		manifestChanged = true
 	}
@@ -201,8 +205,7 @@ func (db *ShibuDB) loadSegments() error {
 }
 
 func (db *ShibuDB) startBackgroundWorkers() {
-	db.backgroundWG.Add(2)
-	go db.indexBuildWorker()
+	db.backgroundWG.Add(1)
 	go db.mergeWorker()
 }
 
@@ -298,10 +301,17 @@ func (db *ShibuDB) FlushBatch() error {
 			if err != nil {
 				return err
 			}
-			active.index[key] = pos
+			// Deletes are indexed like puts: the entry points at the delete
+			// record so the tombstone shadows the key in older segments.
+			if err := active.index.Add(key, pos); err != nil {
+				return err
+			}
 		}
 
 		if err := active.dataFile.Sync(); err != nil {
+			return err
+		}
+		if err := active.index.Sync(); err != nil {
 			return err
 		}
 		if info, err := active.dataFile.Stat(); err == nil {
@@ -343,7 +353,7 @@ func (db *ShibuDB) Get(key string) (string, error) {
 
 	for idx := len(db.segments) - 1; idx >= 0; idx-- {
 		segment := db.segments[idx]
-		pos, exists := segment.index[key]
+		pos, exists := segment.index.Get(key)
 		if !exists {
 			continue
 		}
@@ -430,6 +440,7 @@ func (db *ShibuDB) Close() error {
 		db.lock.Lock()
 		for _, segment := range db.segments {
 			_ = segment.dataFile.Close()
+			_ = segment.index.Close()
 		}
 		db.lock.Unlock()
 
@@ -464,18 +475,6 @@ func (db *ShibuDB) MaintenanceFlush() {
 	}
 }
 
-func (db *ShibuDB) indexBuildWorker() {
-	defer db.backgroundWG.Done()
-	for {
-		select {
-		case <-db.backgroundStop:
-			return
-		case id := <-db.indexBuildQueue:
-			db.buildIndexForSegment(id)
-		}
-	}
-}
-
 func (db *ShibuDB) mergeWorker() {
 	defer db.backgroundWG.Done()
 	for {
@@ -487,45 +486,6 @@ func (db *ShibuDB) mergeWorker() {
 			}
 		}
 	}
-}
-
-func (db *ShibuDB) buildIndexForSegment(id int64) {
-	db.lock.Lock()
-	segment := db.segmentByIDLocked(id)
-	if segment == nil || id == db.manifest.ActiveSegmentID {
-		db.lock.Unlock()
-		return
-	}
-	segment.meta.State = SegmentStateIndexing
-	db.updateSegmentMetaLocked(segment.meta)
-	dataPath := db.layout.Descriptor(segment.meta).DataPath
-	indexPath := db.layout.Descriptor(segment.meta).IndexPath
-	_ = WriteSegmentManifest(db.layout, db.manifest)
-	db.lock.Unlock()
-
-	if _, err := RebuildKeyValueIndex(dataPath, indexPath, db.indexType); err != nil {
-		log.Printf("build key-value segment index failed for segment %d: %v", id, err)
-		db.lock.Lock()
-		if segment := db.segmentByIDLocked(id); segment != nil {
-			segment.meta.State = SegmentStateSealed
-			db.updateSegmentMetaLocked(segment.meta)
-			_ = WriteSegmentManifest(db.layout, db.manifest)
-		}
-		db.lock.Unlock()
-		return
-	}
-
-	db.lock.Lock()
-	if segment := db.segmentByIDLocked(id); segment != nil {
-		segment.meta.State = SegmentStateCold
-		if info, err := os.Stat(dataPath); err == nil {
-			segment.meta.SizeBytes = info.Size()
-		}
-		db.updateSegmentMetaLocked(segment.meta)
-		_ = WriteSegmentManifest(db.layout, db.manifest)
-		db.scheduleMergeCheckLocked()
-	}
-	db.lock.Unlock()
 }
 
 func (db *ShibuDB) tryMergeOldestColdSegments() bool {
@@ -590,11 +550,14 @@ func (db *ShibuDB) tryMergeOldestColdSegments() bool {
 	secondIdx := db.segmentIndexByIDLocked(second.meta.ID)
 	if firstIdx < 0 || secondIdx < 0 || secondIdx <= firstIdx {
 		_ = mergedFile.Close()
+		_ = mergedIndex.Close()
 		return false
 	}
 
 	_ = db.segments[firstIdx].dataFile.Close()
+	_ = db.segments[firstIdx].index.Close()
 	_ = db.segments[secondIdx].dataFile.Close()
+	_ = db.segments[secondIdx].index.Close()
 	_ = os.Remove(firstDesc.DataPath)
 	_ = os.Remove(firstDesc.IndexPath)
 
@@ -609,7 +572,7 @@ func (db *ShibuDB) tryMergeOldestColdSegments() bool {
 	return len(db.segments) > db.settings.MaxSegmentsBeforeMerge
 }
 
-func (db *ShibuDB) mergeSegments(newID int64, firstDesc, secondDesc SegmentDescriptor) (SegmentMeta, map[string]int64, *os.File, error) {
+func (db *ShibuDB) mergeSegments(newID int64, firstDesc, secondDesc SegmentDescriptor) (SegmentMeta, kvindex.KeyValueIndex, *os.File, error) {
 	latestRecords, err := collectLatestKeyValueRecords(firstDesc.DataPath, secondDesc.DataPath)
 	if err != nil {
 		return SegmentMeta{}, nil, nil, err
@@ -624,12 +587,13 @@ func (db *ShibuDB) mergeSegments(newID int64, firstDesc, secondDesc SegmentDescr
 		return SegmentMeta{}, nil, nil, err
 	}
 
-	entries, err := loadKeyValueIndexEntries(mergedIndexPath, db.indexType)
+	mergedIndex, err := kvindex.NewKeyValueIndex(mergedIndexPath, db.indexType)
 	if err != nil {
 		return SegmentMeta{}, nil, nil, err
 	}
 	dataFile, err := os.OpenFile(mergedDataPath, os.O_RDWR|os.O_CREATE, 0666)
 	if err != nil {
+		_ = mergedIndex.Close()
 		return SegmentMeta{}, nil, nil, err
 	}
 
@@ -643,7 +607,7 @@ func (db *ShibuDB) mergeSegments(newID int64, firstDesc, secondDesc SegmentDescr
 	if info, err := dataFile.Stat(); err == nil {
 		meta.SizeBytes = info.Size()
 	}
-	return meta, entries, dataFile, nil
+	return meta, mergedIndex, dataFile, nil
 }
 
 func (db *ShibuDB) rotateHotSegmentLocked() error {
@@ -655,7 +619,10 @@ func (db *ShibuDB) rotateHotSegmentLocked() error {
 		return nil
 	}
 
-	active.meta.State = SegmentStateSealed
+	// The hot segment's index is kept current by FlushBatch and was synced
+	// just before rotation, so the sealed segment is immediately cold — no
+	// background index build is needed.
+	active.meta.State = SegmentStateCold
 	active.meta.SealedAtUnixNs = time.Now().UnixNano()
 	db.updateSegmentMetaLocked(active.meta)
 
@@ -672,19 +639,23 @@ func (db *ShibuDB) rotateHotSegmentLocked() error {
 	if err != nil {
 		return err
 	}
+	newIndex, err := kvindex.NewKeyValueIndex(db.layout.IndexPath(newID), db.indexType)
+	if err != nil {
+		_ = newDataFile.Close()
+		return err
+	}
 
 	db.manifest.ActiveSegmentID = newID
 	db.manifest.Segments = append(db.manifest.Segments, newMeta)
 	db.segments = append(db.segments, &kvSegment{
 		meta:     newMeta,
 		dataFile: newDataFile,
-		index:    make(map[string]int64),
+		index:    newIndex,
 	})
 	if err := WriteSegmentManifest(db.layout, db.manifest); err != nil {
 		return err
 	}
 
-	db.enqueueIndexBuildLocked(active.meta.ID)
 	db.scheduleMergeCheckLocked()
 	return nil
 }
@@ -701,7 +672,7 @@ func (db *ShibuDB) activeSegmentLocked() *kvSegment {
 func (db *ShibuDB) keyExistsLocked(key string) (bool, error) {
 	for idx := len(db.segments) - 1; idx >= 0; idx-- {
 		segment := db.segments[idx]
-		pos, exists := segment.index[key]
+		pos, exists := segment.index.Get(key)
 		if !exists {
 			continue
 		}
@@ -745,19 +716,6 @@ func (db *ShibuDB) segmentIndexByIDLocked(id int64) int {
 		}
 	}
 	return -1
-}
-
-func (db *ShibuDB) enqueueIndexBuildLocked(id int64) {
-	select {
-	case db.indexBuildQueue <- id:
-	default:
-		go func() {
-			select {
-			case db.indexBuildQueue <- id:
-			case <-db.backgroundStop:
-			}
-		}()
-	}
 }
 
 func (db *ShibuDB) scheduleMergeCheckLocked() {
@@ -830,51 +788,10 @@ func readKeyValueRecordAt(file *os.File, pos int64) (string, string, bool, error
 	return string(keyBytes), string(valBytes), false, nil
 }
 
-func scanKeyValueDataFile(dataPath string) (map[string]int64, error) {
-	file, err := os.OpenFile(dataPath, os.O_RDWR|os.O_CREATE, 0666)
-	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
-
-	offsets := make(map[string]int64)
-	var offset int64
-	for {
-		header := make([]byte, 8)
-		n, err := io.ReadFull(file, header)
-		if err == io.EOF || (err == io.ErrUnexpectedEOF && n == 0) {
-			break
-		}
-		if err == io.ErrUnexpectedEOF {
-			break
-		}
-		if err != nil {
-			return nil, err
-		}
-
-		keySize := binary.LittleEndian.Uint32(header[0:4])
-		valSize := binary.LittleEndian.Uint32(header[4:8])
-		keyBytes := make([]byte, keySize)
-		if _, err := io.ReadFull(file, keyBytes); err != nil {
-			if err == io.EOF || err == io.ErrUnexpectedEOF {
-				break
-			}
-			return nil, err
-		}
-		if _, err := io.CopyN(io.Discard, file, int64(valSize)); err != nil {
-			if err == io.EOF || err == io.ErrUnexpectedEOF {
-				break
-			}
-			return nil, err
-		}
-
-		offsets[string(keyBytes)] = offset
-		offset += int64(8) + int64(keySize) + int64(valSize)
-	}
-	return offsets, nil
-}
-
-func loadOrBuildKeyValueSegmentIndex(desc SegmentDescriptor, indexType string) (map[string]int64, error) {
+// loadOrBuildKeyValueSegmentIndex opens a cold segment's index for serving
+// reads, rebuilding it from the data file when it is missing or unreadable
+// (e.g. an old-format file that fails the header check).
+func loadOrBuildKeyValueSegmentIndex(desc SegmentDescriptor, indexType string) (kvindex.KeyValueIndex, error) {
 	if _, err := os.Stat(desc.IndexPath); err != nil {
 		if !os.IsNotExist(err) {
 			return nil, err
@@ -882,26 +799,17 @@ func loadOrBuildKeyValueSegmentIndex(desc SegmentDescriptor, indexType string) (
 		if _, rebuildErr := RebuildKeyValueIndex(desc.DataPath, desc.IndexPath, indexType); rebuildErr != nil {
 			return nil, rebuildErr
 		}
-		return loadKeyValueIndexEntries(desc.IndexPath, indexType)
+		return kvindex.NewKeyValueIndex(desc.IndexPath, indexType)
 	}
 
-	entries, err := loadKeyValueIndexEntries(desc.IndexPath, indexType)
+	idx, err := kvindex.NewKeyValueIndex(desc.IndexPath, indexType)
 	if err == nil {
-		return entries, nil
+		return idx, nil
 	}
 	if _, rebuildErr := RebuildKeyValueIndex(desc.DataPath, desc.IndexPath, indexType); rebuildErr != nil {
 		return nil, rebuildErr
 	}
-	return loadKeyValueIndexEntries(desc.IndexPath, indexType)
-}
-
-func loadKeyValueIndexEntries(indexPath string, indexType string) (map[string]int64, error) {
-	idx, err := kvindex.NewKeyValueIndex(indexPath, indexType)
-	if err != nil {
-		return nil, err
-	}
-	defer idx.Close()
-	return idx.SnapshotEntries(), nil
+	return kvindex.NewKeyValueIndex(desc.IndexPath, indexType)
 }
 
 func collectLatestKeyValueRecords(paths ...string) (map[string][]byte, error) {
