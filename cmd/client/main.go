@@ -64,7 +64,12 @@ func main() {
 				fmt.Println("Usage: put <key> <value>")
 				continue
 			}
-			query = models.Query{Type: models.TypePut, Key: parts[1], Value: cliparse.PutValue(parts)}
+			putValue := cliparse.PutValue(parts)
+			if putValue == "" {
+				fmt.Println("Error: empty value not allowed")
+				continue
+			}
+			query = models.Query{Type: models.TypePut, Key: parts[1], Value: putValue}
 		case "get":
 			query = models.Query{Type: models.TypeGet, Key: parts[1]}
 		case "delete":

@@ -236,6 +236,14 @@ func (db *ShibuDB) replayWAL() {
 }
 
 func (db *ShibuDB) PutBatch(key, value string) error {
+	// Empty values are unrepresentable in the on-disk format (valSize == 0 is
+	// the delete tombstone), so they are rejected at the entry points (query
+	// engine, CLIs) and silently ignored here. This also drops any legacy
+	// empty-value records during WAL replay.
+	if value == "" {
+		return nil
+	}
+
 	// With WAL enabled, the write must be durable before we acknowledge it:
 	// persist (and fsync) the WAL record first, then stage it in the in-memory
 	// batch for the asynchronous data-file flush. walMu serializes WAL appends
