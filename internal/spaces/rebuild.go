@@ -28,7 +28,7 @@ func RebuildSpaceIndex(baseDir, space string) (string, error) {
 	case "key-value":
 		dataPath := filepath.Join(spacePath, "data.db")
 		indexPath := filepath.Join(spacePath, "index.dat")
-		stats, err := storage.RebuildKeyValueIndex(dataPath, indexPath)
+		stats, err := storage.RebuildKeyValueIndex(dataPath, indexPath, meta.IndexType)
 		if err != nil {
 			return "", err
 		}

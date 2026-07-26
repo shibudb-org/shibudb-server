@@ -28,7 +28,7 @@ func TestSegmentedKeyValueRestartRebuildsMissingColdIndex(t *testing.T) {
 	walPath := filepath.Join(dir, "wal.db")
 	indexPath := filepath.Join(dir, "index.dat")
 
-	db, err := OpenDBWithPathsAndWALAndSettings(dataPath, walPath, indexPath, true, SpaceSettings{
+	db, err := OpenDBWithPathsAndWALAndSettings(dataPath, walPath, indexPath, true, "btree", SpaceSettings{
 		SegmentRolloverBytes:   80,
 		MaxSegmentsBeforeMerge: 10,
 	})
@@ -67,7 +67,7 @@ func TestSegmentedKeyValueRestartRebuildsMissingColdIndex(t *testing.T) {
 		t.Fatalf("Close failed: %v", err)
 	}
 
-	reopened, err := OpenDBWithPathsAndWALAndSettings(dataPath, walPath, indexPath, true, SpaceSettings{
+	reopened, err := OpenDBWithPathsAndWALAndSettings(dataPath, walPath, indexPath, true, "btree", SpaceSettings{
 		SegmentRolloverBytes:   80,
 		MaxSegmentsBeforeMerge: 10,
 	})
@@ -93,7 +93,7 @@ func TestSegmentedKeyValueMergesOldestColdSegments(t *testing.T) {
 	walPath := filepath.Join(dir, "wal.db")
 	indexPath := filepath.Join(dir, "index.dat")
 
-	db, err := OpenDBWithPathsAndWALAndSettings(dataPath, walPath, indexPath, true, SpaceSettings{
+	db, err := OpenDBWithPathsAndWALAndSettings(dataPath, walPath, indexPath, true, "btree", SpaceSettings{
 		SegmentRolloverBytes:   80,
 		MaxSegmentsBeforeMerge: 2,
 	})

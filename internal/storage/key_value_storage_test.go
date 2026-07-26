@@ -16,7 +16,7 @@ func TestShibuDB(t *testing.T) {
 	os.Remove("test_wal.db")
 
 	// Initialize database
-	db, err := OpenDBWithPathsAndWAL("test_storage.db", "test_wal.db", "test_index.dat", true)
+	db, err := OpenDBWithPathsAndWAL("test_storage.db", "test_wal.db", "test_index.dat", true, "btree")
 	if err != nil {
 		t.Fatalf("Failed to open database: %v", err)
 	}
@@ -126,7 +126,7 @@ func TestShibuDB(t *testing.T) {
 		// subsequent subtests reuse `db`, and it is closed later by
 		// ConcurrentPutAndAutoFlush (and the outer cleanup).
 		db.Close()
-		db, err = OpenDBWithPathsAndWAL("test_storage.db", "test_wal.db", "test_index.dat", true)
+		db, err = OpenDBWithPathsAndWAL("test_storage.db", "test_wal.db", "test_index.dat", true, "btree")
 		if err != nil {
 			t.Fatalf("Failed to reopen DB for WAL replay test: %v", err)
 		}
@@ -143,7 +143,7 @@ func TestShibuDB(t *testing.T) {
 	t.Run("DeleteKeyPutKeyAndWALReplay", func(t *testing.T) {
 		// Close the handle left open by the previous subtest before reopening.
 		db.Close()
-		db, err = OpenDBWithPathsAndWAL("test_storage.db", "test_wal.db", "test_index.dat", true)
+		db, err = OpenDBWithPathsAndWAL("test_storage.db", "test_wal.db", "test_index.dat", true, "btree")
 		if err != nil {
 			t.Fatalf("Failed to open test DB: %v", err)
 		}
@@ -168,7 +168,7 @@ func TestShibuDB(t *testing.T) {
 		// Note: no defer Close here; subsequent subtests reuse `db`, and it is
 		// closed later by ConcurrentPutAndAutoFlush (and the outer cleanup).
 		db.Close()
-		db, err = OpenDBWithPathsAndWAL("test_storage.db", "test_wal.db", "test_index.dat", true)
+		db, err = OpenDBWithPathsAndWAL("test_storage.db", "test_wal.db", "test_index.dat", true, "btree")
 		if err != nil {
 			t.Fatalf("Failed to reopen DB for WAL replay test: %v", err)
 		}
@@ -213,7 +213,7 @@ func TestShibuDB(t *testing.T) {
 		db.Close()
 		os.Remove("test_storage_concurrent.db")
 		os.Remove("test_wal_concurrent.db")
-		db2, err := OpenDBWithPathsAndWAL("test_storage_concurrent.db", "test_wal_concurrent.db", "test_index_concurrent.dat", true)
+		db2, err := OpenDBWithPathsAndWAL("test_storage_concurrent.db", "test_wal_concurrent.db", "test_index_concurrent.dat", true, "btree")
 		if err != nil {
 			t.Fatalf("Failed to open concurrent test DB: %v", err)
 		}
@@ -279,7 +279,7 @@ func TestDeleteBatchedSemantics(t *testing.T) {
 	cleanup()
 	defer cleanup()
 
-	db, err := OpenDBWithPathsAndWAL(dataPath, walPath, indexPath, true)
+	db, err := OpenDBWithPathsAndWAL(dataPath, walPath, indexPath, true, "btree")
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -341,7 +341,7 @@ func TestPutBatchWALDurabilityAfterCrash(t *testing.T) {
 	cleanup()
 	defer cleanup()
 
-	db, err := OpenDBWithPathsAndWAL(dataPath, walPath, indexPath, true)
+	db, err := OpenDBWithPathsAndWAL(dataPath, walPath, indexPath, true, "btree")
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -369,7 +369,7 @@ func TestPutBatchWALDurabilityAfterCrash(t *testing.T) {
 	_ = db.wal.Close()
 
 	// Reopen: WAL replay must recover every acknowledged PUT.
-	db2, err := OpenDBWithPathsAndWAL(dataPath, walPath, indexPath, true)
+	db2, err := OpenDBWithPathsAndWAL(dataPath, walPath, indexPath, true, "btree")
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}
