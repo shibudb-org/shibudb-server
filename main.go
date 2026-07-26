@@ -834,7 +834,12 @@ func connectToServer(port, providedUser, providedPass string) {
 				fmt.Println("Usage: put <key> <value>")
 				continue
 			}
-			query = models.Query{Type: models.TypePut, Key: parts[1], Value: cliparse.PutValue(parts), Space: space, User: username}
+			putValue := cliparse.PutValue(parts)
+			if putValue == "" {
+				fmt.Println("Error: empty value not allowed")
+				continue
+			}
+			query = models.Query{Type: models.TypePut, Key: parts[1], Value: putValue, Space: space, User: username}
 		case "get":
 			if len(parts) < 2 {
 				fmt.Println("Usage: get <key>")

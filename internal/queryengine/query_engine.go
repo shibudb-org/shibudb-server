@@ -288,6 +288,9 @@ func (qe *QueryEngine) Execute(query models.Query) (string, error) {
 		}
 		switch query.Type {
 		case models.TypePut:
+			if query.Value == "" {
+				return "", errors.New("empty value not allowed")
+			}
 			return "OK", engine.Put(query.Key, query.Value)
 		case models.TypeGet:
 			return engine.Get(query.Key)

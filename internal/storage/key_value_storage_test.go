@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -321,6 +322,53 @@ func TestDeleteBatchedSemantics(t *testing.T) {
 	}
 	if _, err := db.Get("k"); !errors.Is(err, errKeyDeleted) {
 		t.Errorf("Get(k) after put+delete in one batch = %v, want errKeyDeleted (no resurrection)", err)
+	}
+}
+
+// TestPutBatchIgnoresEmptyValue verifies the storage engine treats an empty
+// value as a no-op: valSize == 0 is the on-disk delete tombstone, so an empty
+// put must never be written (it would read back as a deleted key).
+func TestPutBatchIgnoresEmptyValue(t *testing.T) {
+	dir := t.TempDir()
+	dataPath := filepath.Join(dir, "storage.db")
+	walPath := filepath.Join(dir, "wal.db")
+	indexPath := filepath.Join(dir, "index.dat")
+
+	db, err := OpenDBWithPathsAndWAL(dataPath, walPath, indexPath, true, "btree")
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer db.Close()
+
+	// An empty put is accepted (nil error) but stores nothing.
+	if err := db.PutBatch("emptyKey", ""); err != nil {
+		t.Fatalf("PutBatch with empty value returned error: %v", err)
+	}
+	if _, err := db.Get("emptyKey"); !errors.Is(err, errKeyNotFound) {
+		t.Errorf("Get(emptyKey) before flush = %v, want errKeyNotFound", err)
+	}
+	if err := db.FlushBatch(); err != nil {
+		t.Fatalf("FlushBatch: %v", err)
+	}
+	if _, err := db.Get("emptyKey"); !errors.Is(err, errKeyNotFound) {
+		t.Errorf("Get(emptyKey) after flush = %v, want errKeyNotFound", err)
+	}
+
+	// An empty put must not clobber an existing value either.
+	if err := db.PutBatch("k", "v1"); err != nil {
+		t.Fatalf("PutBatch(k, v1): %v", err)
+	}
+	if err := db.FlushBatch(); err != nil {
+		t.Fatalf("FlushBatch: %v", err)
+	}
+	if err := db.PutBatch("k", ""); err != nil {
+		t.Fatalf("PutBatch(k, empty): %v", err)
+	}
+	if err := db.FlushBatch(); err != nil {
+		t.Fatalf("FlushBatch after empty put: %v", err)
+	}
+	if val, err := db.Get("k"); err != nil || val != "v1" {
+		t.Errorf("Get(k) after empty put = (%q, %v), want (\"v1\", nil)", val, err)
 	}
 }
 

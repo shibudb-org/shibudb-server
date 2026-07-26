@@ -1,18 +1,23 @@
 package index
 
 import (
-	"encoding/binary"
-	"github.com/google/btree"
-	"golang.org/x/sys/unix"
 	"os"
 	"sync"
 	"syscall"
+
+	"github.com/google/btree"
+	"golang.org/x/sys/unix"
 )
 
 type BTreeIndex struct {
-	lock        sync.RWMutex
+	// lock guards the btree. Lock ordering: lock before mmapLock.
+	lock  sync.RWMutex
+	btree *btree.BTree
+
+	// mmapLock guards mmapData, writeOffset, and any remap of the file
+	// (grow, rewrite). Every access to the mapping must hold it so a
+	// concurrent remap cannot unmap memory another goroutine is writing.
 	mmapLock    sync.Mutex
-	btree       *btree.BTree
 	file        *os.File
 	mmapData    []byte
 	writeOffset int
@@ -28,21 +33,7 @@ func (i Item) Less(other btree.Item) bool {
 }
 
 func NewBTreeIndex(filename string) (*BTreeIndex, error) {
-	file, err := os.OpenFile(filename, os.O_RDWR|os.O_CREATE, 0666)
-	if err != nil {
-		return nil, err
-	}
-
-	size, err := file.Seek(0, 2)
-	if err != nil {
-		return nil, err
-	}
-	if size == 0 {
-		size = 4096
-		file.Truncate(size)
-	}
-
-	mmapData, err := syscall.Mmap(int(file.Fd()), 0, int(size), syscall.PROT_READ|syscall.PROT_WRITE, syscall.MAP_SHARED)
+	file, mmapData, err := openIndexFile(filename)
 	if err != nil {
 		return nil, err
 	}
@@ -52,35 +43,10 @@ func NewBTreeIndex(filename string) (*BTreeIndex, error) {
 		file:     file,
 		mmapData: mmapData,
 	}
-
-	idx.writeOffset = idx.BatchLoadFromMmap()
+	idx.writeOffset = scanIndexEntries(mmapData, func(key string, pos int64) {
+		idx.btree.ReplaceOrInsert(Item{Key: key, Value: pos})
+	})
 	return idx, nil
-}
-
-func (idx *BTreeIndex) BatchLoadFromMmap() int {
-	idx.lock.Lock()
-	idx.mmapLock.Lock()
-	defer idx.lock.Unlock()
-	defer idx.mmapLock.Unlock()
-
-	offset := 0
-	for offset+8 <= len(idx.mmapData) {
-		keySize := binary.LittleEndian.Uint32(idx.mmapData[offset : offset+4])
-		pos := binary.LittleEndian.Uint32(idx.mmapData[offset+4 : offset+8])
-		offset += 8
-
-		if offset+int(keySize) > len(idx.mmapData) {
-			break
-		}
-
-		key := string(idx.mmapData[offset : offset+int(keySize)])
-		offset += int(keySize)
-
-		if key != "" {
-			idx.btree.ReplaceOrInsert(Item{Key: key, Value: int64(pos)})
-		}
-	}
-	return offset
 }
 
 func (idx *BTreeIndex) Add(key string, pos int64) error {
@@ -88,7 +54,10 @@ func (idx *BTreeIndex) Add(key string, pos int64) error {
 	defer idx.lock.Unlock()
 
 	idx.btree.ReplaceOrInsert(Item{Key: key, Value: pos})
-	return idx.appendIndexEntry(key, pos)
+
+	idx.mmapLock.Lock()
+	defer idx.mmapLock.Unlock()
+	return idx.appendEntryLocked(key, pos)
 }
 
 func (idx *BTreeIndex) Get(key string) (int64, bool) {
@@ -119,76 +88,75 @@ func (idx *BTreeIndex) Remove(key string) error {
 	idx.lock.Lock()
 	defer idx.lock.Unlock()
 
-	item := idx.btree.Delete(Item{Key: key})
-	if item == nil {
+	if item := idx.btree.Delete(Item{Key: key}); item == nil {
 		return nil
 	}
-	return idx.persistIndex()
-}
-
-func (idx *BTreeIndex) persistIndex() error {
-	if err := syscall.Munmap(idx.mmapData); err != nil {
-		return err
-	}
-	if err := idx.file.Truncate(0); err != nil {
-		return err
-	}
-	if err := idx.file.Truncate(4096); err != nil {
-		return err
-	}
-
-	mmapData, err := syscall.Mmap(int(idx.file.Fd()), 0, 4096, syscall.PROT_READ|syscall.PROT_WRITE, syscall.MAP_SHARED)
-	if err != nil {
-		return err
-	}
-	idx.mmapData = mmapData
-	idx.writeOffset = 0
-
-	idx.btree.Ascend(func(i btree.Item) bool {
-		item := i.(Item)
-		_ = idx.appendIndexEntry(item.Key, item.Value)
-		return true
-	})
-	return unix.Msync(idx.mmapData, unix.MS_SYNC)
-}
-
-func (idx *BTreeIndex) appendIndexEntry(key string, pos int64) error {
-	keyBytes := []byte(key)
-	keySize := uint32(len(keyBytes))
-	entrySize := 8 + len(keyBytes)
 
 	idx.mmapLock.Lock()
 	defer idx.mmapLock.Unlock()
+	return idx.rewriteLocked()
+}
 
-	if idx.writeOffset+entrySize > len(idx.mmapData) {
-		newSize := int64(len(idx.mmapData)*2 + entrySize + 4096)
+// Sync flushes the mapped index to disk. Add intentionally does not sync;
+// callers batch their writes and sync once.
+func (idx *BTreeIndex) Sync() error {
+	idx.mmapLock.Lock()
+	defer idx.mmapLock.Unlock()
+	return unix.Msync(idx.mmapData, unix.MS_SYNC)
+}
+
+func (idx *BTreeIndex) Close() error {
+	idx.mmapLock.Lock()
+	defer idx.mmapLock.Unlock()
+
+	if idx.mmapData != nil {
+		if err := unix.Msync(idx.mmapData, unix.MS_SYNC); err != nil {
+			_ = idx.file.Close()
+			return err
+		}
 		if err := syscall.Munmap(idx.mmapData); err != nil {
+			_ = idx.file.Close()
 			return err
 		}
-		if err := idx.file.Truncate(newSize); err != nil {
-			return err
-		}
-		mmapData, err := syscall.Mmap(int(idx.file.Fd()), 0, int(newSize), syscall.PROT_READ|syscall.PROT_WRITE, syscall.MAP_SHARED)
+		idx.mmapData = nil
+	}
+	return idx.file.Close()
+}
+
+func (idx *BTreeIndex) appendEntryLocked(key string, pos int64) error {
+	entrySize := indexEntryHeaderSize + len(key)
+	if idx.writeOffset+entrySize > len(idx.mmapData) {
+		mmapData, err := growIndexFile(idx.file, idx.mmapData, entrySize)
 		if err != nil {
 			return err
 		}
 		idx.mmapData = mmapData
 	}
-
-	offset := idx.writeOffset
-	binary.LittleEndian.PutUint32(idx.mmapData[offset:offset+4], keySize)
-	binary.LittleEndian.PutUint32(idx.mmapData[offset+4:offset+8], uint32(pos))
-	copy(idx.mmapData[offset+8:offset+8+int(keySize)], keyBytes)
-
-	idx.writeOffset += entrySize
-
-	if err := unix.Msync(idx.mmapData, unix.MS_SYNC); err != nil {
-		return err
-	}
-
+	idx.writeOffset = putIndexEntry(idx.mmapData, idx.writeOffset, key, pos)
 	return nil
 }
 
-func (idx *BTreeIndex) Close() error {
-	return syscall.Munmap(idx.mmapData)
+// rewriteLocked rebuilds the on-disk log from the current in-memory state.
+// Caller must hold both lock (for btree iteration) and mmapLock.
+func (idx *BTreeIndex) rewriteLocked() error {
+	mmapData, err := resetIndexFile(idx.file, idx.mmapData)
+	if err != nil {
+		return err
+	}
+	idx.mmapData = mmapData
+	idx.writeOffset = indexHeaderSize
+
+	var appendErr error
+	idx.btree.Ascend(func(i btree.Item) bool {
+		item := i.(Item)
+		if err := idx.appendEntryLocked(item.Key, item.Value); err != nil {
+			appendErr = err
+			return false
+		}
+		return true
+	})
+	if appendErr != nil {
+		return appendErr
+	}
+	return unix.Msync(idx.mmapData, unix.MS_SYNC)
 }

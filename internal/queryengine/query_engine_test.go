@@ -191,6 +191,60 @@ func TestQueryEngine_CreateSpaceSurvivesRestart(t *testing.T) {
 	}
 }
 
+func TestQueryEngine_PutRejectsEmptyValue(t *testing.T) {
+	dir := t.TempDir()
+	sm := spaces.NewSpaceManager(dir)
+	defer sm.CloseAll()
+
+	qe := NewQueryEngine(sm, &mockAuth{})
+
+	space := "kv_empty_value"
+	if _, err := qe.Execute(models.Query{
+		Type:       models.TypeCreateSpace,
+		Space:      space,
+		EngineType: "key-value",
+		User:       "admin",
+	}); err != nil {
+		t.Fatalf("CreateSpace failed: %v", err)
+	}
+
+	_, err := qe.Execute(models.Query{
+		Type:  models.TypePut,
+		Space: space,
+		Key:   "k1",
+		Value: "",
+	})
+	if err == nil {
+		t.Fatal("Expected error for PUT with empty value, got nil")
+	}
+	if !strings.Contains(err.Error(), "empty value") {
+		t.Fatalf("Expected 'empty value' error, got: %v", err)
+	}
+
+	// The key must not exist after the rejected PUT.
+	if res, err := qe.Execute(models.Query{
+		Type:  models.TypeGet,
+		Space: space,
+		Key:   "k1",
+	}); err == nil {
+		t.Fatalf("Expected error from GET after rejected PUT, got res=%q", res)
+	}
+
+	// A normal PUT on the same space still works.
+	res, err := qe.Execute(models.Query{
+		Type:  models.TypePut,
+		Space: space,
+		Key:   "k1",
+		Value: "v1",
+	})
+	if err != nil {
+		t.Fatalf("PUT with non-empty value failed: %v", err)
+	}
+	if res != "OK" {
+		t.Fatalf("result = %q, want OK", res)
+	}
+}
+
 func TestQueryEngine_UpdateSpaceSettings(t *testing.T) {
 	dir := t.TempDir()
 	sm := spaces.NewSpaceManager(dir)
