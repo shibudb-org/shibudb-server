@@ -141,7 +141,7 @@ func isServerRunning(pidFilePath string) (bool, int) {
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Println("Usage: shibudb [start [flags] | stop | connect [flags] | manager [flags] <command> | rebuild-index [flags] <space_name> | --version | --help]")
+		fmt.Println("Usage: shibudb [start [flags] | stop | connect [flags] | manager [flags] <command> | rebuild-index [flags] <space_name> | dump [flags] | restore [flags] | --version | --help]")
 		return
 	}
 
@@ -307,6 +307,30 @@ func main() {
 		}
 		rebuildIndex(newRuntimePaths(*dataDir), fs.Args()[0])
 
+	case "dump":
+		fs := flag.NewFlagSet("dump", flag.ExitOnError)
+		dataDir := fs.String("data-dir", defaultDataDir(), "data directory root (used to locate space files under lib/)")
+		outputPath := fs.String("output", "", "output file path (default: stdout)")
+		spaceFilter := fs.String("space", "", "dump only this space (default: all spaces)")
+		fs.Parse(os.Args[2:]) //nolint
+		if len(fs.Args()) != 0 {
+			fmt.Println("Usage: shibudb dump [--data-dir <path>] [--output <file>] [--space <name>]")
+			return
+		}
+		dumpDatabase(newRuntimePaths(*dataDir), *outputPath, *spaceFilter)
+
+	case "restore":
+		fs := flag.NewFlagSet("restore", flag.ExitOnError)
+		dataDir := fs.String("data-dir", defaultDataDir(), "data directory root (used to locate space files under lib/)")
+		inputPath := fs.String("input", "", "input dump file path (default: stdin)")
+		mode := fs.String("mode", "overwrite", "restore mode: overwrite or merge")
+		fs.Parse(os.Args[2:]) //nolint
+		if len(fs.Args()) != 0 {
+			fmt.Println("Usage: shibudb restore [--data-dir <path>] [--input <file>] [--mode overwrite|merge]")
+			return
+		}
+		restoreDatabase(newRuntimePaths(*dataDir), *inputPath, *mode)
+
 	case "--help":
 		printHelp()
 
@@ -358,6 +382,8 @@ Usage:
   shibudb connect [flags]                      Connect to the ShibuDB CLI client
   shibudb manager [flags] <command>            Manage connection limits at runtime
   shibudb rebuild-index [flags] <space_name>   Rebuild one space index from on-disk data
+  shibudb dump [flags]                         Export database spaces to a JSONL dump file
+  shibudb restore [flags]                      Restore database spaces from a JSONL dump file
   shibudb --version                            Show version information
   shibudb --help                               Show this help message
 
@@ -392,6 +418,16 @@ Manager Commands:
   list-tokens               List stored management tokens
   delete-token <token_id>   Delete a management token
 
+Dump & Restore (offline, server must be stopped):
+  dump [flags]              Export all spaces (or one with --space) to JSONL
+    --data-dir <path>       Data directory root (default: ~/.shibudb)
+    --output <file>         Output file (default: stdout)
+    --space <name>          Dump only this space (default: all)
+  restore [flags]           Restore spaces from a JSONL dump file
+    --data-dir <path>       Data directory root (default: ~/.shibudb)
+    --input <file>          Input dump file (default: stdin)
+    --mode overwrite|merge  overwrite (default): replace existing; merge: overlay
+
 Examples:
   shibudb start                        # Default port %s, default connection limit
   shibudb start --port 9090            # Listen on 9090
@@ -414,6 +450,12 @@ Examples:
   shibudb manager --username admin --password admin generate-token
   shibudb rebuild-index yd_v_global
                                       # Rebuild one space index while the server is stopped
+  shibudb dump --output backup.jsonl   # Dump entire database to a file
+  shibudb dump --output kv.jsonl --space my_kv
+                                      # Dump a single space
+  shibudb restore --input backup.jsonl # Restore from dump (overwrites existing)
+  shibudb restore --input backup.jsonl --mode merge
+                                      # Restore with merge (dump wins on conflict)
   kill -USR1 <pid>                     # Increase limit by 100 via signal
 
 Note: By default, ShibuDB stores runtime files under your home directory.
@@ -1318,6 +1360,79 @@ func rebuildIndex(paths runtimePaths, space string) {
 	}
 
 	fmt.Printf("%s%s%s\n", green, result, reset)
+}
+
+func dumpDatabase(paths runtimePaths, outputPath, spaceFilter string) {
+	if running, pid := isServerRunning(paths.pidFile); running {
+		fmt.Printf("%sError:%s ShibuDB server is running (PID: %d).\n", red, reset, pid)
+		fmt.Println("Stop the server before dumping to avoid inconsistent reads.")
+		os.Exit(1)
+	}
+
+	var w io.Writer = os.Stdout
+	if outputPath != "" {
+		file, err := os.Create(outputPath)
+		if err != nil {
+			fmt.Printf("%sError:%s Failed to create output file %q: %v\n", red, reset, outputPath, err)
+			os.Exit(1)
+		}
+		defer file.Close()
+		w = file
+	}
+
+	stats, err := spaces.DumpAll(paths.libDir, w, spaceFilter)
+	if err != nil {
+		fmt.Printf("%sError:%s Dump failed: %v\n", red, reset, err)
+		os.Exit(1)
+	}
+
+	target := "stdout"
+	if outputPath != "" {
+		target = outputPath
+	}
+	fmt.Fprintf(os.Stderr, "%sDump complete:%s %d space(s), %d KV record(s), %d vector record(s) → %s%s\n",
+		green, reset, stats.SpacesDumped, stats.KVRecords, stats.VectorRecords, target, reset)
+}
+
+func restoreDatabase(paths runtimePaths, inputPath, mode string) {
+	if running, pid := isServerRunning(paths.pidFile); running {
+		fmt.Printf("%sError:%s ShibuDB server is running (PID: %d).\n", red, reset, pid)
+		fmt.Println("Stop the server before restoring to avoid concurrent file writes.")
+		os.Exit(1)
+	}
+
+	if mode != "overwrite" && mode != "merge" {
+		fmt.Printf("%sError:%s Invalid --mode %q. Must be \"overwrite\" or \"merge\".\n", red, reset, mode)
+		os.Exit(1)
+	}
+
+	var r io.Reader = os.Stdin
+	if inputPath != "" {
+		file, err := os.Open(inputPath)
+		if err != nil {
+			fmt.Printf("%sError:%s Failed to open input file %q: %v\n", red, reset, inputPath, err)
+			os.Exit(1)
+		}
+		defer file.Close()
+		r = file
+	}
+
+	stats, err := spaces.RestoreAll(paths.libDir, r, mode)
+	if err != nil {
+		fmt.Printf("%sError:%s Restore failed: %v\n", red, reset, err)
+		os.Exit(1)
+	}
+
+	if err := spaces.UpdateManifestAfterRestore(paths.libDir); err != nil {
+		fmt.Printf("%sWarning:%s Failed to update spaces manifest: %v\n", yellow, reset, err)
+	}
+
+	source := "stdin"
+	if inputPath != "" {
+		source = inputPath
+	}
+	fmt.Printf("%sRestore complete:%s %d space(s), %d KV record(s), %d vector record(s) ← %s (mode: %s)%s\n",
+		green, reset, stats.SpacesRestored, stats.KVRecords, stats.VectorRecords, source, mode, reset)
 }
 
 type managerAuthConfig struct {
