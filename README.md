@@ -311,6 +311,21 @@ shibudb manager --username admin --password admin health
 shibudb manager --port 19090 --username admin --password admin stats
 ```
 
+### Backup and Restore (Offline)
+```bash
+# Dump entire database to JSONL format (server must be stopped)
+shibudb dump --output backup.jsonl
+
+# Dump a specific space only
+shibudb dump --space my_space --output my_space.jsonl
+
+# Restore database (full restore, overwriting existing data)
+shibudb restore --input backup.jsonl
+
+# Restore and merge with existing data
+shibudb restore --input backup.jsonl --mode merge
+```
+
 ### HTTP Management API
 ```bash
 # Get connection status (default management port 5444)

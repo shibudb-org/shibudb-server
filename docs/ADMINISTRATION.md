@@ -132,3 +132,48 @@ If you use a non-default data directory:
 shibudb rebuild-index --data-dir /path/to/data <space_name>
 ```
 
+## Database Backup and Restore (Dump & Restore)
+
+ShibuDB includes native offline dump and restore commands to export database spaces to portable JSON-Lines (JSONL) files and restore them later.
+
+> **Note**: The server must be stopped before running `dump` or `restore` to prevent inconsistent reads or concurrent file writes.
+
+### Dumping (Exporting)
+
+Export the entire database (all spaces, metadata, and live records) to a dump file:
+
+```bash
+shibudb dump --output backup.jsonl
+```
+
+Export a specific space only:
+
+```bash
+shibudb dump --space my_space --output my_space.jsonl
+```
+
+Dump flags:
+- `--data-dir <path>`: Root data directory (default: `~/.shibudb`)
+- `--output <file>`: Output file path (default: stdout)
+- `--space <name>`: Dump only this space (default: all spaces)
+
+### Restoring (Importing)
+
+Restore database spaces from a dump file (full restore, overwriting existing data):
+
+```bash
+shibudb restore --input backup.jsonl
+```
+
+Restore and merge dump records into existing spaces (dump records take precedence on key conflicts):
+
+```bash
+shibudb restore --input backup.jsonl --mode merge
+```
+
+Restore flags:
+- `--data-dir <path>`: Root data directory (default: `~/.shibudb`)
+- `--input <file>`: Input dump file path (default: stdin)
+- `--mode overwrite|merge`: Restore mode — `overwrite` (default) replaces existing spaces; `merge` overlays dump data
+
+
