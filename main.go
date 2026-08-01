@@ -312,24 +312,62 @@ func main() {
 		dataDir := fs.String("data-dir", defaultDataDir(), "data directory root (used to locate space files under lib/)")
 		outputPath := fs.String("output", "", "output file path (default: stdout)")
 		spaceFilter := fs.String("space", "", "dump only this space (default: all spaces)")
+		username := fs.String("username", "", "admin username (optional; will prompt if omitted)")
+		password := fs.String("password", "", "admin password (optional; will prompt if omitted)")
+		_ = fs.String("user", "", "alias for --username")
+		_ = fs.String("pass", "", "alias for --password")
 		fs.Parse(os.Args[2:]) //nolint
 		if len(fs.Args()) != 0 {
-			fmt.Println("Usage: shibudb dump [--data-dir <path>] [--output <file>] [--space <name>]")
+			fmt.Println("Usage: shibudb dump [--data-dir <path>] [--output <file>] [--space <name>] [--username <u> --password <p>]")
 			return
 		}
-		dumpDatabase(newRuntimePaths(*dataDir), *outputPath, *spaceFilter)
+		fs.Visit(func(f *flag.Flag) {
+			if f.Name == "user" && *username == "" {
+				*username = f.Value.String()
+			}
+			if f.Name == "pass" && *password == "" {
+				*password = f.Value.String()
+			}
+		})
+		paths := newRuntimePaths(*dataDir)
+		authCfg := managerAuthConfig{
+			username:  strings.TrimSpace(*username),
+			password:  strings.TrimSpace(*password),
+			authFile:  paths.authFile,
+			tokenFile: paths.tokenFile,
+		}
+		dumpDatabase(paths, *outputPath, *spaceFilter, authCfg)
 
 	case "restore":
 		fs := flag.NewFlagSet("restore", flag.ExitOnError)
 		dataDir := fs.String("data-dir", defaultDataDir(), "data directory root (used to locate space files under lib/)")
 		inputPath := fs.String("input", "", "input dump file path (default: stdin)")
 		mode := fs.String("mode", "overwrite", "restore mode: overwrite or merge")
+		username := fs.String("username", "", "admin username (optional; will prompt if omitted)")
+		password := fs.String("password", "", "admin password (optional; will prompt if omitted)")
+		_ = fs.String("user", "", "alias for --username")
+		_ = fs.String("pass", "", "alias for --password")
 		fs.Parse(os.Args[2:]) //nolint
 		if len(fs.Args()) != 0 {
-			fmt.Println("Usage: shibudb restore [--data-dir <path>] [--input <file>] [--mode overwrite|merge]")
+			fmt.Println("Usage: shibudb restore [--data-dir <path>] [--input <file>] [--mode overwrite|merge] [--username <u> --password <p>]")
 			return
 		}
-		restoreDatabase(newRuntimePaths(*dataDir), *inputPath, *mode)
+		fs.Visit(func(f *flag.Flag) {
+			if f.Name == "user" && *username == "" {
+				*username = f.Value.String()
+			}
+			if f.Name == "pass" && *password == "" {
+				*password = f.Value.String()
+			}
+		})
+		paths := newRuntimePaths(*dataDir)
+		authCfg := managerAuthConfig{
+			username:  strings.TrimSpace(*username),
+			password:  strings.TrimSpace(*password),
+			authFile:  paths.authFile,
+			tokenFile: paths.tokenFile,
+		}
+		restoreDatabase(paths, *inputPath, *mode, authCfg)
 
 	case "--help":
 		printHelp()
@@ -1362,11 +1400,18 @@ func rebuildIndex(paths runtimePaths, space string) {
 	fmt.Printf("%s%s%s\n", green, result, reset)
 }
 
-func dumpDatabase(paths runtimePaths, outputPath, spaceFilter string) {
+func dumpDatabase(paths runtimePaths, outputPath, spaceFilter string, authCfg managerAuthConfig) {
 	if running, pid := isServerRunning(paths.pidFile); running {
 		fmt.Printf("%sError:%s ShibuDB server is running (PID: %d).\n", red, reset, pid)
 		fmt.Println("Stop the server before dumping to avoid inconsistent reads.")
 		os.Exit(1)
+	}
+
+	if _, err := os.Stat(paths.authFile); err == nil {
+		if _, err := ensureAdminCredentials(&authCfg); err != nil {
+			fmt.Printf("%sError:%s %v\n", red, reset, err)
+			os.Exit(1)
+		}
 	}
 
 	var w io.Writer = os.Stdout
@@ -1394,16 +1439,24 @@ func dumpDatabase(paths runtimePaths, outputPath, spaceFilter string) {
 		green, reset, stats.SpacesDumped, stats.KVRecords, stats.VectorRecords, target, reset)
 }
 
-func restoreDatabase(paths runtimePaths, inputPath, mode string) {
+func restoreDatabase(paths runtimePaths, inputPath, mode string, authCfg managerAuthConfig) {
 	if running, pid := isServerRunning(paths.pidFile); running {
 		fmt.Printf("%sError:%s ShibuDB server is running (PID: %d).\n", red, reset, pid)
 		fmt.Println("Stop the server before restoring to avoid concurrent file writes.")
 		os.Exit(1)
 	}
 
+	mode = strings.ToLower(strings.TrimSpace(mode))
 	if mode != "overwrite" && mode != "merge" {
 		fmt.Printf("%sError:%s Invalid --mode %q. Must be \"overwrite\" or \"merge\".\n", red, reset, mode)
 		os.Exit(1)
+	}
+
+	if _, err := os.Stat(paths.authFile); err == nil {
+		if _, err := ensureAdminCredentials(&authCfg); err != nil {
+			fmt.Printf("%sError:%s %v\n", red, reset, err)
+			os.Exit(1)
+		}
 	}
 
 	var r io.Reader = os.Stdin
