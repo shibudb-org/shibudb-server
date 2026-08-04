@@ -2,6 +2,10 @@
 
 ## Version History
 
+### 1.1.0 - 2026-08-04
+- Added HashMap index for key-value space
+- Added dump and restore functionality
+
 ### 1.0.9 - 2026-07-04
 - Fixed CLI parser
 - Fixed bug in WAL causing inconsistent replays
@@ -43,4 +47,4 @@
 - Key-Value engine support
 - Support for multiple platforms (Linux AMD64/ARM64, macOS ARM64)
 
-## Current Version: 1.0.9
+## Current Version: 1.1.0
