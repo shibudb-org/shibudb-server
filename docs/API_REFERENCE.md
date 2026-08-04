@@ -10,6 +10,24 @@ shibudb stop [--data-dir <path>]
 shibudb connect [--port <n>] [--username <u> --password <p>]
 shibudb manager [--port <n>] [--data-dir <path>] [--username <u> --password <p>] <command> [args...]
 shibudb rebuild-index [--data-dir <path>] <space_name>
+shibudb dump [--data-dir <path>] [--output <file>] [--space <name>]
+shibudb restore [--data-dir <path>] [--input <file>] [--mode overwrite|merge]
+```
+
+## `shibudb dump` flags
+
+```text
+--data-dir <path>           Data directory root (default: $XDG_DATA_HOME/shibudb or ~/.shibudb)
+--output <file>             Output dump file path (default: stdout)
+--space <name>              Dump only this space (default: all spaces)
+```
+
+## `shibudb restore` flags
+
+```text
+--data-dir <path>           Data directory root (default: $XDG_DATA_HOME/shibudb or ~/.shibudb)
+--input <file>              Input dump file path (default: stdin)
+--mode overwrite|merge      overwrite (default): replace existing spaces; merge: overlay dump data
 ```
 
 ## `shibudb start` flags
