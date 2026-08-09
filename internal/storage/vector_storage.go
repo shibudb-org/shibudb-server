@@ -24,6 +24,8 @@ import (
 // Quiet NaN 0x7FC00000 — reserved; vectors with NaN in first dimension are not supported.
 const tombstoneMarker = uint32(0x7FC00000)
 
+const indexPromotionDebounce = 250 * time.Millisecond
+
 // ErrDeletionNotSupported is returned by RemoveVector when the index type (e.g. HNSW) does not support vector deletion.
 var ErrDeletionNotSupported = errors.New("vector deletion not supported for HNSW index type")
 
@@ -52,6 +54,10 @@ type VectorEngineImpl struct {
 	batchMu sync.Mutex
 	batch   map[int64]vectorBatchEntry
 	pending atomic.Bool
+
+	promotionWake chan struct{}
+	promotionStop chan struct{}
+	promotionWG   sync.WaitGroup
 }
 
 var _ VectorEngine = (*VectorEngineImpl)(nil)
@@ -61,6 +67,7 @@ type vectorStore struct {
 	index       faiss.Index
 	fileOffsets map[int64]int64
 	deletedIDs  map[int64]bool
+	configured  bool
 }
 
 type vectorBatchEntry struct {
@@ -92,6 +99,8 @@ func NewVectorEngineWithSettings(dataPath, indexPath, walPath string, maxVectorS
 		layout:           NewSegmentLayout(filepath.Dir(dataPath), "vector", ".db", ".faiss"),
 		primaryDataPath:  dataPath,
 		primaryIndexPath: indexPath,
+		promotionWake:    make(chan struct{}, 1),
+		promotionStop:    make(chan struct{}),
 	}
 
 	manifest, err := e.loadOrCreateManifest()
@@ -121,6 +130,10 @@ func NewVectorEngineWithSettings(dataPath, indexPath, walPath string, maxVectorS
 		if err := e.replayWAL(); err != nil {
 			return nil, fmt.Errorf("WAL replay failed: %w", err)
 		}
+	}
+	if e.requiresIndexTraining() {
+		e.startIndexPromotionWorker()
+		e.scheduleIndexPromotion()
 	}
 
 	return e, nil
@@ -245,7 +258,7 @@ func (ve *VectorEngineImpl) loadStore() error {
 		return err
 	}
 
-	index, err := buildVectorIndexFromDataFile(desc.DataPath, ve.maxVectorSize, ve.activeIndexDesc(), ve.metric)
+	index, err := buildVectorIndexFromDataFile(desc.DataPath, ve.maxVectorSize, ve.initialIndexDesc(), ve.metric)
 	if err != nil {
 		_ = dataFile.Close()
 		return err
@@ -549,6 +562,10 @@ func (ve *VectorEngineImpl) Close() error {
 		maintenance.UnregisterVectorCheckpoint(ve)
 		ve.maintenanceMu.Unlock()
 
+		if ve.requiresIndexTraining() {
+			close(ve.promotionStop)
+			ve.promotionWG.Wait()
+		}
 		if err := ve.FlushBatch(); err != nil {
 			log.Printf("final vector batch flush failed: %v", err)
 		}
@@ -682,6 +699,7 @@ func (ve *VectorEngineImpl) FlushBatch() error {
 			return err
 		}
 	}
+	ve.scheduleIndexPromotion()
 	return nil
 }
 
@@ -768,7 +786,11 @@ func (ve *VectorEngineImpl) flushBatch(batch map[int64]vectorBatchEntry) error {
 }
 
 func (ve *VectorEngineImpl) rebuildStoreIndexLocked() error {
-	index, err := buildVectorIndexFromDataFile(ve.primaryDataPath, ve.maxVectorSize, ve.activeIndexDesc(), ve.metric)
+	indexDesc := ve.initialIndexDesc()
+	if ve.store.configured {
+		indexDesc = ve.indexType
+	}
+	index, err := buildVectorIndexFromDataFile(ve.primaryDataPath, ve.maxVectorSize, indexDesc, ve.metric)
 	if err != nil {
 		return fmt.Errorf("rebuild vector index after batch update: %w", err)
 	}
@@ -782,6 +804,125 @@ func (ve *VectorEngineImpl) rebuildStoreIndexLocked() error {
 	ve.store.fileOffsets = offsets
 	ve.store.deletedIDs = deletedIDs
 	return nil
+}
+
+func (ve *VectorEngineImpl) requiresIndexTraining() bool {
+	return requiredTrainCountForIndex(ve.indexType) > 0
+}
+
+func (ve *VectorEngineImpl) startIndexPromotionWorker() {
+	ve.promotionWG.Add(1)
+	go ve.indexPromotionWorker()
+}
+
+func (ve *VectorEngineImpl) scheduleIndexPromotion() {
+	if !ve.requiresIndexTraining() {
+		return
+	}
+	ve.lock.RLock()
+	configured := ve.store != nil && ve.store.configured
+	ve.lock.RUnlock()
+	if configured {
+		return
+	}
+	select {
+	case ve.promotionWake <- struct{}{}:
+	default:
+	}
+}
+
+func (ve *VectorEngineImpl) indexPromotionWorker() {
+	defer ve.promotionWG.Done()
+	for {
+		select {
+		case <-ve.promotionStop:
+			return
+		case <-ve.promotionWake:
+		}
+
+		timer := time.NewTimer(indexPromotionDebounce)
+		debouncing := true
+		for debouncing {
+			select {
+			case <-ve.promotionStop:
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				return
+			case <-ve.promotionWake:
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				timer.Reset(indexPromotionDebounce)
+			case <-timer.C:
+				debouncing = false
+			}
+		}
+
+		if err := ve.promoteConfiguredIndex(); err != nil {
+			log.Printf("promote FAISS index %q failed: %v", ve.indexType, err)
+		}
+	}
+}
+
+func (ve *VectorEngineImpl) promoteConfiguredIndex() error {
+	ve.lock.RLock()
+	if ve.store == nil || ve.store.configured {
+		ve.lock.RUnlock()
+		return nil
+	}
+	liveVectors := len(ve.store.fileOffsets) - len(ve.store.deletedIDs)
+	info, err := ve.store.dataFile.Stat()
+	ve.lock.RUnlock()
+	if err != nil {
+		return fmt.Errorf("stat vector data before index promotion: %w", err)
+	}
+	if liveVectors < ve.indexPromotionThreshold() {
+		return nil
+	}
+	snapshotSize := info.Size()
+
+	index, err := buildVectorIndexFromDataFile(ve.primaryDataPath, ve.maxVectorSize, ve.indexType, ve.metric)
+	if err != nil {
+		return err
+	}
+
+	ve.lock.Lock()
+	defer ve.lock.Unlock()
+	if ve.store == nil || ve.store.configured {
+		index.Delete()
+		return nil
+	}
+	currentInfo, err := ve.store.dataFile.Stat()
+	if err != nil {
+		index.Delete()
+		return fmt.Errorf("stat vector data after index promotion: %w", err)
+	}
+	if currentInfo.Size() != snapshotSize {
+		index.Delete()
+		select {
+		case ve.promotionWake <- struct{}{}:
+		default:
+		}
+		return nil
+	}
+
+	oldIndex := ve.store.index
+	ve.store.index = index
+	ve.store.configured = true
+	oldIndex.Delete()
+	log.Printf("promoted FAISS index to %q with %d live vectors", ve.indexType, liveVectors)
+	return nil
+}
+
+func (ve *VectorEngineImpl) indexPromotionThreshold() int {
+	return trainingSampleCount(requiredTrainCountForIndex(ve.indexType), vectorRebuildTrainSample)
 }
 
 func appendVectorBatchRecord(file *os.File, id int64, entry vectorBatchEntry, dimension int) (int64, error) {
@@ -1004,7 +1145,7 @@ func writeMergedVectorDataFile(dataPath string, records map[int64][]byte) error 
 	return os.Rename(tmpPath, dataPath)
 }
 
-func (ve *VectorEngineImpl) activeIndexDesc() string {
+func (ve *VectorEngineImpl) initialIndexDesc() string {
 	if requiredTrainCountForIndex(ve.indexType) > 0 {
 		return "Flat"
 	}

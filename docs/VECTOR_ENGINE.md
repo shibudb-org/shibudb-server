@@ -94,15 +94,18 @@ CREATE-SPACE fast_embeddings --engine vector --dimension 128 --disable-wal
 - `--enable-wal`: Enable Write-Ahead Logging for enhanced durability (default: disabled for vector spaces)
 - `--disable-wal`: Disable Write-Ahead Logging for maximum performance (default for vector spaces)
 
-### Minimum Vector Requirements
+### Automatic Training
 
-Different index types have different minimum vector requirements before search operations become available:
+Search is available immediately for every index type. IVF/PQ spaces initially
+use a Flat index, then train the configured index in the background after
+10,000 vectors have been flushed. New writes remain searchable while training
+is in progress, and the trained index replaces Flat atomically.
 
-- **Flat**: No minimum required (search available immediately)
-- **HNSW{n}**: No minimum required (search available immediately)
-- **IVF{n}**: Minimum n vectors required (n = number of clusters)
-- **PQ{n}**: Minimum 256 vectors required (for training)
-- **Composite indices**: Follow the higher requirement of their components
+The underlying FAISS minimums are:
+
+- **IVF{n}**: n vectors (n = number of clusters)
+- **PQ{n}**: 256 vectors
+- **Composite indices**: The higher requirement of their components
 
 **Examples:**
 ```bash
@@ -112,21 +115,15 @@ USE hnsw_space
 INSERT-VECTOR 1 1.0,2.0,3.0,4.0,5.0,6.0,7.0,8.0
 SEARCH-TOPK 1.0,2.0,3.0,4.0,5.0,6.0,7.0,8.0 5  # Works immediately
 
-# IVF32 - search available after 32 vectors
+# IVF32 - search available immediately; background promotion after 10,000 vectors
 CREATE-SPACE ivf_space --engine vector --dimension 128 --index-type IVF32
 USE ivf_space
-# Need to insert at least 32 vectors before search works
 INSERT-VECTOR 1 1.0,2.0,3.0,4.0,5.0,6.0,7.0,8.0
-# ... insert 31 more vectors ...
-INSERT-VECTOR 32 1.0,2.0,3.0,4.0,5.0,6.0,7.0,8.0
-SEARCH-TOPK 1.0,2.0,3.0,4.0,5.0,6.0,7.0,8.0 5  # Now works
+SEARCH-TOPK 1.0,2.0,3.0,4.0,5.0,6.0,7.0,8.0 5  # Works immediately
 
-# PQ8 - search available after 256 vectors
+# PQ8 behaves the same way
 CREATE-SPACE pq_space --engine vector --dimension 128 --index-type PQ8
 USE pq_space
-# Need to insert at least 256 vectors before search works
-# ... insert 256 vectors ...
-SEARCH-TOPK 1.0,2.0,3.0,4.0,5.0,6.0,7.0,8.0 5  # Now works
 ```
 
 ### Supported Index Types
