@@ -58,15 +58,15 @@ CREATE-SPACE embeddings --engine vector --dimension 128
 CREATE-SPACE image_vectors --engine vector --dimension 512 --index-type HNSW32 --metric L2
 
 # Create with custom parameters
-CREATE-SPACE text_embeddings --engine vector --dimension 768 --index-type IVF32 --metric InnerProduct
+CREATE-SPACE text_embeddings --engine vector --dimension 768 --index-type IVF32,Flat --metric InnerProduct
 
 # Create with different HNSW configurations
 CREATE-SPACE fast_search --engine vector --dimension 128 --index-type HNSW64 --metric L2
 CREATE-SPACE ultra_fast --engine vector --dimension 128 --index-type HNSW256 --metric L2
 
 # Create with different IVF configurations
-CREATE-SPACE large_dataset --engine vector --dimension 128 --index-type IVF64 --metric L2
-CREATE-SPACE huge_dataset --engine vector --dimension 128 --index-type IVF256 --metric L2
+CREATE-SPACE large_dataset --engine vector --dimension 128 --index-type IVF64,Flat --metric L2
+CREATE-SPACE huge_dataset --engine vector --dimension 128 --index-type IVF256,Flat --metric L2
 
 # Create with different PQ configurations
 CREATE-SPACE memory_efficient --engine vector --dimension 128 --index-type PQ8 --metric L2
@@ -94,15 +94,18 @@ CREATE-SPACE fast_embeddings --engine vector --dimension 128 --disable-wal
 - `--enable-wal`: Enable Write-Ahead Logging for enhanced durability (default: disabled for vector spaces)
 - `--disable-wal`: Disable Write-Ahead Logging for maximum performance (default for vector spaces)
 
-### Minimum Vector Requirements
+### Automatic Training
 
-Different index types have different minimum vector requirements before search operations become available:
+Search is available immediately for every index type. IVF/PQ spaces initially
+use a Flat index, then train the configured index in the background after
+10,000 vectors have been flushed. New writes remain searchable while training
+is in progress, and the trained index replaces Flat atomically.
 
-- **Flat**: No minimum required (search available immediately)
-- **HNSW{n}**: No minimum required (search available immediately)
-- **IVF{n}**: Minimum n vectors required (n = number of clusters)
-- **PQ{n}**: Minimum 256 vectors required (for training)
-- **Composite indices**: Follow the higher requirement of their components
+The underlying FAISS minimums are:
+
+- **IVF{n}**: n vectors (n = number of clusters)
+- **PQ{n}**: 256 vectors
+- **Composite indices**: The higher requirement of their components
 
 **Examples:**
 ```bash
@@ -112,21 +115,15 @@ USE hnsw_space
 INSERT-VECTOR 1 1.0,2.0,3.0,4.0,5.0,6.0,7.0,8.0
 SEARCH-TOPK 1.0,2.0,3.0,4.0,5.0,6.0,7.0,8.0 5  # Works immediately
 
-# IVF32 - search available after 32 vectors
-CREATE-SPACE ivf_space --engine vector --dimension 128 --index-type IVF32
+# IVF32,Flat - search available immediately; background promotion after 10,000 vectors
+CREATE-SPACE ivf_space --engine vector --dimension 128 --index-type IVF32,Flat
 USE ivf_space
-# Need to insert at least 32 vectors before search works
 INSERT-VECTOR 1 1.0,2.0,3.0,4.0,5.0,6.0,7.0,8.0
-# ... insert 31 more vectors ...
-INSERT-VECTOR 32 1.0,2.0,3.0,4.0,5.0,6.0,7.0,8.0
-SEARCH-TOPK 1.0,2.0,3.0,4.0,5.0,6.0,7.0,8.0 5  # Now works
+SEARCH-TOPK 1.0,2.0,3.0,4.0,5.0,6.0,7.0,8.0 5  # Works immediately
 
-# PQ8 - search available after 256 vectors
+# PQ8 behaves the same way
 CREATE-SPACE pq_space --engine vector --dimension 128 --index-type PQ8
 USE pq_space
-# Need to insert at least 256 vectors before search works
-# ... insert 256 vectors ...
-SEARCH-TOPK 1.0,2.0,3.0,4.0,5.0,6.0,7.0,8.0 5  # Now works
 ```
 
 ### Supported Index Types
@@ -139,7 +136,7 @@ ShibuDb supports various FAISS index types with hardcoded configurations and com
 |------------|-------------|----------|--------|-------|---------------------|--------|
 | `Flat` | Exact search | Small datasets, high accuracy | High | Slow | 0 | Yes |
 | `HNSW{n}` | Hierarchical Navigable Small World | Fast similarity search | Medium | Fast | 0 | **No** |
-| `IVF{n}` | Inverted file index | Large datasets | Low | Medium | n | Yes |
+| `IVF{n},Flat` | Inverted file index with Flat storage | Large datasets | Low | Medium | n | Yes |
 | `PQ{n}` | Product quantization | Very large datasets | Very Low | Fast | 256 | Yes |
 
 *"Delete" column: whether `DELETE-VECTOR` is supported for that index type.*
@@ -151,8 +148,8 @@ ShibuDb supports various FAISS index types with hardcoded configurations and com
 - **Minimum vectors required**: 0 (search enabled immediately)
 - **Use case**: Fast approximate similarity search with configurable neighbor count
 
-**IVF Indices**: `IVF{n}` where n is a power of 2 from 2 to 256
-- Examples: `IVF2`, `IVF4`, `IVF8`, `IVF16`, `IVF32`, `IVF64`, `IVF128`, `IVF256`
+**IVF Indices**: `IVF{n},Flat` where n is a power of 2 from 2 to 256
+- Examples: `IVF2,Flat`, `IVF4,Flat`, `IVF8,Flat`, `IVF16,Flat`, `IVF32,Flat`, `IVF64,Flat`, `IVF128,Flat`, `IVF256,Flat`
 - **Minimum vectors required**: n (number of clusters)
 - **Use case**: Large dataset indexing with configurable cluster count
 
@@ -307,8 +304,8 @@ CREATE-SPACE hnsw256 --engine vector --dimension 128 --index-type HNSW256 # 256 
 **Best for**: Large datasets, balanced performance
 
 ```bash
-# Create IVF index (32 clusters)
-CREATE-SPACE large_dataset --engine vector --dimension 128 --index-type IVF32 --metric L2
+# Create IVF index (32 clusters with Flat storage)
+CREATE-SPACE large_dataset --engine vector --dimension 128 --index-type IVF32,Flat --metric L2
 USE large_dataset
 
 # Insert many vectors
@@ -323,14 +320,14 @@ SEARCH-TOPK 1.0,2.0,3.0,4.0,5.0,6.0,7.0,8.0 10
 **Available IVF Variants:**
 ```bash
 # Different cluster configurations (power of 2 from 2 to 256)
-CREATE-SPACE ivf2 --engine vector --dimension 128 --index-type IVF2   # 2 clusters
-CREATE-SPACE ivf4 --engine vector --dimension 128 --index-type IVF4   # 4 clusters
-CREATE-SPACE ivf8 --engine vector --dimension 128 --index-type IVF8   # 8 clusters
-CREATE-SPACE ivf16 --engine vector --dimension 128 --index-type IVF16 # 16 clusters
-CREATE-SPACE ivf32 --engine vector --dimension 128 --index-type IVF32 # 32 clusters
-CREATE-SPACE ivf64 --engine vector --dimension 128 --index-type IVF64 # 64 clusters
-CREATE-SPACE ivf128 --engine vector --dimension 128 --index-type IVF128 # 128 clusters
-CREATE-SPACE ivf256 --engine vector --dimension 128 --index-type IVF256 # 256 clusters
+CREATE-SPACE ivf2 --engine vector --dimension 128 --index-type IVF2,Flat     # 2 clusters
+CREATE-SPACE ivf4 --engine vector --dimension 128 --index-type IVF4,Flat     # 4 clusters
+CREATE-SPACE ivf8 --engine vector --dimension 128 --index-type IVF8,Flat     # 8 clusters
+CREATE-SPACE ivf16 --engine vector --dimension 128 --index-type IVF16,Flat   # 16 clusters
+CREATE-SPACE ivf32 --engine vector --dimension 128 --index-type IVF32,Flat   # 32 clusters
+CREATE-SPACE ivf64 --engine vector --dimension 128 --index-type IVF64,Flat   # 64 clusters
+CREATE-SPACE ivf128 --engine vector --dimension 128 --index-type IVF128,Flat # 128 clusters
+CREATE-SPACE ivf256 --engine vector --dimension 128 --index-type IVF256,Flat # 256 clusters
 ```
 
 **Characteristics:**
@@ -767,10 +764,10 @@ CREATE-SPACE medium_exact --engine vector --dimension 128 --index-type HNSW32,Fl
 #### Large Datasets (1M - 10M vectors)
 ```bash
 # Use IVF for balanced performance
-CREATE-SPACE large_dataset --engine vector --dimension 128 --index-type IVF32
+CREATE-SPACE large_dataset --engine vector --dimension 128 --index-type IVF32,Flat
 
 # For larger datasets, use more clusters
-CREATE-SPACE large_many_clusters --engine vector --dimension 128 --index-type IVF64
+CREATE-SPACE large_many_clusters --engine vector --dimension 128 --index-type IVF64,Flat
 
 # For high accuracy with exact refinement
 CREATE-SPACE large_accurate --engine vector --dimension 128 --index-type IVF32,Flat
@@ -799,9 +796,9 @@ CREATE-SPACE huge_fast --engine vector --dimension 128 --index-type HNSW128,PQ32
 - `HNSW128-HNSW256`: Higher accuracy, slower, good for precision-critical applications
 
 **IVF Variants:**
-- `IVF2-IVF16`: Good for smaller large datasets (1M-5M vectors)
-- `IVF32-IVF64`: Good for medium large datasets (5M-20M vectors)
-- `IVF128-IVF256`: Good for very large datasets (20M+ vectors)
+- `IVF2,Flat` through `IVF16,Flat`: Good for smaller large datasets (1M-5M vectors)
+- `IVF32,Flat` through `IVF64,Flat`: Good for medium large datasets (5M-20M vectors)
+- `IVF128,Flat` through `IVF256,Flat`: Good for very large datasets (20M+ vectors)
 
 **PQ Variants:**
 - `PQ2-PQ8`: Very memory efficient, lower accuracy
@@ -830,9 +827,9 @@ CREATE-SPACE hnsw_medium --engine vector --dimension 128 --index-type HNSW32
 CREATE-SPACE hnsw_large --engine vector --dimension 128 --index-type HNSW64
 
 # IVF: Lower memory usage (varies by cluster count)
-CREATE-SPACE ivf_small --engine vector --dimension 128 --index-type IVF16
-CREATE-SPACE ivf_medium --engine vector --dimension 128 --index-type IVF32
-CREATE-SPACE ivf_large --engine vector --dimension 128 --index-type IVF64
+CREATE-SPACE ivf_small --engine vector --dimension 128 --index-type IVF16,Flat
+CREATE-SPACE ivf_medium --engine vector --dimension 128 --index-type IVF32,Flat
+CREATE-SPACE ivf_large --engine vector --dimension 128 --index-type IVF64,Flat
 
 # PQ: Lowest memory usage (varies by quantization bits)
 CREATE-SPACE pq_small --engine vector --dimension 128 --index-type PQ4
@@ -980,7 +977,7 @@ SEARCH-TOPK 0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8 5
 ```bash
 # Create image embedding space with different configurations
 # For small image collection (balanced)
-CREATE-SPACE image_embeddings_balanced --engine vector --dimension 512 --index-type IVF32 --metric L2
+CREATE-SPACE image_embeddings_balanced --engine vector --dimension 512 --index-type IVF32,Flat --metric L2
 
 # For large image collection (high accuracy)
 CREATE-SPACE image_embeddings_accurate --engine vector --dimension 512 --index-type IVF64,Flat --metric L2
@@ -1059,7 +1056,7 @@ SEARCH-TOPK 0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8 10
 
 ```bash
 # Create face embedding space
-CREATE-SPACE face_embeddings --engine vector --dimension 128 --index-type IVF32 --metric L2
+CREATE-SPACE face_embeddings --engine vector --dimension 128 --index-type IVF32,Flat --metric L2
 USE face_embeddings
 
 # Store face embeddings
@@ -1109,13 +1106,13 @@ INSERT-VECTOR user@123 1.0,2.0,3.0,4.0,5.0
 
 **Problem**: `DELETE-VECTOR` was used on a space that uses an HNSW index (e.g. `HNSW32`, `HNSW64,Flat`).
 
-**Solution**: HNSW indices do not support removing vectors. Either use a different index type that supports deletion (Flat, IVF, PQ), or avoid deleting vectors in that space.
+**Solution**: HNSW indices do not support removing vectors. Either use a different index type that supports deletion (Flat, IVF with Flat/PQ storage, or PQ), or avoid deleting vectors in that space.
 
 ```bash
-# If you need deletion, use Flat or IVF instead of HNSW
+# If you need deletion, use Flat or IVF with Flat storage instead of HNSW
 CREATE-SPACE my_vectors --engine vector --dimension 128 --index-type Flat
 # or
-CREATE-SPACE my_vectors --engine vector --dimension 128 --index-type IVF32
+CREATE-SPACE my_vectors --engine vector --dimension 128 --index-type IVF32,Flat
 ```
 
 #### 4. "Operation not supported: not a vector space" Error

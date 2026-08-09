@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -47,7 +48,7 @@ func isAllowedIndexType(indexType string) bool {
 			return false
 		}
 
-		// e.g. HNSW32, IVF32, PQ4, Flat
+		// e.g. HNSW32, IVF32, PQ4, Flat (standalone IVF is rejected below)
 		var base string
 		num := -1
 
@@ -89,8 +90,20 @@ func isAllowedIndexType(indexType string) bool {
 		if base == "Flat" && num != -1 {
 			return false
 		}
+		if len(parts) == 1 && base == "IVF" {
+			return false
+		}
 	}
 	return true
+}
+
+func isStandaloneIVFIndex(indexType string) bool {
+	indexType = strings.TrimSpace(indexType)
+	if !strings.HasPrefix(indexType, "IVF") || strings.Contains(indexType, ",") {
+		return false
+	}
+	_, err := strconv.Atoi(strings.TrimPrefix(indexType, "IVF"))
+	return err == nil
 }
 
 func isAllowedMetric(metric string) bool {
@@ -517,10 +530,16 @@ func (sm *SpaceManager) CreateSpaceWithSettingsAndMetadata(space, engineType str
 
 	if engineType == "vector" {
 		if !isAllowedIndexType(meta.IndexType) {
+			if isStandaloneIVFIndex(meta.IndexType) {
+				return nil, fmt.Errorf("index type %q is invalid; use %q", meta.IndexType, meta.IndexType+",Flat")
+			}
 			return nil, fmt.Errorf("index type '%s' is not allowed", meta.IndexType)
 		}
 		if !isAllowedMetric(metric) {
 			return nil, fmt.Errorf("metric '%s' is not allowed", metric)
+		}
+		if err := storage.ValidateVectorIndexConfig(meta.Dimension, meta.IndexType, getFAISSMetric(meta.Metric)); err != nil {
+			return nil, err
 		}
 		if len(meta.IndexedMetadataFields) > 0 {
 			if meta.IndexType != "Flat" {

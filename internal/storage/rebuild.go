@@ -312,7 +312,7 @@ func readVectorRecordAt(file *os.File, offset int64, dimension int) (int64, []fl
 }
 
 func requiredTrainCountForIndex(indexDesc string) int {
-	if indexDesc == "Flat" || strings.HasPrefix(indexDesc, "HNSW") {
+	if indexDesc == "Flat" || (strings.HasPrefix(indexDesc, "HNSW") && !strings.Contains(indexDesc, "PQ")) {
 		return 0
 	}
 

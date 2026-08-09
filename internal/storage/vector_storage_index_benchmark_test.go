@@ -20,7 +20,7 @@ const (
 	benchVecPool    = 4096
 )
 
-var benchVectorIndexTypes = []string{"Flat", "HNSW32", "HNSW64", "IVF32", "PQ8"}
+var benchVectorIndexTypes = []string{"Flat", "HNSW32", "HNSW64", "IVF32,Flat", "PQ8"}
 
 func newBenchVectorEngine(b *testing.B, indexType string) *VectorEngineImpl {
 	b.Helper()
