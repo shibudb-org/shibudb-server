@@ -2,6 +2,11 @@
 
 ## Version History
 
+### 1.2.0 - 2026-08-09
+- Improved search performance for faiss based index by removing segmentation
+- Fixed a bug in PQ and IVF index for training
+- Added logging levels
+
 ### 1.1.0 - 2026-08-04
 - Added HashMap index for key-value space
 - Added dump and restore functionality
@@ -47,4 +52,4 @@
 - Key-Value engine support
 - Support for multiple platforms (Linux AMD64/ARM64, macOS ARM64)
 
-## Current Version: 1.1.0
+## Current Version: 1.2.0
