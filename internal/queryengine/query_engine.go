@@ -4,10 +4,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"strings"
 
 	"github.com/shibudb.org/shibudb-server/internal/auth"
+	"github.com/shibudb.org/shibudb-server/internal/logger"
 	"github.com/shibudb.org/shibudb-server/internal/models"
 	"github.com/shibudb.org/shibudb-server/internal/spaces"
 	"github.com/shibudb.org/shibudb-server/internal/storage"
@@ -36,6 +36,14 @@ func NewQueryEngine(spaceManager *spaces.SpaceManager, authManager AuthManagerIf
 	}
 }
 
+// usernameOf returns just the username for logging, never credentials.
+func usernameOf(u *models.User) string {
+	if u == nil {
+		return "<nil>"
+	}
+	return u.Username
+}
+
 func getUserResponse(u *models.User) string {
 	if u == nil {
 		return "User: <nil>"
@@ -56,7 +64,7 @@ func getUserResponse(u *models.User) string {
 }
 
 func (qe *QueryEngine) Execute(query models.Query) (string, error) {
-	log.Println("Query:", query.Type)
+	logger.Debugf("query", "Executing query: %s", query.Type)
 
 	switch query.Type {
 	case models.TypeGetUser:
@@ -99,7 +107,7 @@ func (qe *QueryEngine) Execute(query models.Query) (string, error) {
 		}
 		return string(data), nil
 	case models.TypeCreateUser:
-		log.Println("Creating user:", query)
+		logger.Infof("query", "Creating user: %s", usernameOf(query.NewUser))
 		if query.User == "" {
 			return "", errors.New("unauthenticated")
 		}
@@ -116,7 +124,7 @@ func (qe *QueryEngine) Execute(query models.Query) (string, error) {
 		}
 		return "USER_CREATED", nil
 	case models.TypeUpdateUserPassword:
-		log.Println("Updating user password:", query.NewUser)
+		logger.Infof("query", "Updating user password: %s", usernameOf(query.NewUser))
 		if query.User == "" {
 			return "", errors.New("unauthenticated")
 		}
@@ -133,7 +141,7 @@ func (qe *QueryEngine) Execute(query models.Query) (string, error) {
 		}
 		return "USER_PASSWORD_UPDATED", nil
 	case models.TypeUpdateUserRole:
-		log.Println("Updating user role:", query.NewUser)
+		logger.Infof("query", "Updating user role: %s", usernameOf(query.NewUser))
 		if query.User == "" {
 			return "", errors.New("unauthenticated")
 		}
@@ -150,7 +158,7 @@ func (qe *QueryEngine) Execute(query models.Query) (string, error) {
 		}
 		return "USER_ROLE_UPDATED", nil
 	case models.TypeUpdateUserPermissions:
-		log.Println("Updating user permissions:", query.NewUser)
+		logger.Infof("query", "Updating user permissions: %s", usernameOf(query.NewUser))
 		if query.User == "" {
 			return "", errors.New("unauthenticated")
 		}
@@ -167,7 +175,7 @@ func (qe *QueryEngine) Execute(query models.Query) (string, error) {
 		}
 		return "USER_ROLE_UPDATED", nil
 	case models.TypeDeleteUser:
-		log.Println("Deleting user:", query.DeleteUser)
+		logger.Infof("query", "Deleting user: %s", usernameOf(query.DeleteUser))
 		if query.User == "" {
 			return "", errors.New("unauthenticated")
 		}

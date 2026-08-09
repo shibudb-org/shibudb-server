@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"math"
 	"os"
 	"path/filepath"
@@ -17,6 +16,7 @@ import (
 	"github.com/DataIntelligenceCrew/go-faiss"
 	"github.com/RoaringBitmap/roaring/roaring64"
 	"github.com/google/btree"
+	"github.com/shibudb.org/shibudb-server/internal/logger"
 	"github.com/shibudb.org/shibudb-server/internal/maintenance"
 	"github.com/shibudb.org/shibudb-server/internal/wal"
 )
@@ -808,7 +808,7 @@ func (e *FlatMetaVectorEngine) flushData(force bool) {
 	dataFile := active.dataFile
 	for _, item := range buf {
 		if err := appendFlatMetaRecord(dataFile, item); err != nil {
-			log.Printf("flat-meta append failed for id=%d: %v", item.id, err)
+			logger.Errorf("storage", "flat-meta append failed for id=%d: %v", item.id, err)
 		}
 	}
 	if info, err := dataFile.Stat(); err == nil {
@@ -819,10 +819,10 @@ func (e *FlatMetaVectorEngine) flushData(force bool) {
 	e.lock.Unlock()
 
 	if err := dataFile.Sync(); err != nil {
-		log.Printf("flat-meta data file sync failed: %v", err)
+		logger.Errorf("storage", "flat-meta data file sync failed: %v", err)
 	}
 	if rotateErr != nil {
-		log.Printf("flat-meta hot segment rotation failed: %v", rotateErr)
+		logger.Errorf("storage", "flat-meta hot segment rotation failed: %v", rotateErr)
 	}
 }
 
@@ -1004,7 +1004,7 @@ func (e *FlatMetaVectorEngine) tryMergeOldestColdSegments() bool {
 
 	mergedMeta, mergedFile, err := e.mergeSegments(newID, firstDesc, secondDesc)
 	if err != nil {
-		log.Printf("merge flat-meta segments %d and %d failed: %v", first.meta.ID, second.meta.ID, err)
+		logger.Errorf("storage", "merge flat-meta segments %d and %d failed: %v", first.meta.ID, second.meta.ID, err)
 		e.lock.Lock()
 		if segment := e.segmentByIDLocked(first.meta.ID); segment != nil {
 			segment.meta.State = SegmentStateCold

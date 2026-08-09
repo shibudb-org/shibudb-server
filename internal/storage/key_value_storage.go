@@ -5,13 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"path/filepath"
 	"sync"
 	"time"
 
 	kvindex "github.com/shibudb.org/shibudb-server/internal/index"
+	"github.com/shibudb.org/shibudb-server/internal/logger"
 	"github.com/shibudb.org/shibudb-server/internal/maintenance"
 	"github.com/shibudb.org/shibudb-server/internal/wal"
 )
@@ -215,22 +215,22 @@ func (db *ShibuDB) replayWAL() {
 	}
 	entries, err := db.wal.Replay()
 	if err != nil {
-		log.Printf("WAL replay failed: %v", err)
+		logger.Errorf("storage", "WAL replay failed: %v", err)
 		return
 	}
 	for _, entry := range entries {
 		if entry.Flag == wal.EntryDeleted {
 			if err := db.Delete(entry.Key); err != nil && !errors.Is(err, errKeyDeleted) && !errors.Is(err, errKeyNotFound) {
-				log.Printf("WAL replay delete failed for %q: %v", entry.Key, err)
+				logger.Errorf("storage", "WAL replay delete failed for %q: %v", entry.Key, err)
 			}
 			continue
 		}
 		if err := db.PutBatch(entry.Key, entry.Value); err != nil {
-			log.Printf("WAL replay put failed for %q: %v", entry.Key, err)
+			logger.Errorf("storage", "WAL replay put failed for %q: %v", entry.Key, err)
 		}
 	}
 	if err := db.FlushBatch(); err != nil {
-		log.Printf("WAL replay flush failed: %v", err)
+		logger.Errorf("storage", "WAL replay flush failed: %v", err)
 	}
 	_ = db.wal.Clear()
 }
@@ -479,7 +479,7 @@ func (db *ShibuDB) MaintenanceFlush() {
 		return
 	}
 	if err := db.FlushBatch(); err != nil {
-		log.Printf("FlushBatch failed: %v", err)
+		logger.Errorf("storage", "FlushBatch failed: %v", err)
 	}
 }
 
@@ -536,7 +536,7 @@ func (db *ShibuDB) tryMergeOldestColdSegments() bool {
 
 	mergedMeta, mergedIndex, mergedFile, err := db.mergeSegments(newID, firstDesc, secondDesc)
 	if err != nil {
-		log.Printf("merge key-value segments %d and %d failed: %v", first.meta.ID, second.meta.ID, err)
+		logger.Errorf("storage", "merge key-value segments %d and %d failed: %v", first.meta.ID, second.meta.ID, err)
 		db.lock.Lock()
 		if segment := db.segmentByIDLocked(first.meta.ID); segment != nil {
 			segment.meta.State = SegmentStateCold
