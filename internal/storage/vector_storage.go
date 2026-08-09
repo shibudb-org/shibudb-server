@@ -81,6 +81,10 @@ func NewVectorEngine(dataPath, indexPath, walPath string, maxVectorSize int, ind
 }
 
 func NewVectorEngineWithSettings(dataPath, indexPath, walPath string, maxVectorSize int, indexDesc string, metric int, enableWAL bool, _ SpaceSettings) (*VectorEngineImpl, error) {
+	if err := ValidateVectorIndexConfig(maxVectorSize, indexDesc, metric); err != nil {
+		return nil, err
+	}
+
 	var w *wal.WAL
 	var err error
 	if enableWAL {
@@ -137,6 +141,18 @@ func NewVectorEngineWithSettings(dataPath, indexPath, walPath string, maxVectorS
 	}
 
 	return e, nil
+}
+
+// ValidateVectorIndexConfig asks FAISS to parse the configured index before any
+// files are created. Training-based indexes otherwise use a Flat fallback and
+// could hide an invalid descriptor until background promotion.
+func ValidateVectorIndexConfig(dimension int, indexDesc string, metric int) error {
+	index, err := faiss.IndexFactory(dimension, "IDMap,"+indexDesc, metric)
+	if err != nil {
+		return fmt.Errorf("invalid FAISS index type %q: %w", indexDesc, err)
+	}
+	index.Delete()
+	return nil
 }
 
 func (ve *VectorEngineImpl) UpdateSpaceSettings(_ SpaceSettings) error {

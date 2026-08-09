@@ -2,11 +2,25 @@ package storage
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/DataIntelligenceCrew/go-faiss"
 )
+
+func TestValidateVectorIndexConfigRejectsStandaloneIVF(t *testing.T) {
+	err := ValidateVectorIndexConfig(8, "IVF128", faiss.MetricL2)
+	if err == nil {
+		t.Fatal("ValidateVectorIndexConfig accepted standalone IVF128")
+	}
+	if !strings.Contains(err.Error(), `invalid FAISS index type "IVF128"`) {
+		t.Fatalf("unexpected validation error: %v", err)
+	}
+	if err := ValidateVectorIndexConfig(8, "IVF128,Flat", faiss.MetricL2); err != nil {
+		t.Fatalf("ValidateVectorIndexConfig rejected IVF128,Flat: %v", err)
+	}
+}
 
 func TestVectorTrainingIndexesPromoteFromFlat(t *testing.T) {
 	for _, test := range []struct {

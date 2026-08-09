@@ -39,15 +39,15 @@ func TestIsAllowedIndexType(t *testing.T) {
 		{"HNSW3", "HNSW3", false},              // Not power of 2
 		{"HNSW7", "HNSW7", false},              // Not power of 2
 
-		// IVF variants (powers of 2 from 2 to 256)
-		{"IVF2", "IVF2", true},
-		{"IVF4", "IVF4", true},
-		{"IVF8", "IVF8", true},
-		{"IVF16", "IVF16", true},
-		{"IVF32", "IVF32", true},
-		{"IVF64", "IVF64", true},
-		{"IVF128", "IVF128", true},
-		{"IVF256", "IVF256", true},
+		// Standalone IVF is not a valid FAISS factory descriptor; it requires storage.
+		{"IVF2", "IVF2", false},
+		{"IVF4", "IVF4", false},
+		{"IVF8", "IVF8", false},
+		{"IVF16", "IVF16", false},
+		{"IVF32", "IVF32", false},
+		{"IVF64", "IVF64", false},
+		{"IVF128", "IVF128", false},
+		{"IVF256", "IVF256", false},
 		{"IVF without number", "IVF", false}, // IVF requires number suffix
 		{"IVF512", "IVF512", false},          // Out of range
 		{"IVF1", "IVF1", false},              // Out of range
@@ -103,6 +103,19 @@ func TestIsAllowedIndexType(t *testing.T) {
 				t.Errorf("isAllowedIndexType(%q) = %v, want %v", tt.indexType, result, tt.expected)
 			}
 		})
+	}
+}
+
+func TestSpaceManagerRejectsStandaloneIVFIndex(t *testing.T) {
+	sm := NewSpaceManager(t.TempDir())
+
+	if _, err := sm.CreateSpace("invalid_ivf", "vector", 8, "IVF128", "L2"); err == nil {
+		t.Fatal("CreateSpace with standalone IVF index succeeded, want an error")
+	} else if !strings.Contains(err.Error(), `use "IVF128,Flat"`) {
+		t.Fatalf("CreateSpace error = %q, want IVF128,Flat guidance", err)
+	}
+	if _, err := os.Stat(filepath.Join(sm.baseDir, "invalid_ivf")); !os.IsNotExist(err) {
+		t.Fatalf("invalid space directory was created, stat error = %v", err)
 	}
 }
 

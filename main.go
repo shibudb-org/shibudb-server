@@ -518,7 +518,7 @@ Space management
   create-space <name> [flags]     Create a space. Flags:
                                     --engine key-value|vector   (default: key-value)
                                     --dimension N               (required for vector spaces)
-                                    --index-type TYPE           (vector; e.g. Flat, HNSW32, IVF32, PQ8; default Flat)
+                                    --index-type TYPE           (vector; e.g. Flat, HNSW32, IVF32,Flat, PQ8; default Flat)
                                     --metric METRIC             (vector; L2, InnerProduct, L1, Linf, Lp,
                                                                  Canberra, BrayCurtis, JensenShannon; default L2)
                                     --enable-wal | --disable-wal (default: disabled)
