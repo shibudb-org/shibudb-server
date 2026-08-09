@@ -80,7 +80,7 @@ func runVectorEngineMultiClientInsertBenchmark(t *testing.T, enableWAL bool) {
 		seedCount        = 128
 	)
 
-	ve, err := NewVectorEngine(dataPath, indexPath, walPath, dimension, "Flat", faiss.MetricL2, enableWAL)
+	ve, err := NewVectorEngine(dataPath, indexPath, walPath, dimension, "HNSW32,Flat", faiss.MetricL2, enableWAL)
 	if err != nil {
 		t.Fatalf("Failed to create engine: %v", err)
 	}

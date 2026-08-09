@@ -29,7 +29,7 @@ import (
 // the WAL, and the in-memory indexes are rebuilt by scanning the segments on
 // open.
 //
-// Persistence uses the same segmented layout as the key-value and Flat/HNSW
+// Persistence uses the same segmented layout as the key-value and Flat
 // vector engines: writes land in the active (hot) segment, which is sealed and
 // rolled over to a fresh file once it exceeds SegmentRolloverBytes, and a
 // background worker compacts the oldest cold segments once the segment count
@@ -731,8 +731,19 @@ func (e *FlatMetaVectorEngine) removeFromIndexesLocked(id int64, norm map[string
 // coerceMetadata validates raw metadata against the declared specs and returns a
 // normalized map containing only declared fields (string -> string, numeric -> float64).
 func (e *FlatMetaVectorEngine) coerceMetadata(raw map[string]any) (map[string]any, error) {
-	norm := make(map[string]any, len(e.specs))
-	for _, spec := range e.specs {
+	return coerceMetadata(e.specs, raw)
+}
+
+// ValidateMetadataValues verifies one metadata object against a Flat space's
+// declared indexed fields.
+func ValidateMetadataValues(specs []MetadataFieldSpec, raw map[string]any) error {
+	_, err := coerceMetadata(specs, raw)
+	return err
+}
+
+func coerceMetadata(specs []MetadataFieldSpec, raw map[string]any) (map[string]any, error) {
+	norm := make(map[string]any, len(specs))
+	for _, spec := range specs {
 		val, ok := raw[spec.Name]
 		if !ok || val == nil {
 			continue

@@ -133,8 +133,20 @@ func TestQueryEngine_FilterOnPlainVectorSpaceErrors(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("create: %v", err)
 	}
+	plainEngine, ok := sm.GetSpace(space)
+	if !ok {
+		t.Fatal("plain Flat space missing")
+	}
+	if _, ok := plainEngine.(*storage.FlatMetaVectorEngine); !ok {
+		t.Fatalf("plain Flat engine type = %T, want *storage.FlatMetaVectorEngine", plainEngine)
+	}
 	if _, err := qe.Execute(models.Query{
 		Type: models.TypeInsertVector, Space: space, Key: "1", Value: "0,0",
+	}); err != nil {
+		t.Fatalf("ordinary insert into in-house Flat: %v", err)
+	}
+	if _, err := qe.Execute(models.Query{
+		Type: models.TypeInsertVector, Space: space, Key: "2", Value: "0,0",
 		Metadata: map[string]any{"user_id": "alice"},
 	}); err == nil {
 		t.Fatalf("expected error inserting metadata into a plain vector space")

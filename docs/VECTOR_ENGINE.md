@@ -18,7 +18,7 @@
 
 ## Overview
 
-The Vector Engine in ShibuDb provides high-performance similarity search capabilities powered by FAISS (Facebook AI Similarity Search). It enables efficient storage and retrieval of high-dimensional vectors for applications like recommendation systems, image search, natural language processing, and machine learning.
+The Vector Engine in ShibuDb provides exact in-house Flat search and FAISS-backed approximate/trained indexes. It enables efficient storage and retrieval of high-dimensional vectors for applications like recommendation systems, image search, natural language processing, and machine learning.
 
 ### Key Features
 
@@ -36,7 +36,7 @@ The Vector Engine in ShibuDb provides high-performance similarity search capabil
 ┌─────────────────────────────────────┐
 │           Vector Space              │
 ├─────────────────────────────────────┤
-│  FAISS Index (similarity search)    │
+│  In-house Flat or FAISS Index       │
 ├─────────────────────────────────────┤
 │  In-Memory Buffer (batch ops)       │
 ├─────────────────────────────────────┤
@@ -89,7 +89,7 @@ CREATE-SPACE fast_embeddings --engine vector --dimension 128 --disable-wal
 **Parameters:**
 - `--engine vector`: Specifies vector engine type
 - `--dimension N`: Vector dimension (required for vector spaces)
-- `--index-type TYPE`: FAISS index type (default: Flat)
+- `--index-type TYPE`: vector index type (default: Flat)
 - `--metric METRIC`: Distance metric (default: L2)
 - `--enable-wal`: Enable Write-Ahead Logging for enhanced durability (default: disabled for vector spaces)
 - `--disable-wal`: Disable Write-Ahead Logging for maximum performance (default for vector spaces)
@@ -131,13 +131,13 @@ SEARCH-TOPK 1.0,2.0,3.0,4.0,5.0,6.0,7.0,8.0 5  # Now works
 
 ### Supported Index Types
 
-ShibuDb supports various FAISS index types with hardcoded configurations and composite indices for different use cases.
+ShibuDb uses its in-house engine for `Flat` spaces and FAISS for HNSW, IVF, PQ, and composite indexes.
 
 #### Single Index Types
 
 | Index Type | Description | Use Case | Memory | Speed | Min Vectors Required | Delete |
 |------------|-------------|----------|--------|-------|---------------------|--------|
-| `Flat` | Exact search | Small datasets, high accuracy | High | Slow | 0 | Yes |
+| `Flat` | In-house exact search | Small datasets, high accuracy | High | Slow | 0 | Yes |
 | `HNSW{n}` | Hierarchical Navigable Small World | Fast similarity search | Medium | Fast | 0 | **No** |
 | `IVF{n}` | Inverted file index | Large datasets | Low | Medium | n | Yes |
 | `PQ{n}` | Product quantization | Very large datasets | Very Low | Fast | 256 | Yes |
@@ -238,6 +238,8 @@ CREATE-SPACE performance_vectors --engine vector --dimension 128 --index-type HN
 ### 1. Flat Index (Exact Search)
 
 **Best for**: Small datasets (< 1M vectors), high accuracy requirements
+
+Flat spaces use ShibuDb's in-house segmented exact-search engine.
 
 ```bash
 # Create flat index

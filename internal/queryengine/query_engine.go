@@ -328,7 +328,11 @@ func (qe *QueryEngine) Execute(query models.Query) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		if filterable, ok := eng.(storage.FilterableVectorEngine); ok {
+		if len(meta.IndexedMetadataFields) > 0 {
+			filterable, ok := eng.(storage.FilterableVectorEngine)
+			if !ok {
+				return "", errors.New("internal error: metadata-enabled engine is not FilterableVectorEngine")
+			}
 			err = filterable.InsertVectorWithMetadata(id, vector, query.Metadata)
 		} else if len(query.Metadata) > 0 {
 			return "", errors.New("metadata is only supported for Flat spaces declared with indexed metadata fields")
@@ -392,6 +396,9 @@ func (qe *QueryEngine) Execute(query models.Query) (string, error) {
 		var ids []int64
 		var dists []float32
 		if query.Filter != nil {
+			if len(meta.IndexedMetadataFields) == 0 {
+				return "", errors.New("metadata filtering is only supported for Flat spaces declared with indexed metadata fields")
+			}
 			filterable, ok := eng.(storage.FilterableVectorEngine)
 			if !ok {
 				return "", errors.New("metadata filtering is only supported for Flat spaces declared with indexed metadata fields")
@@ -434,6 +441,9 @@ func (qe *QueryEngine) Execute(query models.Query) (string, error) {
 		var ids []int64
 		var dists []float32
 		if query.Filter != nil {
+			if len(meta.IndexedMetadataFields) == 0 {
+				return "", errors.New("metadata filtering is only supported for Flat spaces declared with indexed metadata fields")
+			}
 			filterable, ok := eng.(storage.FilterableVectorEngine)
 			if !ok {
 				return "", errors.New("metadata filtering is only supported for Flat spaces declared with indexed metadata fields")

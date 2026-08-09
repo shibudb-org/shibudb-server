@@ -162,7 +162,7 @@ shibudb manager --username admin --password admin decrease 200
 shibudb manager --username admin --password admin health
 
 # Update space storage settings (admin-only)
-# NOTE: Segment settings apply to Flat/HNSW segmented storage; training indexes (IVF/PQ) ignore/reject these settings.
+# NOTE: Segment settings apply to key-value and in-house Flat vector storage; FAISS vector indexes ignore/reject them.
 shibudb manager --username admin --password admin update-space-settings \
   --segment-rollover-bytes 52428800 \
   --max-segments-before-merge 20 \

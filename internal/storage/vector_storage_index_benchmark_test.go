@@ -2,6 +2,7 @@ package storage
 
 import (
 	"testing"
+	"time"
 
 	"github.com/DataIntelligenceCrew/go-faiss"
 )
@@ -10,35 +11,29 @@ import (
 // supported index types. They cover the two hot-path operations: insert and
 // top-k search.
 //
-// A very large segment-rollover threshold is used so the whole dataset stays in
-// a single hot segment for the duration of the benchmark; this keeps results
-// deterministic (no background segment sealing / index rebuilds mid-run). The
-// hot segment uses the configured index for Flat/HNSW, while training indexes
-// (IVF/PQ) ingest through a Flat IDMap hot segment, so their hot-path numbers
-// reflect that behavior.
+// Training indexes (IVF/PQ) begin on the internal Flat fallback and promote
+// once enough vectors have been persisted.
 
 const (
-	benchVecDim        = 64
-	benchVecDataset    = 10000
-	benchVecK          = 10
-	benchVecPool       = 4096
-	benchVecNoRollover = int64(1) << 40 // effectively disables segment rollover
+	benchVecDim     = 64
+	benchVecDataset = 10000
+	benchVecK       = 10
+	benchVecPool    = 4096
 )
 
-var benchVectorIndexTypes = []string{"Flat", "HNSW32", "HNSW64", "IVF32", "PQ8"}
+var benchVectorIndexTypes = []string{"HNSW32", "HNSW64", "IVF32", "PQ8"}
 
 func newBenchVectorEngine(b *testing.B, indexType string) *VectorEngineImpl {
 	b.Helper()
 	dir := b.TempDir()
-	e, err := NewVectorEngineWithSettings(
+	e, err := NewVectorEngine(
 		dir+"/vec_data.db",
 		dir+"/vec_index.faiss",
 		dir+"/vec_wal.db",
 		benchVecDim, indexType, faiss.MetricL2, false,
-		SpaceSettings{SegmentRolloverBytes: benchVecNoRollover},
 	)
 	if err != nil {
-		b.Fatalf("NewVectorEngineWithSettings(%s): %v", indexType, err)
+		b.Fatalf("NewVectorEngine(%s): %v", indexType, err)
 	}
 	b.Cleanup(func() { _ = e.Close() })
 	return e
@@ -81,6 +76,21 @@ func seedBenchVectorEngine(b *testing.B, indexType string) (*VectorEngineImpl, [
 		}
 	}
 	e.flushData(true)
+	if requiredTrainCountForIndex(indexType) > 0 {
+		deadline := time.Now().Add(30 * time.Second)
+		for {
+			e.lock.RLock()
+			trained := e.indexMeta.Mode == VectorIndexModeTrained
+			e.lock.RUnlock()
+			if trained {
+				break
+			}
+			if time.Now().After(deadline) {
+				b.Fatalf("%s did not promote to its trained index", indexType)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
 	return e, queries
 }
 

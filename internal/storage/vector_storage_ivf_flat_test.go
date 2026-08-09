@@ -339,28 +339,16 @@ func TestVectorEngineImpl_InsertAndSearch_IVF32Flat(t *testing.T) {
 	})
 }
 
-// Training-based indexes (IVF, PQ, …) must not use hot-segment rollover: a single
-// data file and in-memory index rebuilt on open.
-func TestVectorEngineTrainingIndex_NoSegmentRollover(t *testing.T) {
-	dataPath := filepath.Join("testdata", "vector_data_ivf_noseg.db")
-	indexPath := filepath.Join("testdata", "vector_index_ivf_noseg.faiss")
-	walPath := filepath.Join("testdata", "vector_wal_ivf_noseg.db")
-	os.MkdirAll("testdata", 0755)
-	for _, p := range []string{dataPath, indexPath, walPath} {
-		os.Remove(p)
-	}
-	t.Cleanup(func() {
-		for _, p := range []string{dataPath, indexPath, walPath} {
-			os.Remove(p)
-		}
-	})
+// Training-based indexes use one data file and one active FAISS index.
+func TestVectorEngineTrainingIndexSingleFile(t *testing.T) {
+	dir := t.TempDir()
+	dataPath := filepath.Join(dir, "vector_data.db")
+	indexPath := filepath.Join(dir, "vector_index.faiss")
+	walPath := filepath.Join(dir, "vector_wal.db")
 
-	ve, err := NewVectorEngineWithSettings(dataPath, indexPath, walPath, 4, "IVF32,Flat", faiss.MetricL2, true, SpaceSettings{
-		SegmentRolloverBytes:   256,
-		MaxSegmentsBeforeMerge: 2,
-	})
+	ve, err := NewVectorEngine(dataPath, indexPath, walPath, 4, "IVF32,Flat", faiss.MetricL2, true)
 	if err != nil {
-		t.Fatalf("NewVectorEngineWithSettings: %v", err)
+		t.Fatalf("NewVectorEngine: %v", err)
 	}
 	defer ve.Close()
 
@@ -372,10 +360,7 @@ func TestVectorEngineTrainingIndex_NoSegmentRollover(t *testing.T) {
 	}
 	ve.MaintenanceFlush()
 
-	if len(ve.manifest.Segments) != 1 {
-		t.Fatalf("expected single vector segment for IVF, got %d segments", len(ve.manifest.Segments))
-	}
-	if ve.vectorSegmentationEnabled {
-		t.Fatal("IVF index must disable vector segmentation (vectorSegmentationEnabled=false)")
+	if ve.dataFile == nil || ve.index == nil {
+		t.Fatal("expected initialized single-file IVF state")
 	}
 }

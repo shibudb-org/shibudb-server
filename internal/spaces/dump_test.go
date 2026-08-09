@@ -126,8 +126,8 @@ func TestDumpRestoreKV(t *testing.T) {
 	}
 }
 
-// TestDumpRestoreVector tests a full round-trip for a vector space.
-func TestDumpRestoreVector(t *testing.T) {
+// TestDumpRestoreFAISSVector tests a full round-trip for a non-Flat vector space.
+func TestDumpRestoreFAISSVector(t *testing.T) {
 	baseDir := t.TempDir()
 
 	spaceName := "test_vec"
@@ -141,7 +141,7 @@ func TestDumpRestoreVector(t *testing.T) {
 		LayoutVersion: currentSpaceLayoutVersion,
 		Name:          spaceName,
 		EngineType:    "vector",
-		IndexType:     "Flat",
+		IndexType:     "HNSW8,Flat",
 		Metric:        "L2",
 		Dimension:     dimension,
 	}
@@ -206,6 +206,177 @@ func TestDumpRestoreVector(t *testing.T) {
 	assertFloat32SliceEqual(t, existingVecs[3], vec3, "vector 3")
 	if _, ok := existingVecs[1]; ok {
 		t.Error("vector 1 should not exist in restored data (was deleted)")
+	}
+}
+
+func TestDumpRestoreInHouseFlatWithoutMetadata(t *testing.T) {
+	baseDir := t.TempDir()
+	sm := NewSpaceManager(baseDir)
+	engine, err := sm.CreateSpace("flat_inhouse", "vector", 3, "Flat", "L2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.(storage.VectorEngine).InsertVector(11, []float32{1, 2, 3}); err != nil {
+		t.Fatal(err)
+	}
+	sm.CloseAll()
+
+	var dump bytes.Buffer
+	stats, err := DumpAll(baseDir, &dump, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.VectorRecords != 1 {
+		t.Fatalf("dumped vectors = %d, want 1", stats.VectorRecords)
+	}
+
+	restoreDir := t.TempDir()
+	if _, err := RestoreAll(restoreDir, bytes.NewReader(dump.Bytes()), "overwrite"); err != nil {
+		t.Fatal(err)
+	}
+	restored := NewSpaceManager(restoreDir)
+	defer restored.CloseAll()
+	restoredEngine, ok := restored.GetSpace("flat_inhouse")
+	if !ok {
+		t.Fatal("restored Flat space missing")
+	}
+	if _, ok := restoredEngine.(*storage.FlatMetaVectorEngine); !ok {
+		t.Fatalf("restored engine type = %T, want *storage.FlatMetaVectorEngine", restoredEngine)
+	}
+	vector, err := restoredEngine.(storage.VectorEngine).GetVectorByID(11)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertFloat32SliceEqual(t, vector, []float32{1, 2, 3}, "restored in-house Flat vector")
+}
+
+func TestRestoreMergeInHouseFlatFailsClosedOnCorruptData(t *testing.T) {
+	baseDir := t.TempDir()
+	spacePath := filepath.Join(baseDir, "flat_corrupt")
+	if err := os.MkdirAll(spacePath, 0755); err != nil {
+		t.Fatal(err)
+	}
+	meta := normalizeSpaceMeta(spaceMeta{
+		Name:       "flat_corrupt",
+		EngineType: "vector",
+		Dimension:  3,
+		IndexType:  "Flat",
+		Metric:     "L2",
+	})
+	metaBytes, err := json.Marshal(meta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(spacePath, spaceMetaFileName), metaBytes, 0644); err != nil {
+		t.Fatal(err)
+	}
+	dataPath := filepath.Join(spacePath, "flat_meta_data.db")
+	corrupt := []byte{1, 2, 3, 4, 5}
+	if err := os.WriteFile(dataPath, corrupt, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, err := restoreSpace(baseDir, meta, nil, []DumpVectorRecord{{
+		ID: 2, Vector: []float32{1, 2, 3},
+	}}, "merge"); err == nil {
+		t.Fatal("expected corrupt existing in-house Flat data to abort merge")
+	}
+	got, err := os.ReadFile(dataPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, corrupt) {
+		t.Fatalf("corrupt source was modified after failed merge: %v", got)
+	}
+}
+
+func TestRestoreRejectsMetadataFieldsForNonFlatVector(t *testing.T) {
+	meta := spaceMeta{
+		Name:       "invalid_metadata",
+		EngineType: "vector",
+		Dimension:  3,
+		IndexType:  "HNSW8,Flat",
+		Metric:     "L2",
+		IndexedMetadataFields: []storage.MetadataFieldSpec{
+			{Name: "tenant", Type: storage.MetadataTypeString},
+		},
+	}
+	if _, _, err := restoreSpace(t.TempDir(), meta, nil, nil, "overwrite"); err == nil {
+		t.Fatal("expected non-Flat vector metadata schema to be rejected")
+	}
+}
+
+func TestRestoreFlatMetaRejectsInvalidMetadataBeforeOverwrite(t *testing.T) {
+	dir := t.TempDir()
+	dataPath := filepath.Join(dir, "flat_meta_data.db")
+	sentinel := []byte("existing")
+	if err := os.WriteFile(dataPath, sentinel, 0644); err != nil {
+		t.Fatal(err)
+	}
+	raw := json.RawMessage(`{"age":"not-an-integer"}`)
+	meta := spaceMeta{
+		Name:       "invalid_record_metadata",
+		EngineType: "vector",
+		Dimension:  3,
+		IndexType:  "Flat",
+		Metric:     "L2",
+		IndexedMetadataFields: []storage.MetadataFieldSpec{
+			{Name: "age", Type: storage.MetadataTypeInt},
+		},
+	}
+	if _, err := restoreFlatMetaVectorData(dir, meta, []DumpVectorRecord{{
+		ID: 1, Vector: []float32{1, 2, 3}, Metadata: &raw,
+	}}, "overwrite"); err == nil {
+		t.Fatal("expected invalid Flat metadata value to be rejected")
+	}
+	got, err := os.ReadFile(dataPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, sentinel) {
+		t.Fatalf("existing Flat data changed after validation failure: %q", got)
+	}
+}
+
+func TestCollectFlatMetaDataPathsRejectsInvalidManifest(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		manifest string
+	}{
+		{name: "malformed", manifest: "{"},
+		{name: "missing segment", manifest: `{"segments":[{"data_file":"missing.db"}]}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "flat_meta_segments.manifest.json"), []byte(test.manifest), 0644); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := collectFlatMetaDataPaths(dir); err == nil {
+				t.Fatal("expected invalid flat-meta manifest to fail")
+			}
+		})
+	}
+}
+
+func TestCollectVectorDataPathsIgnoresLegacyManifest(t *testing.T) {
+	dir := t.TempDir()
+	dataPath := filepath.Join(dir, "vector_data.db")
+	if err := os.WriteFile(dataPath, []byte("current"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(dir, "vector_segments.manifest.json"),
+		[]byte(`{"segments":[{"data_file":"stale.db"}]}`),
+		0644,
+	); err != nil {
+		t.Fatal(err)
+	}
+	paths, err := collectVectorDataPaths(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(paths) != 1 || paths[0] != dataPath {
+		t.Fatalf("vector data paths = %v, want [%s]", paths, dataPath)
 	}
 }
 

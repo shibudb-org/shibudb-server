@@ -76,68 +76,12 @@ func TestRebuildKeyValueIndex(t *testing.T) {
 	}
 }
 
-func TestRebuildVectorIndexFlat(t *testing.T) {
+func TestRebuildVectorIndexRejectsBareFlat(t *testing.T) {
 	dir := t.TempDir()
 	dataPath := filepath.Join(dir, "vector_data.db")
 	indexPath := filepath.Join(dir, "vector_index.faiss")
-	walPath := filepath.Join(dir, "vector_wal.db")
-
-	vec1 := []float32{1, 0, 0, 0}
-	vec2 := []float32{0, 1, 0, 0}
-
-	ve, err := NewVectorEngine(dataPath, indexPath, walPath, 4, "Flat", faiss.MetricL2, true)
-	if err != nil {
-		t.Fatalf("NewVectorEngine failed: %v", err)
-	}
-	if err := ve.InsertVector(11, vec1); err != nil {
-		t.Fatalf("InsertVector 11 failed: %v", err)
-	}
-	if err := ve.InsertVector(22, vec2); err != nil {
-		t.Fatalf("InsertVector 22 failed: %v", err)
-	}
-	ve.flushData(true)
-	if err := ve.RemoveVector(22); err != nil {
-		t.Fatalf("RemoveVector 22 failed: %v", err)
-	}
-	if err := ve.Close(); err != nil {
-		t.Fatalf("Close failed: %v", err)
-	}
-
-	if err := os.WriteFile(indexPath, []byte("corrupt"), 0644); err != nil {
-		t.Fatalf("corrupt vector index write failed: %v", err)
-	}
-
-	stats, err := RebuildVectorIndex(dataPath, indexPath, 4, "Flat", faiss.MetricL2)
-	if err != nil {
-		t.Fatalf("RebuildVectorIndex failed: %v", err)
-	}
-	if stats.LiveVectors != 1 {
-		t.Fatalf("expected 1 live vector, got %d", stats.LiveVectors)
-	}
-	if stats.TombstonedIDs != 1 {
-		t.Fatalf("expected 1 tombstoned ID, got %d", stats.TombstonedIDs)
-	}
-
-	rebuilt, err := NewVectorEngine(dataPath, indexPath, walPath, 4, "Flat", faiss.MetricL2, true)
-	if err != nil {
-		t.Fatalf("reopen rebuilt vector engine failed: %v", err)
-	}
-	defer rebuilt.Close()
-
-	gotVec, err := rebuilt.GetVectorByID(11)
-	if err != nil {
-		t.Fatalf("GetVectorByID 11 failed: %v", err)
-	}
-	if len(gotVec) != len(vec1) {
-		t.Fatalf("expected vector length %d, got %d", len(vec1), len(gotVec))
-	}
-
-	ids, _, err := rebuilt.SearchTopK(vec1, 5)
-	if err != nil {
-		t.Fatalf("SearchTopK failed: %v", err)
-	}
-	if len(ids) == 0 || ids[0] != 11 {
-		t.Fatalf("expected top hit 11 after rebuild, got %v", ids)
+	if _, err := RebuildVectorIndex(dataPath, indexPath, 4, "Flat", faiss.MetricL2); err == nil {
+		t.Fatal("expected bare Flat rebuild to be rejected")
 	}
 }
 
@@ -211,7 +155,7 @@ func TestRebuildVectorIndexTrainingErrorClassification(t *testing.T) {
 	indexPath := filepath.Join(dir, "vector_index.faiss")
 	walPath := filepath.Join(dir, "vector_wal.db")
 
-	ve, err := NewVectorEngine(dataPath, indexPath, walPath, 8, "Flat", faiss.MetricL2, true)
+	ve, err := NewVectorEngine(dataPath, indexPath, walPath, 8, "HNSW8,Flat", faiss.MetricL2, true)
 	if err != nil {
 		t.Fatalf("NewVectorEngine failed: %v", err)
 	}
@@ -239,7 +183,7 @@ func TestRebuildVectorIndexNonTrainingErrorClassification(t *testing.T) {
 	indexPath := filepath.Join(dir, "vector_index.faiss")
 	walPath := filepath.Join(dir, "vector_wal.db")
 
-	ve, err := NewVectorEngine(dataPath, indexPath, walPath, 8, "Flat", faiss.MetricL2, true)
+	ve, err := NewVectorEngine(dataPath, indexPath, walPath, 8, "HNSW8,Flat", faiss.MetricL2, true)
 	if err != nil {
 		t.Fatalf("NewVectorEngine failed: %v", err)
 	}

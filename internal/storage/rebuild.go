@@ -115,6 +115,9 @@ func RebuildKeyValueIndex(dataPath, indexPath string, indexType string) (KeyValu
 // vector data file. The latest record wins; tombstones are excluded.
 func RebuildVectorIndex(dataPath, indexPath string, dimension int, indexDesc string, metric int) (VectorRebuildStats, error) {
 	stats := VectorRebuildStats{IndexPath: indexPath}
+	if normalizeVectorIndexDesc(indexDesc) == "Flat" {
+		return stats, errors.New(`bare "Flat" is handled by FlatMeta storage and has no FAISS index to rebuild`)
+	}
 	if dimension <= 0 {
 		return stats, fmt.Errorf("invalid vector dimension %d", dimension)
 	}
@@ -194,10 +197,11 @@ func RebuildVectorIndex(dataPath, indexPath string, dimension int, indexDesc str
 		)
 	}
 
-	index, err := faiss.IndexFactory(dimension, "IDMap,"+indexDesc, metric)
+	index, err := newVectorFaissIndex(dimension, indexDesc, metric)
 	if err != nil {
 		return stats, fmt.Errorf("create FAISS index: %w", err)
 	}
+	defer index.Delete()
 
 	if requiredTrainCount > 0 && stats.LiveVectors > 0 {
 		if err := index.Train(trainData); err != nil {
@@ -283,13 +287,21 @@ func writeFaissIndex(index faiss.Index, indexPath string) error {
 	if err := faiss.WriteIndex(index, tmpPath); err != nil {
 		return fmt.Errorf("write rebuilt FAISS index: %w", err)
 	}
-	if err := os.Remove(indexPath); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("remove old FAISS index: %w", err)
+	tmpFile, err := os.OpenFile(tmpPath, os.O_RDWR, 0)
+	if err != nil {
+		return fmt.Errorf("open temporary FAISS index: %w", err)
+	}
+	if err := tmpFile.Sync(); err != nil {
+		_ = tmpFile.Close()
+		return fmt.Errorf("sync temporary FAISS index: %w", err)
+	}
+	if err := tmpFile.Close(); err != nil {
+		return fmt.Errorf("close temporary FAISS index: %w", err)
 	}
 	if err := os.Rename(tmpPath, indexPath); err != nil {
 		return fmt.Errorf("install rebuilt FAISS index: %w", err)
 	}
-	return nil
+	return syncDir(filepath.Dir(indexPath))
 }
 
 func readVectorRecordAt(file *os.File, offset int64, dimension int) (int64, []float32, bool, error) {
@@ -312,20 +324,34 @@ func readVectorRecordAt(file *os.File, offset int64, dimension int) (int64, []fl
 }
 
 func requiredTrainCountForIndex(indexDesc string) int {
-	if indexDesc == "Flat" || strings.HasPrefix(indexDesc, "HNSW") {
-		return 0
-	}
-
-	nlist := 0
-	if strings.HasPrefix(indexDesc, "IVF") {
-		fmt.Sscanf(indexDesc, "IVF%d", &nlist)
-	}
-
-	required := nlist
-	if strings.Contains(indexDesc, "PQ") && required < 256 {
-		required = 256
+	required := 0
+	for _, component := range strings.Split(indexDesc, ",") {
+		component = strings.TrimSpace(component)
+		if strings.HasPrefix(component, "IVF") {
+			nlist := 0
+			_, _ = fmt.Sscanf(component, "IVF%d", &nlist)
+			if nlist > required {
+				required = nlist
+			}
+		}
+		if strings.HasPrefix(component, "PQ") && required < 256 {
+			required = 256
+		}
 	}
 	return required
+}
+
+func newVectorFaissIndex(dimension int, indexDesc string, metric int) (faiss.Index, error) {
+	factoryDesc := "IDMap," + indexDesc
+	// IVF indexes natively support caller-provided IDs. Wrapping them in
+	// IndexIDMap makes remove_ids translate IDs twice and can abort in FAISS.
+	if strings.HasPrefix(strings.TrimSpace(indexDesc), "IVF") {
+		factoryDesc = indexDesc
+		if !strings.Contains(factoryDesc, ",") {
+			factoryDesc += ",Flat"
+		}
+	}
+	return faiss.IndexFactory(dimension, factoryDesc, metric)
 }
 
 func trainingSampleCount(requiredTrainCount, totalVectors int) int {

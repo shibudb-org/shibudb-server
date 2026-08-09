@@ -22,7 +22,6 @@ func RebuildSpaceIndex(baseDir, space string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("read space metadata: %w", err)
 	}
-
 	spacePath := filepath.Join(baseDir, meta.Name)
 	switch meta.EngineType {
 	case "key-value":
@@ -37,6 +36,12 @@ func RebuildSpaceIndex(baseDir, space string) (string, error) {
 			meta.Name, indexPath, stats.RecordsScanned, stats.LiveKeys,
 		), nil
 	case "vector":
+		if meta.IndexType == "Flat" {
+			return fmt.Sprintf(
+				"Space %q uses the in-house Flat engine; its in-memory search structures are rebuilt automatically on open.",
+				meta.Name,
+			), nil
+		}
 		dataPath := filepath.Join(spacePath, "vector_data.db")
 		indexPath := filepath.Join(spacePath, "vector_index.faiss")
 		stats, err := storage.RebuildVectorIndex(dataPath, indexPath, meta.Dimension, meta.IndexType, getFAISSMetric(meta.Metric))

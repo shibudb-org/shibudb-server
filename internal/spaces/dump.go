@@ -108,7 +108,6 @@ func DumpAll(baseDir string, w io.Writer, spaceFilter string) (DumpStats, error)
 		if err != nil {
 			return stats, fmt.Errorf("read space %q metadata: %w", name, err)
 		}
-
 		// Emit space metadata.
 		if err := enc.Encode(DumpSpaceMeta{
 			RecordType: "space_meta",
@@ -127,7 +126,7 @@ func DumpAll(baseDir string, w io.Writer, spaceFilter string) (DumpStats, error)
 			}
 			stats.KVRecords += n
 		case "vector":
-			if meta.IndexType == "Flat" && len(meta.IndexedMetadataFields) > 0 {
+			if meta.IndexType == "Flat" {
 				n, err := dumpFlatMetaVectorSpace(enc, spacePath, meta)
 				if err != nil {
 					return stats, fmt.Errorf("dump flat-meta vector space %q: %w", name, err)
@@ -384,29 +383,8 @@ func dumpVectorSpace(enc *json.Encoder, spacePath string, meta spaceMeta) (int, 
 	return count, nil
 }
 
-// collectVectorDataPaths finds vector data files from the segment manifest.
+// collectVectorDataPaths returns the single FAISS vector data file.
 func collectVectorDataPaths(spacePath string) ([]string, error) {
-	manifestPath := filepath.Join(spacePath, "vector_segments.manifest.json")
-	if data, err := os.ReadFile(manifestPath); err == nil {
-		var manifest struct {
-			Segments []struct {
-				DataFile string `json:"data_file"`
-			} `json:"segments"`
-		}
-		if err := json.Unmarshal(data, &manifest); err == nil && len(manifest.Segments) > 0 {
-			var paths []string
-			for _, seg := range manifest.Segments {
-				p := filepath.Join(spacePath, seg.DataFile)
-				if _, err := os.Stat(p); err == nil {
-					paths = append(paths, p)
-				}
-			}
-			if len(paths) > 0 {
-				return paths, nil
-			}
-		}
-	}
-	// Fallback: single vector_data.db
 	singlePath := filepath.Join(spacePath, "vector_data.db")
 	if _, err := os.Stat(singlePath); err != nil {
 		if os.IsNotExist(err) {
@@ -508,18 +486,26 @@ func collectFlatMetaDataPaths(spacePath string) ([]string, error) {
 				DataFile string `json:"data_file"`
 			} `json:"segments"`
 		}
-		if err := json.Unmarshal(data, &manifest); err == nil && len(manifest.Segments) > 0 {
-			var paths []string
-			for _, seg := range manifest.Segments {
-				p := filepath.Join(spacePath, seg.DataFile)
-				if _, err := os.Stat(p); err == nil {
-					paths = append(paths, p)
-				}
-			}
-			if len(paths) > 0 {
-				return paths, nil
-			}
+		if err := json.Unmarshal(data, &manifest); err != nil {
+			return nil, fmt.Errorf("parse flat-meta segment manifest: %w", err)
 		}
+		if len(manifest.Segments) == 0 {
+			return nil, fmt.Errorf("flat-meta segment manifest has no segments")
+		}
+		paths := make([]string, 0, len(manifest.Segments))
+		for _, seg := range manifest.Segments {
+			if seg.DataFile == "" {
+				return nil, fmt.Errorf("flat-meta segment manifest contains an empty data file")
+			}
+			p := filepath.Join(spacePath, seg.DataFile)
+			if _, err := os.Stat(p); err != nil {
+				return nil, fmt.Errorf("stat flat-meta segment %q: %w", p, err)
+			}
+			paths = append(paths, p)
+		}
+		return paths, nil
+	} else if !os.IsNotExist(err) {
+		return nil, fmt.Errorf("read flat-meta segment manifest: %w", err)
 	}
 	// Fallback: single flat_meta_data.db
 	singlePath := filepath.Join(spacePath, "flat_meta_data.db")
@@ -547,10 +533,10 @@ func streamFlatMetaFile(path string, dim int, fn func(id int64, tombstone bool, 
 	header := make([]byte, 13)
 	for {
 		if _, err := io.ReadFull(file, header); err != nil {
-			if err == io.EOF || err == io.ErrUnexpectedEOF {
+			if err == io.EOF {
 				break
 			}
-			return err
+			return fmt.Errorf("read flat-meta record header: %w", err)
 		}
 		id := int64(binary.LittleEndian.Uint64(header[0:8]))
 		flag := header[8]
@@ -558,7 +544,7 @@ func streamFlatMetaFile(path string, dim int, fn func(id int64, tombstone bool, 
 
 		metaBuf := make([]byte, metaLen)
 		if _, err := io.ReadFull(file, metaBuf); err != nil {
-			break
+			return fmt.Errorf("read flat-meta metadata: %w", err)
 		}
 
 		if flag == flatMetaFlagTombstone {
@@ -570,7 +556,7 @@ func streamFlatMetaFile(path string, dim int, fn func(id int64, tombstone bool, 
 
 		vecBuf := make([]byte, 4*dim)
 		if _, err := io.ReadFull(file, vecBuf); err != nil {
-			break
+			return fmt.Errorf("read flat-meta vector: %w", err)
 		}
 		vec := make([]float32, dim)
 		for i := 0; i < dim; i++ {

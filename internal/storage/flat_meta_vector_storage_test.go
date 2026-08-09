@@ -594,31 +594,24 @@ func TestFlatMetaFAISSParity(t *testing.T) {
 
 	for name, metric := range metrics {
 		t.Run(name, func(t *testing.T) {
-			dir := t.TempDir()
-			faissEng, err := NewVectorEngine(
-				filepath.Join(dir, "v.db"), filepath.Join(dir, "v.faiss"), filepath.Join(dir, "v.wal"),
-				dim, "Flat", metric, false,
-			)
+			faissIndex, err := newVectorFaissIndex(dim, "Flat", metric)
 			if err != nil {
 				t.Skipf("FAISS Flat unsupported for metric %s: %v", name, err)
 			}
-			defer faissEng.Close()
+			defer faissIndex.Delete()
 
 			metaEng := newTestFlatMetaEngine(t, dim, metric, nil, false)
 
 			for i, vec := range vectors {
 				id := int64(i + 1)
-				if err := faissEng.InsertVector(id, vec); err != nil {
+				if err := faissIndex.AddWithIDs(vec, []int64{id}); err != nil {
 					t.Fatalf("faiss insert: %v", err)
 				}
 				if err := metaEng.InsertVector(id, vec); err != nil {
 					t.Fatalf("meta insert: %v", err)
 				}
 			}
-			// FAISS only returns vectors whose data has been flushed to disk.
-			time.Sleep(800 * time.Millisecond)
-
-			faissIDs, faissDists, err := faissEng.SearchTopK(query, n)
+			faissDists, faissIDs, err := faissIndex.Search(query, int64(n))
 			if err != nil {
 				t.Fatalf("faiss search: %v", err)
 			}

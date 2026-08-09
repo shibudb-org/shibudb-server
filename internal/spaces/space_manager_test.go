@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -72,7 +73,7 @@ func TestIsAllowedIndexType(t *testing.T) {
 		// Composite indices
 		{"IVF32,Flat", "IVF32,Flat", true},
 		{"HNSW64,Flat", "HNSW64,Flat", true},
-		{"PQ8,Flat", "PQ8,Flat", true},
+		{"PQ8,Flat", "PQ8,Flat", false},
 		{"IVF64,PQ16", "IVF64,PQ16", true},
 		{"HNSW128,PQ32", "HNSW128,PQ32", true},
 
@@ -498,7 +499,7 @@ func TestSpaceManager_DeleteSpacePersistsAcrossRestart(t *testing.T) {
 	}
 }
 
-func TestSpaceManager_VectorTrainingIndexClearsSegmentSettings(t *testing.T) {
+func TestSpaceManager_VectorNonFlatIndexClearsSegmentSettings(t *testing.T) {
 	dir := t.TempDir()
 	sm := NewSpaceManager(dir)
 	defer sm.CloseAll()
@@ -517,9 +518,23 @@ func TestSpaceManager_VectorTrainingIndexClearsSegmentSettings(t *testing.T) {
 		t.Fatalf("IVF space should persist zero segment settings, got rollover=%d merge=%d",
 			meta.SegmentRolloverBytes, meta.MaxSegmentsBeforeMerge)
 	}
+	if _, err := sm.CreateSpaceWithSettings("hnsw_single", "vector", 8, "HNSW8,Flat", "L2", true, storage.SpaceSettings{
+		SegmentRolloverBytes:   99,
+		MaxSegmentsBeforeMerge: 3,
+	}); err != nil {
+		t.Fatalf("CreateSpaceWithSettings HNSW: %v", err)
+	}
+	hnswMeta, ok := sm.SpaceMeta("hnsw_single")
+	if !ok {
+		t.Fatal("HNSW SpaceMeta missing")
+	}
+	if hnswMeta.SegmentRolloverBytes != 0 || hnswMeta.MaxSegmentsBeforeMerge != 0 {
+		t.Fatalf("HNSW space should persist zero segment settings, got rollover=%d merge=%d",
+			hnswMeta.SegmentRolloverBytes, hnswMeta.MaxSegmentsBeforeMerge)
+	}
 }
 
-func TestSpaceManager_UpdateSpaceSettingsRejectsSegmentForTrainingVector(t *testing.T) {
+func TestSpaceManager_UpdateSpaceSettingsRejectsSegmentForNonFlatVector(t *testing.T) {
 	dir := t.TempDir()
 	sm := NewSpaceManager(dir)
 	defer sm.CloseAll()
@@ -534,6 +549,14 @@ func TestSpaceManager_UpdateSpaceSettingsRejectsSegmentForTrainingVector(t *test
 	}
 	if err := sm.UpdateSpaceSettings("ivf_upd", storage.SpaceSettings{}); err != nil {
 		t.Fatalf("no-op update: %v", err)
+	}
+	if _, err := sm.CreateSpaceWithSettings("hnsw_upd", "vector", 8, "HNSW8,Flat", "L2", true, storage.SpaceSettings{}); err != nil {
+		t.Fatalf("CreateSpaceWithSettings HNSW: %v", err)
+	}
+	if err := sm.UpdateSpaceSettings("hnsw_upd", storage.SpaceSettings{
+		SegmentRolloverBytes: 1024,
+	}); err == nil {
+		t.Fatal("expected error when updating segment settings for HNSW space")
 	}
 }
 
@@ -555,5 +578,80 @@ func TestSpaceManager_VectorFlatKeepsSegmentSettings(t *testing.T) {
 	if meta.SegmentRolloverBytes != 2048 || meta.MaxSegmentsBeforeMerge != 9 {
 		t.Fatalf("Flat space should keep segment settings, got rollover=%d merge=%d",
 			meta.SegmentRolloverBytes, meta.MaxSegmentsBeforeMerge)
+	}
+}
+
+func TestSpaceManager_NewFlatUsesInHouseStorageAndRestarts(t *testing.T) {
+	dir := t.TempDir()
+	sm := NewSpaceManager(dir)
+
+	engine, err := sm.CreateSpaceWithWAL("flat_new", "vector", 3, "Flat", "L2", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := engine.(*storage.FlatMetaVectorEngine); !ok {
+		t.Fatalf("new Flat engine type = %T, want *storage.FlatMetaVectorEngine", engine)
+	}
+	vectorEngine := engine.(storage.VectorEngine)
+	if err := vectorEngine.InsertVector(7, []float32{1, 2, 3}); err != nil {
+		t.Fatal(err)
+	}
+	sm.CloseAll()
+
+	reopened := NewSpaceManager(dir)
+	defer reopened.CloseAll()
+	engine, ok := reopened.GetSpace("flat_new")
+	if !ok {
+		t.Fatal("restarted Flat space missing")
+	}
+	if _, ok := engine.(*storage.FlatMetaVectorEngine); !ok {
+		t.Fatalf("restarted Flat engine type = %T, want *storage.FlatMetaVectorEngine", engine)
+	}
+	vector, err := engine.(storage.VectorEngine).GetVectorByID(7)
+	if err != nil {
+		t.Fatalf("restarted Flat vector missing: %v", err)
+	}
+	if !reflect.DeepEqual(vector, []float32{1, 2, 3}) {
+		t.Fatalf("restarted vector = %v", vector)
+	}
+}
+
+func TestSpaceManager_RejectsLegacyFAISSFlatData(t *testing.T) {
+	sm := NewSpaceManager(t.TempDir())
+	spacePath := filepath.Join(sm.baseDir, "legacy_flat")
+	if err := os.MkdirAll(spacePath, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(spacePath, "vector_data.db"), []byte("legacy"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(spacePath, "flat_meta_data.db"), nil, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sm.openSpaceEngine(spaceMeta{
+		Name:       "legacy_flat",
+		EngineType: "vector",
+		Dimension:  3,
+		IndexType:  "Flat",
+		Metric:     "L2",
+	}); err == nil {
+		t.Fatal("expected legacy FAISS Flat data to be rejected")
+	}
+}
+
+func TestRebuildSpaceIndexInHouseFlatIsNoOp(t *testing.T) {
+	dir := t.TempDir()
+	sm := NewSpaceManager(dir)
+	if _, err := sm.CreateSpace("flat_rebuild", "vector", 3, "Flat", "L2"); err != nil {
+		t.Fatal(err)
+	}
+	sm.CloseAll()
+
+	message, err := RebuildSpaceIndex(dir, "flat_rebuild")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(message, "in-house Flat engine") {
+		t.Fatalf("unexpected rebuild message: %q", message)
 	}
 }

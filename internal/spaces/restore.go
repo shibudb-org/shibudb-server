@@ -8,8 +8,11 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
+
+	"github.com/shibudb.org/shibudb-server/internal/storage"
 )
 
 // RestoreStats tracks progress counters for restore.
@@ -127,7 +130,43 @@ func RestoreAll(baseDir string, r io.Reader, mode string) (RestoreStats, error) 
 
 // restoreSpace recreates a single space from dump data.
 func restoreSpace(baseDir string, meta spaceMeta, kvData map[string]string, vecData []DumpVectorRecord, mode string) (int, int, error) {
+	meta = normalizeSpaceMeta(meta)
+	if meta.EngineType == "vector" {
+		if meta.Dimension <= 0 {
+			return 0, 0, fmt.Errorf("invalid vector dimension %d", meta.Dimension)
+		}
+		if !isAllowedIndexType(meta.IndexType) {
+			return 0, 0, fmt.Errorf("index type %q is not allowed", meta.IndexType)
+		}
+		if !isAllowedMetric(meta.Metric) {
+			return 0, 0, fmt.Errorf("metric %q is not allowed", meta.Metric)
+		}
+		if len(meta.IndexedMetadataFields) > 0 {
+			if meta.IndexType != "Flat" {
+				return 0, 0, fmt.Errorf("indexed metadata fields are only supported for Flat spaces")
+			}
+			if err := storage.ValidateFieldSpecs(meta.IndexedMetadataFields); err != nil {
+				return 0, 0, err
+			}
+		}
+	}
 	spacePath := filepath.Join(baseDir, meta.Name)
+	metaPath := filepath.Join(spacePath, spaceMetaFileName)
+
+	if mode == "merge" {
+		if _, err := os.Stat(metaPath); err == nil {
+			sm := &SpaceManager{}
+			existing, err := sm.readSpaceMetaFile(metaPath)
+			if err != nil {
+				return 0, 0, fmt.Errorf("read existing space metadata: %w", err)
+			}
+			if err := validateMergeSpaceCompatibility(existing, meta); err != nil {
+				return 0, 0, err
+			}
+		} else if !os.IsNotExist(err) {
+			return 0, 0, err
+		}
+	}
 
 	if mode == "overwrite" {
 		// Remove existing space directory if present.
@@ -143,12 +182,11 @@ func restoreSpace(baseDir string, meta spaceMeta, kvData map[string]string, vecD
 	}
 
 	// Write space metadata file.
-	metaData, err := json.MarshalIndent(normalizeSpaceMeta(meta), "", "  ")
+	metaData, err := json.MarshalIndent(meta, "", "  ")
 	if err != nil {
 		return 0, 0, fmt.Errorf("marshal space meta: %w", err)
 	}
 	metaData = append(metaData, '\n')
-	metaPath := filepath.Join(spacePath, spaceMetaFileName)
 	if err := os.WriteFile(metaPath, metaData, 0644); err != nil {
 		return 0, 0, fmt.Errorf("write space meta: %w", err)
 	}
@@ -158,7 +196,7 @@ func restoreSpace(baseDir string, meta spaceMeta, kvData map[string]string, vecD
 		n, err := restoreKeyValueData(spacePath, meta, kvData, mode)
 		return n, 0, err
 	case "vector":
-		if meta.IndexType == "Flat" && len(meta.IndexedMetadataFields) > 0 {
+		if meta.IndexType == "Flat" {
 			n, err := restoreFlatMetaVectorData(spacePath, meta, vecData, mode)
 			return 0, n, err
 		}
@@ -167,6 +205,20 @@ func restoreSpace(baseDir string, meta spaceMeta, kvData map[string]string, vecD
 	default:
 		return 0, 0, fmt.Errorf("unknown engine type %q", meta.EngineType)
 	}
+}
+
+func validateMergeSpaceCompatibility(existing, incoming spaceMeta) error {
+	if existing.EngineType != incoming.EngineType ||
+		existing.IndexType != incoming.IndexType ||
+		existing.Dimension != incoming.Dimension ||
+		existing.Metric != incoming.Metric ||
+		!reflect.DeepEqual(existing.IndexedMetadataFields, incoming.IndexedMetadataFields) {
+		return fmt.Errorf(
+			"cannot merge space %q with incompatible engine, index, dimension, metric, or metadata schema; use overwrite instead",
+			incoming.Name,
+		)
+	}
+	return nil
 }
 
 // restoreKeyValueData writes KV data into the primary data file.
@@ -287,8 +339,8 @@ func restoreVectorData(spacePath string, meta spaceMeta, data []DumpVectorRecord
 
 	cleanupAuxFiles(spacePath, []string{
 		"vector_index.faiss",
+		"vector_index.faiss.meta.json",
 		"vector_wal.db",
-		"vector_segments.manifest.json",
 	})
 
 	return len(data), nil
@@ -298,6 +350,9 @@ func restoreVectorData(spacePath string, meta spaceMeta, data []DumpVectorRecord
 func restoreFlatMetaVectorData(spacePath string, meta spaceMeta, data []DumpVectorRecord, mode string) (int, error) {
 	dataPath := filepath.Join(spacePath, "flat_meta_data.db")
 	dimension := meta.Dimension
+	if err := validateFlatMetaRestoreRecords(data, meta); err != nil {
+		return 0, err
+	}
 
 	if mode == "merge" {
 		// Read existing live records.
@@ -306,16 +361,20 @@ func restoreFlatMetaVectorData(spacePath string, meta spaceMeta, data []DumpVect
 			metaJSON []byte
 		}
 		existing := make(map[int64]*existEntry)
-		if paths, err := collectFlatMetaDataPaths(spacePath); err == nil {
-			for _, path := range paths {
-				_ = streamFlatMetaFile(path, dimension, func(id int64, tombstone bool, vec []float32, metaBytes []byte) error {
-					if tombstone {
-						existing[id] = nil
-					} else {
-						existing[id] = &existEntry{vec: vec, metaJSON: metaBytes}
-					}
-					return nil
-				})
+		paths, err := collectFlatMetaDataPaths(spacePath)
+		if err != nil {
+			return 0, fmt.Errorf("collect existing in-house Flat data: %w", err)
+		}
+		for _, path := range paths {
+			if err := streamFlatMetaFile(path, dimension, func(id int64, tombstone bool, vec []float32, metaBytes []byte) error {
+				if tombstone {
+					existing[id] = nil
+				} else {
+					existing[id] = &existEntry{vec: vec, metaJSON: metaBytes}
+				}
+				return nil
+			}); err != nil {
+				return 0, fmt.Errorf("read existing in-house Flat data %q: %w", path, err)
 			}
 		}
 
@@ -342,6 +401,9 @@ func restoreFlatMetaVectorData(spacePath string, meta spaceMeta, data []DumpVect
 			}
 		}
 		sort.Slice(data, func(i, j int) bool { return data[i].ID < data[j].ID })
+	}
+	if err := validateFlatMetaRestoreRecords(data, meta); err != nil {
+		return 0, err
 	}
 
 	file, err := os.OpenFile(dataPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0666)
@@ -393,6 +455,31 @@ func restoreFlatMetaVectorData(spacePath string, meta spaceMeta, data []DumpVect
 	})
 
 	return len(data), nil
+}
+
+func validateFlatMetaRestoreRecords(data []DumpVectorRecord, meta spaceMeta) error {
+	for _, rec := range data {
+		if len(rec.Vector) != meta.Dimension {
+			return fmt.Errorf("flat-meta vector ID %d has dimension mismatch: expected %d, got %d", rec.ID, meta.Dimension, len(rec.Vector))
+		}
+		if rec.Metadata == nil {
+			continue
+		}
+		var raw map[string]any
+		if err := json.Unmarshal(*rec.Metadata, &raw); err != nil {
+			return fmt.Errorf("flat-meta vector ID %d metadata must be an object: %w", rec.ID, err)
+		}
+		if len(meta.IndexedMetadataFields) == 0 {
+			if len(raw) > 0 {
+				return fmt.Errorf("flat-meta vector ID %d supplies metadata without an indexed metadata schema", rec.ID)
+			}
+			continue
+		}
+		if err := storage.ValidateMetadataValues(meta.IndexedMetadataFields, raw); err != nil {
+			return fmt.Errorf("flat-meta vector ID %d metadata: %w", rec.ID, err)
+		}
+	}
+	return nil
 }
 
 // readExistingVectors scans a vector data file and populates live vectors into

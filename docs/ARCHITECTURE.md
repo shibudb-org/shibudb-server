@@ -119,9 +119,8 @@ The storage layer manages data persistence and retrieval.
 **Key Components:**
 - **Space Manager**: Manages data spaces (namespaces)
 - **Key-Value Storage**: Handles traditional key-value operations
-- **Vector Storage**: Manages vector data and similarity search. Includes a FAISS-backed engine
-  (Flat/HNSW/IVF/PQ) and a custom **filterable Flat engine** that stores per-vector metadata and
-  supports pre-filtered search.
+- **Vector Storage**: Manages vector data and similarity search. Flat spaces use the in-house
+  exact-search engine (with optional indexed metadata); HNSW/IVF/PQ and composites use FAISS.
 
 **Responsibilities:**
 - Organize data into logical spaces
@@ -136,7 +135,7 @@ The index layer provides fast data access patterns.
 
 **Key Components:**
 - **B-Tree Index**: Provides fast key-value lookups
-- **Vector Index (FAISS)**: Enables similarity search
+- **Vector Index**: In-house exact Flat search or FAISS approximate/trained search
 - **Metadata Index**: Tracks system metadata
 
 **Responsibilities:**
@@ -203,7 +202,7 @@ Client Request → Network Layer → Query Engine → Auth Check → Vector Inde
 2. **Network Layer**: Parses JSON and validates format
 3. **Query Engine**: Validates query semantics
 4. **Auth Check**: Verifies user permissions
-5. **Vector Index**: Uses FAISS for similarity search
+5. **Vector Index**: Uses the in-house Flat engine or FAISS, according to the index type
 6. **Similarity Search**: Finds similar vectors
 7. **Response**: Returns ranked results
 

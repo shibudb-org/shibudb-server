@@ -41,6 +41,10 @@ func isPowerOf2InRange(n int) bool {
 
 func isAllowedIndexType(indexType string) bool {
 	parts := strings.Split(indexType, ",")
+	if len(parts) > 2 {
+		return false
+	}
+	bases := make([]string, 0, len(parts))
 	for _, part := range parts {
 		part = strings.TrimSpace(part)
 		if part == "" {
@@ -87,6 +91,15 @@ func isAllowedIndexType(indexType string) bool {
 
 		// For Flat, no number suffix should be present
 		if base == "Flat" && num != -1 {
+			return false
+		}
+		bases = append(bases, base)
+	}
+	if len(bases) == 2 {
+		if bases[0] != "IVF" && bases[0] != "HNSW" {
+			return false
+		}
+		if bases[1] != "Flat" && bases[1] != "PQ" {
 			return false
 		}
 	}
@@ -399,6 +412,12 @@ func normalizeSpaceMeta(meta spaceMeta) spaceMeta {
 		if meta.IndexType == "" {
 			meta.IndexType = "Flat"
 		}
+		parts := strings.Split(meta.IndexType, ",")
+		for idx := range parts {
+			parts[idx] = strings.TrimSpace(parts[idx])
+		}
+		meta.IndexType = strings.Join(parts, ",")
+		meta.Metric = strings.TrimSpace(meta.Metric)
 	case "key-value":
 		meta.Dimension = 0
 		if meta.IndexType == "" {
@@ -408,10 +427,13 @@ func normalizeSpaceMeta(meta spaceMeta) spaceMeta {
 		meta.IndexedMetadataFields = nil
 	}
 	if meta.EngineType == "vector" {
-		settings := storage.NormalizeVectorSpaceSettings(meta.IndexType, storage.SpaceSettings{
-			SegmentRolloverBytes:   meta.SegmentRolloverBytes,
-			MaxSegmentsBeforeMerge: meta.MaxSegmentsBeforeMerge,
-		})
+		settings := storage.SpaceSettings{}
+		if meta.IndexType == "Flat" {
+			settings = storage.NormalizeSpaceSettings(storage.SpaceSettings{
+				SegmentRolloverBytes:   meta.SegmentRolloverBytes,
+				MaxSegmentsBeforeMerge: meta.MaxSegmentsBeforeMerge,
+			})
+		}
 		meta.SegmentRolloverBytes = settings.SegmentRolloverBytes
 		meta.MaxSegmentsBeforeMerge = settings.MaxSegmentsBeforeMerge
 	} else {
@@ -451,15 +473,25 @@ func (sm *SpaceManager) openSpaceEngine(meta spaceMeta) (interface{}, error) {
 		return storage.OpenDBWithPathsAndWALAndSettings(dataFile, walFile, indexFile, meta.EnableWAL, meta.IndexType, settings)
 	}
 	if meta.EngineType == "vector" {
-		if meta.IndexType == "Flat" && len(meta.IndexedMetadataFields) > 0 {
+		if meta.IndexType == "Flat" {
 			dataFile := filepath.Join(spacePath, "flat_meta_data.db")
+			for _, legacyPath := range []string{
+				filepath.Join(spacePath, "vector_data.db"),
+				filepath.Join(spacePath, "vector_segments.manifest.json"),
+			} {
+				if _, legacyErr := os.Stat(legacyPath); legacyErr == nil {
+					return nil, fmt.Errorf("legacy FAISS Flat data is not supported: %s", legacyPath)
+				} else if !os.IsNotExist(legacyErr) {
+					return nil, legacyErr
+				}
+			}
 			walFile := filepath.Join(spacePath, "flat_meta_wal.db")
 			return storage.NewFlatMetaVectorEngineWithSettings(dataFile, walFile, meta.Dimension, getFAISSMetric(meta.Metric), meta.IndexedMetadataFields, meta.EnableWAL, settings)
 		}
 		dataFile := filepath.Join(spacePath, "vector_data.db")
 		indexFile := filepath.Join(spacePath, "vector_index.faiss")
 		walFile := filepath.Join(spacePath, "vector_wal.db")
-		return storage.NewVectorEngineWithSettings(dataFile, indexFile, walFile, meta.Dimension, meta.IndexType, getFAISSMetric(meta.Metric), meta.EnableWAL, settings)
+		return storage.NewVectorEngine(dataFile, indexFile, walFile, meta.Dimension, meta.IndexType, getFAISSMetric(meta.Metric), meta.EnableWAL)
 	}
 	return nil, fmt.Errorf("unknown engine type: %s", meta.EngineType)
 }
@@ -518,7 +550,6 @@ func (sm *SpaceManager) CreateSpaceWithSettingsAndMetadata(space, engineType str
 		IndexedMetadataFields:  indexedMetadataFields,
 		LayoutVersion:          currentSpaceLayoutVersion,
 	})
-
 	if engineType == "vector" {
 		if !isAllowedIndexType(meta.IndexType) {
 			return nil, fmt.Errorf("index type '%s' is not allowed", meta.IndexType)
@@ -596,13 +627,13 @@ func (sm *SpaceManager) UpdateSpaceSettings(space string, settings storage.Space
 	}
 
 	var applied storage.SpaceSettings
-	if meta.EngineType == "vector" && !storage.VectorSegmentsEnabled(meta.IndexType) {
+	if meta.EngineType == "vector" && meta.IndexType != "Flat" {
 		if settings.SegmentRolloverBytes > 0 || settings.MaxSegmentsBeforeMerge > 0 {
-			return fmt.Errorf("segment settings do not apply to vector index type %q (only Flat and HNSW use segmented storage)", meta.IndexType)
+			return fmt.Errorf("segment settings do not apply to vector index type %q (only Flat uses segmented storage)", meta.IndexType)
 		}
 		meta.SegmentRolloverBytes = 0
 		meta.MaxSegmentsBeforeMerge = 0
-		applied = storage.NormalizeVectorSpaceSettings(meta.IndexType, storage.SpaceSettings{})
+		applied = storage.SpaceSettings{}
 	} else {
 		if settings.SegmentRolloverBytes > 0 {
 			meta.SegmentRolloverBytes = settings.SegmentRolloverBytes
@@ -618,7 +649,7 @@ func (sm *SpaceManager) UpdateSpaceSettings(space string, settings storage.Space
 		meta.MaxSegmentsBeforeMerge = applied.MaxSegmentsBeforeMerge
 	}
 
-	if engine, ok := sm.spaces[space]; ok {
+	if engine, ok := sm.spaces[space]; ok && (meta.EngineType == "key-value" || meta.IndexType == "Flat") {
 		applier, ok := engine.(storage.SpaceSettingsApplier)
 		if !ok {
 			return errors.New("space engine does not support live settings updates")

@@ -15,7 +15,7 @@ func TestVectorEngineCheckpointParallelLoad(t *testing.T) {
 	indexPath := dir + "/vector_index.faiss"
 	walPath := dir + "/vector_wal.db"
 
-	ve, err := NewVectorEngine(dataPath, indexPath, walPath, 16, "Flat", faiss.MetricL2, true)
+	ve, err := NewVectorEngine(dataPath, indexPath, walPath, 16, "HNSW16,Flat", faiss.MetricL2, true)
 	if err != nil {
 		t.Fatalf("Failed to create engine: %v", err)
 	}
@@ -123,7 +123,7 @@ func TestVectorEngineCheckpointParallelLoad(t *testing.T) {
 		t.Fatalf("final checkpoint failed: %v", err)
 	}
 
-	reopened, err := NewVectorEngine(dataPath, indexPath, walPath, 16, "Flat", faiss.MetricL2, true)
+	reopened, err := NewVectorEngine(dataPath, indexPath, walPath, 16, "HNSW16,Flat", faiss.MetricL2, true)
 	if err != nil {
 		t.Fatalf("failed to reopen engine: %v", err)
 	}
