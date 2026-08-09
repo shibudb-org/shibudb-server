@@ -9,6 +9,7 @@ import (
 	"sync"
 
 	"github.com/shibudb.org/shibudb-server/internal/auth"
+	"github.com/shibudb.org/shibudb-server/internal/logger"
 	"github.com/shibudb.org/shibudb-server/internal/spaces"
 	"github.com/shibudb.org/shibudb-server/internal/storage"
 )
@@ -47,6 +48,7 @@ func NewManagementServer(connManager *ConnectionManager, spaceManager *spaces.Sp
 	mux.HandleFunc("/limit/increase", ms.increaseLimitHandler)
 	mux.HandleFunc("/limit/decrease", ms.decreaseLimitHandler)
 	mux.HandleFunc("/spaces/settings", ms.spaceSettingsHandler)
+	mux.HandleFunc("/loglevel", ms.logLevelHandler)
 	mux.Handle("/debug/pprof/", authorized(pprof.Index))
 	mux.Handle("/debug/pprof/cmdline", authorized(pprof.Cmdline))
 	mux.Handle("/debug/pprof/profile", authorized(pprof.Profile))
@@ -63,7 +65,7 @@ func NewManagementServer(connManager *ConnectionManager, spaceManager *spaces.Sp
 
 // Start starts the management server
 func (ms *ManagementServer) Start() error {
-	fmt.Printf("Management server started on port %s\n", ms.port)
+	logger.Infof("management", "Management server started on port %s", ms.port)
 	return ms.server.ListenAndServe()
 }
 
@@ -315,6 +317,60 @@ func (ms *ManagementServer) spaceSettingsHandler(w http.ResponseWriter, r *http.
 		"max_segments_before_merge": meta.MaxSegmentsBeforeMerge,
 		"message":                   fmt.Sprintf("Updated space settings for %s", request.Space),
 	})
+}
+
+// logLevelHandler handles GET (current level) and PUT (update level) requests
+func (ms *ManagementServer) logLevelHandler(w http.ResponseWriter, r *http.Request) {
+	if !ms.authorizeRequest(w, r) {
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+
+	switch r.Method {
+	case http.MethodGet:
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"level": strings.ToLower(logger.GetLevel().String()),
+		})
+
+	case http.MethodPut:
+		var request struct {
+			Level string `json:"level"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			http.Error(w, "Invalid JSON", http.StatusBadRequest)
+			return
+		}
+
+		level, err := logger.ParseLevel(request.Level)
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"status": "failed",
+				"error":  err.Error(),
+			})
+			return
+		}
+
+		oldLevel := logger.GetLevel()
+		// Log before applying so the change is recorded under the level that
+		// was active when the admin issued it.
+		logger.Infof("management", "Log level changed from %s to %s", oldLevel, level)
+		logger.SetLevel(level)
+
+		if err := SaveLogLevel(ms.connManager.dataDir, level); err != nil {
+			logger.Warnf("management", "Failed to persist log level: %v", err)
+		}
+
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status":    "success",
+			"old_level": strings.ToLower(oldLevel.String()),
+			"new_level": strings.ToLower(level.String()),
+			"message":   fmt.Sprintf("Log level updated from %s to %s", oldLevel, level),
+		})
+
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
 }
 
 func (ms *ManagementServer) authorizeRequest(w http.ResponseWriter, r *http.Request) bool {

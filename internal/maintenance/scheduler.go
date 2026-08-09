@@ -2,11 +2,12 @@ package maintenance
 
 import (
 	"container/heap"
-	"log"
 	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/shibudb.org/shibudb-server/internal/logger"
 )
 
 // Job is a recurring maintenance operation registered with a Scheduler.
@@ -214,7 +215,7 @@ var (
 func Default() *Scheduler {
 	defaultOnce.Do(func() {
 		defaultSched = New()
-		log.Printf("[maintenance] scheduler started with %d workers", runtime.NumCPU())
+		logger.Infof("maintenance", "scheduler started with %d workers", runtime.NumCPU())
 	})
 	return defaultSched
 }

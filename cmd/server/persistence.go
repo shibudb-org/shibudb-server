@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/shibudb.org/shibudb-server/internal/logger"
 )
 
 // ConnectionConfig stores persistent connection settings
@@ -35,7 +37,7 @@ func SaveConnectionLimit(dataDir string, limit int32) error {
 		return fmt.Errorf("failed to write config file: %v", err)
 	}
 
-	fmt.Printf("Connection limit saved to: %s\n", cfgFile)
+	logger.Infof("server", "Connection limit saved to: %s", cfgFile)
 	return nil
 }
 
@@ -60,6 +62,55 @@ func LoadConnectionLimit(dataDir string) (int32, error) {
 	return config.MaxConnections, nil
 }
 
+// LogLevelConfig stores the persisted log level.
+type LogLevelConfig struct {
+	Level       string `json:"level"`
+	LastUpdated string `json:"last_updated"`
+}
+
+// SaveLogLevel persists the log level to disk under dataDir.
+func SaveLogLevel(dataDir string, level logger.Level) error {
+	if err := os.MkdirAll(dataDir, 0755); err != nil {
+		return fmt.Errorf("failed to create config directory: %v", err)
+	}
+
+	cfgFile := filepath.Join(dataDir, "log_level.json")
+	config := LogLevelConfig{
+		Level:       level.String(),
+		LastUpdated: fmt.Sprintf("%d", time.Now().Unix()),
+	}
+
+	data, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal log level config: %v", err)
+	}
+
+	if err := os.WriteFile(cfgFile, data, 0644); err != nil {
+		return fmt.Errorf("failed to write log level config: %v", err)
+	}
+	return nil
+}
+
+// LoadLogLevel loads the persisted log level from dataDir. If log_level.json
+// is missing, it returns an error for which os.IsNotExist(err) is true.
+func LoadLogLevel(dataDir string) (logger.Level, error) {
+	cfgFile := filepath.Join(dataDir, "log_level.json")
+	data, err := os.ReadFile(cfgFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return logger.LevelInfo, err
+		}
+		return logger.LevelInfo, fmt.Errorf("failed to read log level config: %v", err)
+	}
+
+	var config LogLevelConfig
+	if err := json.Unmarshal(data, &config); err != nil {
+		return logger.LevelInfo, fmt.Errorf("failed to parse log level config: %v", err)
+	}
+
+	return logger.ParseLevel(config.Level)
+}
+
 // GetPersistentLimit returns the limit to use, preferring the persisted value over defaultLimit.
 func GetPersistentLimit(dataDir string, defaultLimit int32) int32 {
 	persistedLimit, err := LoadConnectionLimit(dataDir)
@@ -67,13 +118,12 @@ func GetPersistentLimit(dataDir string, defaultLimit int32) int32 {
 		if os.IsNotExist(err) {
 			return defaultLimit
 		}
-		fmt.Printf("Warning: Failed to load persisted limit: %v\n", err)
-		fmt.Printf("Using default limit: %d\n", defaultLimit)
+		logger.Warnf("server", "Failed to load persisted limit: %v; using default limit: %d", err, defaultLimit)
 		return defaultLimit
 	}
 
 	if persistedLimit > 0 {
-		fmt.Printf("Loaded persisted connection limit: %d\n", persistedLimit)
+		logger.Infof("server", "Loaded persisted connection limit: %d", persistedLimit)
 		return persistedLimit
 	}
 

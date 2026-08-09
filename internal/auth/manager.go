@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sync"
 
+	"github.com/shibudb.org/shibudb-server/internal/logger"
 	"github.com/shibudb.org/shibudb-server/internal/models"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -176,7 +177,7 @@ func (a *AuthManager) HasRole(user models.User, space string, required string) b
 }
 
 func (a *AuthManager) CreateUser(username, password, role string, perms map[string]string) error {
-	fmt.Println("Creating user", username, role, perms)
+	logger.Infof("auth", "Creating user %s (role: %s, permissions: %v)", username, role, perms)
 	a.lock.Lock()
 	defer a.lock.Unlock()
 
@@ -200,7 +201,7 @@ func (a *AuthManager) CreateUser(username, password, role string, perms map[stri
 }
 
 func (a *AuthManager) UpdateUserPassword(username string, password string) error {
-	fmt.Println("Updating user password", username)
+	logger.Infof("auth", "Updating user password: %s", username)
 	a.lock.Lock()
 	defer a.lock.Unlock()
 
@@ -226,7 +227,7 @@ func (a *AuthManager) UpdateUserPassword(username string, password string) error
 }
 
 func (a *AuthManager) UpdateUserRole(username string, role string) error {
-	fmt.Println("Updating user role", username, role)
+	logger.Infof("auth", "Updating user role: %s -> %s", username, role)
 	a.lock.Lock()
 	defer a.lock.Unlock()
 
@@ -247,7 +248,7 @@ func (a *AuthManager) UpdateUserRole(username string, role string) error {
 }
 
 func (a *AuthManager) UpdateUserPermissions(username string, perms map[string]string) error {
-	fmt.Println("Updating user permissions", username)
+	logger.Infof("auth", "Updating user permissions: %s", username)
 	a.lock.Lock()
 	defer a.lock.Unlock()
 
@@ -268,7 +269,7 @@ func (a *AuthManager) UpdateUserPermissions(username string, perms map[string]st
 }
 
 func (a *AuthManager) DeleteUser(username string) error {
-	fmt.Println("Deleting user", username)
+	logger.Infof("auth", "Deleting user: %s", username)
 	a.lock.Lock()
 	defer a.lock.Unlock()
 

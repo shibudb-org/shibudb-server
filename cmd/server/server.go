@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/shibudb.org/shibudb-server/internal/auth"
+	"github.com/shibudb.org/shibudb-server/internal/logger"
 	"github.com/shibudb.org/shibudb-server/internal/models"
 	"github.com/shibudb.org/shibudb-server/internal/queryengine"
 	"github.com/shibudb.org/shibudb-server/internal/spaces"
@@ -94,11 +95,11 @@ func (cm *ConnectionManager) updateLimit(newLimit int32) {
 	// Replace old semaphore
 	cm.semaphore = newSemaphore
 
-	fmt.Printf("Connection limit updated: %d -> %d (active: %d)\n", oldLimit, newLimit, active)
+	logger.Infof("server", "Connection limit updated: %d -> %d (active: %d)", oldLimit, newLimit, active)
 
 	// Save the new limit persistently
 	if err := SaveConnectionLimit(cm.dataDir, newLimit); err != nil {
-		fmt.Printf("Warning: Failed to save connection limit: %v\n", err)
+		logger.Warnf("server", "Failed to save connection limit: %v", err)
 	}
 }
 
@@ -254,10 +255,25 @@ func StartServer(port string, authFilePath string, maxConnections int32, dataFol
 	if port == managementPort {
 		panic(fmt.Sprintf("client port and management port must differ (both are %s)", port))
 	}
+
+	// Start the buffered logging goroutine (flushes to stdout every 100ms;
+	// `shibudb start` redirects stdout to shibudb.log).
+	logger.Init(os.Stdout)
+	defer logger.Shutdown()
+
+	// Restore the persisted log level, if any. Log before applying so the
+	// message is visible even when the persisted level filters INFO.
+	if level, err := LoadLogLevel(dataFolderPath); err == nil {
+		logger.Infof("server", "Using persisted log level: %s", level)
+		logger.SetLevel(level)
+	} else if !os.IsNotExist(err) {
+		logger.Warnf("server", "Failed to load persisted log level: %v", err)
+	}
+
 	spaceRestoreStartedAt := time.Now()
-	fmt.Printf("Loading spaces and indexes from %s before opening network listeners...\n", dataFolderPath)
+	logger.Infof("server", "Loading spaces and indexes from %s before opening network listeners...", dataFolderPath)
 	spaceManager := spaces.NewSpaceManager(dataFolderPath)
-	fmt.Printf("Finished loading spaces in %s. Opening management and client listeners...\n", formatStartupDuration(time.Since(spaceRestoreStartedAt)))
+	logger.Infof("server", "Finished loading spaces in %s. Opening management and client listeners...", formatStartupDuration(time.Since(spaceRestoreStartedAt)))
 	defer spaceManager.CloseAll()
 
 	authManager, err := auth.NewAuthManager(authFilePath)
@@ -273,14 +289,14 @@ func StartServer(port string, authFilePath string, maxConnections int32, dataFol
 	persistentLimit := GetPersistentLimit(dataFolderPath, maxConnections)
 	actualLimit := maxConnections
 	if persistentLimit != maxConnections {
-		fmt.Printf("Using persisted connection limit: %d (instead of %d)\n", persistentLimit, maxConnections)
+		logger.Infof("server", "Using persisted connection limit: %d (instead of %d)", persistentLimit, maxConnections)
 		actualLimit = persistentLimit
 	}
 
 	// No connection_limit.json yet: persist the limit we are using (from CLI/default or from file above).
 	if _, loadErr := LoadConnectionLimit(dataFolderPath); loadErr != nil && os.IsNotExist(loadErr) {
 		if saveErr := SaveConnectionLimit(dataFolderPath, actualLimit); saveErr != nil {
-			fmt.Printf("Warning: Failed to save connection limit: %v\n", saveErr)
+			logger.Warnf("server", "Failed to save connection limit: %v", saveErr)
 		}
 	}
 
@@ -296,9 +312,9 @@ func StartServer(port string, authFilePath string, maxConnections int32, dataFol
 
 	managementServer := NewManagementServer(connManager, spaceManager, tokenManager, managementPort)
 	go func() {
-		fmt.Printf("Starting management server on port %s...\n", managementPort)
+		logger.Infof("management", "Starting management server on port %s...", managementPort)
 		if err := managementServer.Start(); err != nil {
-			fmt.Printf("Management server error: %v\n", err)
+			logger.Errorf("management", "Management server error: %v", err)
 		}
 	}()
 
@@ -311,26 +327,31 @@ func StartServer(port string, authFilePath string, maxConnections int32, dataFol
 	}
 	defer listener.Close()
 
+	// Flush buffered startup logs, then emit the readiness line directly to
+	// stdout (bypassing level filtering): `shibudb start` scans the log file
+	// for this exact line to detect that the server is ready, so it must be
+	// written regardless of the configured log level.
+	logger.Flush()
 	fmt.Printf("ShibuDB server started on port %s (max connections: %d)\n", port, actualLimit)
-	fmt.Printf("Management server started on port %s\n", managementPort)
-	fmt.Printf("Runtime limit updates: SIGUSR1 (increase by 100), SIGUSR2 (decrease by 100)\n")
-	fmt.Printf("HTTP management: GET/PUT http://localhost:%s/limit (Authorization: Bearer <token> required)\n", managementPort)
+
+	logger.Infof("server", "Runtime limit updates: SIGUSR1 (increase by 100), SIGUSR2 (decrease by 100)")
+	logger.Infof("server", "HTTP management: GET/PUT http://localhost:%s/limit (Authorization: Bearer <token> required)", managementPort)
 
 	// Show persistence status if different from default
 	if actualLimit != maxConnections {
-		fmt.Printf("Using persisted connection limit: %d (saved from previous session)\n", actualLimit)
+		logger.Infof("server", "Using persisted connection limit: %d (saved from previous session)", actualLimit)
 	}
 
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
-			fmt.Printf("Failed to accept client: %v\n", err)
+			logger.Errorf("server", "Failed to accept client: %v", err)
 			continue
 		}
 
 		// Check connection limit
 		if !connManager.TryAcquire(conn) {
-			fmt.Printf("Connection limit reached (%d/%d). Rejecting connection from %s\n",
+			logger.Warnf("server", "Connection limit reached (%d/%d). Rejecting connection from %s",
 				connManager.GetActiveConnections(), connManager.GetMaxConnections(), conn.RemoteAddr())
 
 			// Send rejection message to client
@@ -344,7 +365,7 @@ func StartServer(port string, authFilePath string, maxConnections int32, dataFol
 			continue
 		}
 
-		fmt.Printf("New connection from %s (active: %d/%d)\n",
+		logger.Debugf("server", "New connection from %s (active: %d/%d)",
 			conn.RemoteAddr(), connManager.GetActiveConnections(), connManager.GetMaxConnections())
 
 		go handleConnectionWithManager(conn, spaceManager, authManager, connManager)
@@ -364,21 +385,21 @@ func handleSignals(cm *ConnectionManager) {
 		case syscall.SIGUSR1:
 			// Increase limit by 100
 			newLimit = currentLimit + 100
-			fmt.Printf("Received SIGUSR1: Increasing connection limit from %d to %d\n", currentLimit, newLimit)
+			logger.Infof("server", "Received SIGUSR1: Increasing connection limit from %d to %d", currentLimit, newLimit)
 		case syscall.SIGUSR2:
 			// Decrease limit by 100, but not below current active connections
 			active := cm.GetActiveConnections()
 			newLimit = currentLimit - 100
 			if newLimit < active {
 				newLimit = active
-				fmt.Printf("Received SIGUSR2: Cannot decrease below active connections (%d), keeping limit at %d\n", active, currentLimit)
+				logger.Warnf("server", "Received SIGUSR2: Cannot decrease below active connections (%d), keeping limit at %d", active, currentLimit)
 				continue
 			}
-			fmt.Printf("Received SIGUSR2: Decreasing connection limit from %d to %d\n", currentLimit, newLimit)
+			logger.Infof("server", "Received SIGUSR2: Decreasing connection limit from %d to %d", currentLimit, newLimit)
 		}
 
 		if err := cm.UpdateLimit(newLimit); err != nil {
-			fmt.Printf("Failed to update connection limit: %v\n", err)
+			logger.Errorf("server", "Failed to update connection limit: %v", err)
 		}
 	}
 }
@@ -395,9 +416,9 @@ func monitorConnections(cm *ConnectionManager) {
 		usage := stats["usage_percentage"].(float64)
 
 		if usage > 80 {
-			fmt.Printf("WARNING: High connection usage: %d/%d (%.1f%%)\n", active, max, usage)
+			logger.Warnf("server", "High connection usage: %d/%d (%.1f%%)", active, max, usage)
 		} else {
-			fmt.Printf("Connection status: %d/%d (%.1f%%)\n", active, max, usage)
+			logger.Debugf("server", "Connection status: %d/%d (%.1f%%)", active, max, usage)
 		}
 	}
 }
@@ -413,7 +434,7 @@ func handleConnectionWithManager(conn net.Conn, spaceManager *spaces.SpaceManage
 	defer func() {
 		conn.Close()
 		connManager.Release(conn)
-		fmt.Printf("Connection closed from %s (active: %d/%d)\n",
+		logger.Debugf("server", "Connection closed from %s (active: %d/%d)",
 			conn.RemoteAddr(), connManager.GetActiveConnections(), connManager.GetMaxConnections())
 	}()
 

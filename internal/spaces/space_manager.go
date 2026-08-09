@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/shibudb.org/shibudb-server/internal/logger"
 	"github.com/shibudb.org/shibudb-server/internal/storage"
 
 	"github.com/DataIntelligenceCrew/go-faiss"
@@ -165,7 +166,7 @@ func NewSpaceManager(basePath string) *SpaceManager {
 		return rewriteManifest(manager.manifestFilePath, spaces)
 	}
 	if err := manager.loadSpaceMetas(); err != nil {
-		fmt.Printf("Warning: failed to load space metadata: %v\n", err)
+		logger.Warnf("spaces", "failed to load space metadata: %v", err)
 	}
 	return manager
 }
@@ -189,7 +190,7 @@ func (sm *SpaceManager) loadCurrentSpaceCatalog() (bool, error) {
 
 	manifestSpaces, manifestExists, manifestErr := sm.readManifestSpaces()
 	if manifestErr != nil {
-		fmt.Printf("Warning: failed to read %s: %v\n", sm.manifestFilePath, manifestErr)
+		logger.Warnf("spaces", "failed to read %s: %v", sm.manifestFilePath, manifestErr)
 	}
 
 	if !manifestExists && len(discovered) == 0 {
@@ -200,7 +201,7 @@ func (sm *SpaceManager) loadCurrentSpaceCatalog() (bool, error) {
 	startedAt := time.Now()
 	lastLogAt := startedAt
 	if len(names) > 0 {
-		fmt.Printf("Restoring %d spaces from %s before accepting client connections...\n", len(names), sm.baseDir)
+		logger.Infof("spaces", "Restoring %d spaces from %s before accepting client connections...", len(names), sm.baseDir)
 	}
 
 	validSpaces := make(map[string]struct{}, len(discovered))
@@ -208,13 +209,13 @@ func (sm *SpaceManager) loadCurrentSpaceCatalog() (bool, error) {
 	for idx, name := range names {
 		meta, err := sm.readSpaceMetaFile(filepath.Join(sm.baseDir, name, spaceMetaFileName))
 		if err != nil {
-			fmt.Printf("Warning: skipping space %q due to invalid metadata: %v\n", name, err)
+			logger.Warnf("spaces", "skipping space %q due to invalid metadata: %v", name, err)
 			failures++
 			maybeLogSpaceRestoreProgress(idx+1, len(names), len(validSpaces), failures, startedAt, &lastLogAt, name)
 			continue
 		}
 		if err := sm.loadSpace(meta); err != nil {
-			fmt.Printf("❌ Failed to open space '%s': %v\n", meta.Name, err)
+			logger.Errorf("spaces", "Failed to open space '%s': %v", meta.Name, err)
 			failures++
 			maybeLogSpaceRestoreProgress(idx+1, len(names), len(validSpaces), failures, startedAt, &lastLogAt, meta.Name)
 			continue
@@ -224,8 +225,8 @@ func (sm *SpaceManager) loadCurrentSpaceCatalog() (bool, error) {
 	}
 
 	if len(names) > 0 {
-		fmt.Printf(
-			"Finished restoring spaces: loaded %d/%d (failed: %d, elapsed: %s)\n",
+		logger.Infof("spaces",
+			"Finished restoring spaces: loaded %d/%d (failed: %d, elapsed: %s)",
 			len(validSpaces),
 			len(names),
 			failures,
@@ -235,7 +236,7 @@ func (sm *SpaceManager) loadCurrentSpaceCatalog() (bool, error) {
 
 	if manifestErr != nil || !manifestExists || !sameSpaceSet(manifestSpaces, validSpaces) {
 		if err := sm.rewriteManifest(sortedSpaceNames(validSpaces)); err != nil {
-			fmt.Printf("Warning: failed to reconcile %s: %v\n", sm.manifestFilePath, err)
+			logger.Warnf("spaces", "failed to reconcile %s: %v", sm.manifestFilePath, err)
 		}
 	}
 
@@ -260,7 +261,7 @@ func (sm *SpaceManager) loadLegacyMetadataJSON() error {
 	for _, meta := range metas {
 		meta = normalizeSpaceMeta(meta)
 		if err := sm.loadSpace(meta); err != nil {
-			fmt.Printf("❌ Failed to open legacy space '%s': %v\n", meta.Name, err)
+			logger.Errorf("spaces", "Failed to open legacy space '%s': %v", meta.Name, err)
 			continue
 		}
 		normalized = append(normalized, meta)
@@ -271,7 +272,7 @@ func (sm *SpaceManager) loadLegacyMetadataJSON() error {
 	}
 
 	if err := sm.migrateLegacyMetadata(normalized); err != nil {
-		fmt.Printf("Warning: failed to migrate legacy metadata.json to current layout: %v\n", err)
+		logger.Warnf("spaces", "failed to migrate legacy metadata.json to current layout: %v", err)
 	}
 	return nil
 }
@@ -757,8 +758,8 @@ func maybeLogSpaceRestoreProgress(processed, total, loaded, failures int, starte
 	}
 
 	*lastLogAt = time.Now()
-	fmt.Printf(
-		"Space restore progress: %d/%d processed, %d loaded, %d failed (elapsed: %s, last: %s)\n",
+	logger.Infof("spaces",
+		"Space restore progress: %d/%d processed, %d loaded, %d failed (elapsed: %s, last: %s)",
 		processed,
 		total,
 		loaded,

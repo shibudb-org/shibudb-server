@@ -41,6 +41,7 @@ import (
 	"github.com/shibudb.org/shibudb-server/internal/auth"
 	"github.com/shibudb.org/shibudb-server/internal/cliinput"
 	"github.com/shibudb.org/shibudb-server/internal/cliparse"
+	"github.com/shibudb.org/shibudb-server/internal/logger"
 	"github.com/shibudb.org/shibudb-server/internal/models"
 	"github.com/shibudb.org/shibudb-server/internal/spaces"
 )
@@ -1575,6 +1576,16 @@ func handleManagerCommand(managementPort string, args []string, authCfg managerA
 		checkManagerHealth(baseURL, tempToken)
 	case "reset":
 		resetManagerLimit(baseURL, tempToken)
+	case "log-level":
+		if len(args) < 2 {
+			getManagerLogLevel(baseURL, tempToken)
+			return
+		}
+		if _, err := logger.ParseLevel(args[1]); err != nil {
+			fmt.Printf("Error: %v\n", err)
+			return
+		}
+		setManagerLogLevel(baseURL, tempToken, args[1])
 	default:
 		fmt.Printf("Error: Unknown command: %s\n", command)
 		printManagerUsage()
@@ -1714,6 +1725,7 @@ func printManagerUsage() {
   decrease [amount]         Decrease connection limit by amount (default: 100)
   health                    Check server health
   reset                     Reset connection limit to configured default
+  log-level [level]         Show or set the server log level (debug, info, warn, error)
   generate-token            Generate a new management bearer token
   list-tokens               List stored management tokens
   delete-token <token_id>   Delete a management token by id
@@ -1730,6 +1742,8 @@ Examples:
   shibudb manager --username admin --password admin decrease 200
   shibudb manager --username admin --password admin reset
   shibudb manager --username admin --password admin stats
+  shibudb manager --username admin --password admin log-level warn
+  shibudb manager --username admin --password admin log-level
   shibudb manager --username admin --password admin generate-token
   shibudb manager --username admin --password admin list-tokens
   shibudb manager --username admin --password admin delete-token <token_id>
@@ -1947,6 +1961,52 @@ func decreaseManagerLimit(baseURL, bearerToken string, amount int32) {
 		fmt.Printf("Success: %s\n", result["message"])
 		fmt.Printf("Old Limit: %d, New Limit: %d\n",
 			int(result["old_limit"].(float64)), int(result["new_limit"].(float64)))
+	} else {
+		fmt.Printf("Error: %s\n", result["error"])
+	}
+}
+
+func getManagerLogLevel(baseURL, bearerToken string) {
+	resp, err := makeManagerRequest("GET", baseURL+"/loglevel", nil, bearerToken)
+	if err != nil {
+		fmt.Printf("Error: Failed to connect to management server: %v\n", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	var result map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		fmt.Printf("Error: Failed to parse response: %v\n", err)
+		return
+	}
+
+	if resp.StatusCode == http.StatusOK {
+		fmt.Printf("Current Log Level: %s\n", result["level"])
+	} else {
+		fmt.Printf("Error: %s\n", result["error"])
+	}
+}
+
+func setManagerLogLevel(baseURL, bearerToken, level string) {
+	body := map[string]interface{}{
+		"level": level,
+	}
+
+	resp, err := makeManagerRequest("PUT", baseURL+"/loglevel", body, bearerToken)
+	if err != nil {
+		fmt.Printf("Error: Failed to connect to management server: %v\n", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	var result map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		fmt.Printf("Error: Failed to parse response: %v\n", err)
+		return
+	}
+
+	if resp.StatusCode == http.StatusOK {
+		fmt.Printf("Success: %s\n", result["message"])
 	} else {
 		fmt.Printf("Error: %s\n", result["error"])
 	}

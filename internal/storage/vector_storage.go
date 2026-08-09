@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"math"
 	"os"
 	"path/filepath"
@@ -16,6 +15,7 @@ import (
 	"time"
 
 	"github.com/DataIntelligenceCrew/go-faiss"
+	"github.com/shibudb.org/shibudb-server/internal/logger"
 	"github.com/shibudb.org/shibudb-server/internal/maintenance"
 	"github.com/shibudb.org/shibudb-server/internal/wal"
 )
@@ -195,7 +195,7 @@ func (ve *VectorEngineImpl) compactLegacySegmentedLayoutIfNeeded() error {
 	if len(ve.manifest.Segments) <= 1 {
 		return nil
 	}
-	log.Printf("storage: merging %d legacy vector segments into single-file layout for FAISS index %q",
+	logger.Infof("storage", "merging %d legacy vector segments into single-file layout for FAISS index %q",
 		len(ve.manifest.Segments), ve.indexType)
 
 	paths := make([]string, 0, len(ve.manifest.Segments))
@@ -583,7 +583,7 @@ func (ve *VectorEngineImpl) Close() error {
 			ve.promotionWG.Wait()
 		}
 		if err := ve.FlushBatch(); err != nil {
-			log.Printf("final vector batch flush failed: %v", err)
+			logger.Errorf("storage", "final vector batch flush failed: %v", err)
 		}
 
 		if ve.wal != nil {
@@ -661,7 +661,7 @@ func (ve *VectorEngineImpl) MaintenanceFlush() {
 		return
 	}
 	if err := ve.FlushBatch(); err != nil {
-		log.Printf("vector batch flush failed: %v", err)
+		logger.Errorf("storage", "vector batch flush failed: %v", err)
 	}
 }
 
@@ -673,7 +673,7 @@ func (ve *VectorEngineImpl) MaintenanceCheckpoint() {
 		return
 	}
 	if err := ve.checkpoint(); err != nil {
-		log.Printf("checkpoint failed: %v", err)
+		logger.Errorf("storage", "checkpoint failed: %v", err)
 	}
 }
 
@@ -882,7 +882,7 @@ func (ve *VectorEngineImpl) indexPromotionWorker() {
 		}
 
 		if err := ve.promoteConfiguredIndex(); err != nil {
-			log.Printf("promote FAISS index %q failed: %v", ve.indexType, err)
+			logger.Errorf("storage", "promote FAISS index %q failed: %v", ve.indexType, err)
 		}
 	}
 }
@@ -933,7 +933,7 @@ func (ve *VectorEngineImpl) promoteConfiguredIndex() error {
 	ve.store.index = index
 	ve.store.configured = true
 	oldIndex.Delete()
-	log.Printf("promoted FAISS index to %q with %d live vectors", ve.indexType, liveVectors)
+	logger.Infof("storage", "promoted FAISS index to %q with %d live vectors", ve.indexType, liveVectors)
 	return nil
 }
 

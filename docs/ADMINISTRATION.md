@@ -38,6 +38,7 @@ ShibuDb stores runtime files under a single data directory root:
     users.json
     management_tokens.json
     connection_limit.json
+    log_level.json
     <space>/
       space.meta.json
       data.db / wal.db / index.dat                 (key-value)
@@ -50,6 +51,7 @@ ShibuDb stores runtime files under a single data directory root:
 
 Notes:
 - `connection_limit.json` is used to persist the last saved connection limit across restarts.
+- `log_level.json` is used to persist the server log level across restarts.
 - Each space has its own directory under `lib/`.
 
 ## Management API (connection limits + space settings)
@@ -92,6 +94,15 @@ curl -X PUT http://localhost:5444/limit \
   -H "Authorization: Bearer <token>" \
   -H "Content-Type: application/json" \
   -d '{"limit": 2000}'
+
+# Get current log level
+curl http://localhost:5444/loglevel -H "Authorization: Bearer <token>"
+
+# Set log level (debug, info, warn, error)
+curl -X PUT http://localhost:5444/loglevel \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"level": "warn"}'
 ```
 
 ### CLI management (recommended)
@@ -105,7 +116,36 @@ shibudb manager --username <admin> --password <pass> limit 2000
 shibudb manager --username <admin> --password <pass> increase 500
 shibudb manager --username <admin> --password <pass> decrease 200
 shibudb manager --username <admin> --password <pass> health
+shibudb manager --username <admin> --password <pass> log-level        # show current level
+shibudb manager --username <admin> --password <pass> log-level warn   # set level
 ```
+
+## Logging
+
+The server writes structured, leveled log lines to `<data-dir>/log/shibudb.log`
+(when started via `shibudb start`; `shibudb run` logs to the terminal). Log
+calls are buffered in memory and flushed to the log file every 100ms by a
+background goroutine.
+
+Line format:
+
+```text
+2026-08-09T18:30:19.508+05:30 [INFO ] [server] ShibuDB server started on port 4444
+```
+
+Levels: `debug`, `info`, `warn`, `error`. Setting a level enables it and
+everything above it — `info` enables info/warn/error, `warn` enables
+warn/error, `error` enables only errors, and `debug` enables everything
+(including per-query and per-connection logs).
+
+The level can be changed at runtime without a restart:
+
+```bash
+shibudb manager --username <admin> --password <pass> log-level warn
+```
+
+The level is persisted to `<data-dir>/lib/log_level.json` and restored on the
+next server start. The default level is `info`.
 
 ### Space settings updates
 
