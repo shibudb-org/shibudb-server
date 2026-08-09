@@ -36,7 +36,9 @@ func TestVectorEngineCheckpointParallelLoad(t *testing.T) {
 		}
 		seedVectors = append(seedVectors, sample{id: id, vec: vec})
 	}
-	ve.flushData(true)
+	if err := ve.FlushBatch(); err != nil {
+		t.Fatalf("FlushBatch failed: %v", err)
+	}
 
 	errCh := make(chan error, 16)
 	reportErr := func(err error) {
@@ -118,7 +120,9 @@ func TestVectorEngineCheckpointParallelLoad(t *testing.T) {
 		}
 	}
 
-	ve.flushData(true)
+	if err := ve.FlushBatch(); err != nil {
+		t.Fatalf("FlushBatch failed: %v", err)
+	}
 	if err := ve.checkpoint(); err != nil {
 		t.Fatalf("final checkpoint failed: %v", err)
 	}

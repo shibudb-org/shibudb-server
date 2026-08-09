@@ -95,7 +95,9 @@ func TestRebuildVectorIndexFlat(t *testing.T) {
 	if err := ve.InsertVector(22, vec2); err != nil {
 		t.Fatalf("InsertVector 22 failed: %v", err)
 	}
-	ve.flushData(true)
+	if err := ve.FlushBatch(); err != nil {
+		t.Fatalf("FlushBatch failed: %v", err)
+	}
 	if err := ve.RemoveVector(22); err != nil {
 		t.Fatalf("RemoveVector 22 failed: %v", err)
 	}

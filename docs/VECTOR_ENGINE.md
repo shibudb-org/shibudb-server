@@ -565,6 +565,10 @@ RANGE-SEARCH 0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8 1.0
 
 ### Batch Vector Operations
 
+FAISS-backed spaces coalesce individual `INSERT-VECTOR` requests received
+between maintenance flushes and add them to the FAISS index in one batch. The
+wire protocol remains one vector per command.
+
 ```bash
 # Insert multiple vectors efficiently
 INSERT-VECTOR 1 1.0,2.0,3.0,4.0,5.0,6.0,7.0,8.0

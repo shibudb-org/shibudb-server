@@ -519,25 +519,29 @@ func TestSpaceManager_VectorTrainingIndexClearsSegmentSettings(t *testing.T) {
 	}
 }
 
-func TestSpaceManager_UpdateSpaceSettingsRejectsSegmentForTrainingVector(t *testing.T) {
-	dir := t.TempDir()
-	sm := NewSpaceManager(dir)
-	defer sm.CloseAll()
+func TestSpaceManager_UpdateSpaceSettingsRejectsSegmentForFAISSVector(t *testing.T) {
+	for _, indexType := range []string{"Flat", "HNSW32,Flat", "IVF32,Flat"} {
+		t.Run(indexType, func(t *testing.T) {
+			dir := t.TempDir()
+			sm := NewSpaceManager(dir)
+			defer sm.CloseAll()
 
-	if _, err := sm.CreateSpaceWithSettings("ivf_upd", "vector", 8, "IVF32,Flat", "L2", true, storage.SpaceSettings{}); err != nil {
-		t.Fatalf("CreateSpaceWithSettings: %v", err)
-	}
-	if err := sm.UpdateSpaceSettings("ivf_upd", storage.SpaceSettings{
-		SegmentRolloverBytes: 1024,
-	}); err == nil {
-		t.Fatal("expected error when updating segment settings for IVF space")
-	}
-	if err := sm.UpdateSpaceSettings("ivf_upd", storage.SpaceSettings{}); err != nil {
-		t.Fatalf("no-op update: %v", err)
+			if _, err := sm.CreateSpaceWithSettings("faiss_upd", "vector", 8, indexType, "L2", true, storage.SpaceSettings{}); err != nil {
+				t.Fatalf("CreateSpaceWithSettings: %v", err)
+			}
+			if err := sm.UpdateSpaceSettings("faiss_upd", storage.SpaceSettings{
+				SegmentRolloverBytes: 1024,
+			}); err == nil {
+				t.Fatalf("expected error when updating segment settings for %s space", indexType)
+			}
+			if err := sm.UpdateSpaceSettings("faiss_upd", storage.SpaceSettings{}); err != nil {
+				t.Fatalf("no-op update: %v", err)
+			}
+		})
 	}
 }
 
-func TestSpaceManager_VectorFlatKeepsSegmentSettings(t *testing.T) {
+func TestSpaceManager_FAISSFlatClearsSegmentSettings(t *testing.T) {
 	dir := t.TempDir()
 	sm := NewSpaceManager(dir)
 	defer sm.CloseAll()
@@ -552,8 +556,30 @@ func TestSpaceManager_VectorFlatKeepsSegmentSettings(t *testing.T) {
 	if !ok {
 		t.Fatal("SpaceMeta missing")
 	}
+	if meta.SegmentRolloverBytes != 0 || meta.MaxSegmentsBeforeMerge != 0 {
+		t.Fatalf("FAISS Flat space should clear segment settings, got rollover=%d merge=%d",
+			meta.SegmentRolloverBytes, meta.MaxSegmentsBeforeMerge)
+	}
+}
+
+func TestSpaceManager_FilterableFlatKeepsSegmentSettings(t *testing.T) {
+	dir := t.TempDir()
+	sm := NewSpaceManager(dir)
+	defer sm.CloseAll()
+
+	if _, err := sm.CreateSpaceWithSettingsAndMetadata(
+		"flat_meta_seg", "vector", 4, "Flat", "L2", true,
+		storage.SpaceSettings{SegmentRolloverBytes: 2048, MaxSegmentsBeforeMerge: 9},
+		[]storage.MetadataFieldSpec{{Name: "user_id", Type: storage.MetadataTypeString}},
+	); err != nil {
+		t.Fatalf("CreateSpaceWithSettingsAndMetadata: %v", err)
+	}
+	meta, ok := sm.SpaceMeta("flat_meta_seg")
+	if !ok {
+		t.Fatal("SpaceMeta missing")
+	}
 	if meta.SegmentRolloverBytes != 2048 || meta.MaxSegmentsBeforeMerge != 9 {
-		t.Fatalf("Flat space should keep segment settings, got rollover=%d merge=%d",
+		t.Fatalf("filterable Flat space lost segment settings, got rollover=%d merge=%d",
 			meta.SegmentRolloverBytes, meta.MaxSegmentsBeforeMerge)
 	}
 }

@@ -106,7 +106,7 @@ func TestSegmentedKeyValueE2E(t *testing.T) {
 	}
 }
 
-func TestSegmentedVectorE2E(t *testing.T) {
+func TestFAISSVectorSingleFileE2E(t *testing.T) {
 	conn, err := net.Dial("tcp", "localhost:4444")
 	if err != nil {
 		t.Fatalf("TCP connection error: %v", err)
@@ -133,7 +133,7 @@ func TestSegmentedVectorE2E(t *testing.T) {
 		SegmentRolloverBytes:   48,
 		MaxSegmentsBeforeMerge: 5,
 	}, conn, reader) {
-		t.Fatalf("failed to create segmented vector space")
+		t.Fatalf("failed to create FAISS vector space")
 	}
 
 	vectors := []struct {
@@ -171,10 +171,6 @@ func TestSegmentedVectorE2E(t *testing.T) {
 		}
 	}
 
-	if !UpdateSpaceSettings(space, 40, 5, conn, reader) {
-		t.Fatalf("failed to update segmented vector settings")
-	}
-
 	resp := sendQueryAndGetResponse(models.Query{
 		Type:  models.TypeInsertVector,
 		Space: space,
@@ -198,7 +194,7 @@ func TestSegmentedVectorE2E(t *testing.T) {
 			Dimension: 1,
 		}, conn, reader)
 		if !strings.Contains(resp, item.id) {
-			t.Fatalf("SEARCH_TOPK after settings update for %s did not return expected id: %s", item.id, resp)
+			t.Fatalf("SEARCH_TOPK after additional insert for %s did not return expected id: %s", item.id, resp)
 		}
 	}
 }

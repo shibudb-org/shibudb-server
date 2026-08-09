@@ -29,8 +29,8 @@ import (
 // the WAL, and the in-memory indexes are rebuilt by scanning the segments on
 // open.
 //
-// Persistence uses the same segmented layout as the key-value and Flat/HNSW
-// vector engines: writes land in the active (hot) segment, which is sealed and
+// Persistence uses the same segmented layout as the key-value engine: writes
+// land in the active (hot) segment, which is sealed and
 // rolled over to a fresh file once it exceeds SegmentRolloverBytes, and a
 // background worker compacts the oldest cold segments once the segment count
 // exceeds MaxSegmentsBeforeMerge. Because all live state is kept in memory,

@@ -407,13 +407,9 @@ func normalizeSpaceMeta(meta spaceMeta) spaceMeta {
 		meta.Metric = ""
 		meta.IndexedMetadataFields = nil
 	}
-	if meta.EngineType == "vector" {
-		settings := storage.NormalizeVectorSpaceSettings(meta.IndexType, storage.SpaceSettings{
-			SegmentRolloverBytes:   meta.SegmentRolloverBytes,
-			MaxSegmentsBeforeMerge: meta.MaxSegmentsBeforeMerge,
-		})
-		meta.SegmentRolloverBytes = settings.SegmentRolloverBytes
-		meta.MaxSegmentsBeforeMerge = settings.MaxSegmentsBeforeMerge
+	if meta.EngineType == "vector" && len(meta.IndexedMetadataFields) == 0 {
+		meta.SegmentRolloverBytes = 0
+		meta.MaxSegmentsBeforeMerge = 0
 	} else {
 		settings := storage.NormalizeSpaceSettings(storage.SpaceSettings{
 			SegmentRolloverBytes:   meta.SegmentRolloverBytes,
@@ -596,13 +592,13 @@ func (sm *SpaceManager) UpdateSpaceSettings(space string, settings storage.Space
 	}
 
 	var applied storage.SpaceSettings
-	if meta.EngineType == "vector" && !storage.VectorSegmentsEnabled(meta.IndexType) {
+	if meta.EngineType == "vector" && len(meta.IndexedMetadataFields) == 0 {
 		if settings.SegmentRolloverBytes > 0 || settings.MaxSegmentsBeforeMerge > 0 {
-			return fmt.Errorf("segment settings do not apply to vector index type %q (only Flat and HNSW use segmented storage)", meta.IndexType)
+			return fmt.Errorf("segment settings do not apply to FAISS vector index type %q", meta.IndexType)
 		}
 		meta.SegmentRolloverBytes = 0
 		meta.MaxSegmentsBeforeMerge = 0
-		applied = storage.NormalizeVectorSpaceSettings(meta.IndexType, storage.SpaceSettings{})
+		applied = storage.SpaceSettings{}
 	} else {
 		if settings.SegmentRolloverBytes > 0 {
 			meta.SegmentRolloverBytes = settings.SegmentRolloverBytes

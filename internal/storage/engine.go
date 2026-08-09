@@ -20,22 +20,6 @@ func NormalizeSpaceSettings(settings SpaceSettings) SpaceSettings {
 	return settings
 }
 
-// VectorSegmentsEnabled is true for index types that use segmented vector storage
-// (Flat, HNSW). Training-based indexes (IVF, PQ, …) use a single file and ignore
-// segment rollover / merge settings.
-func VectorSegmentsEnabled(indexType string) bool {
-	return requiredTrainCountForIndex(indexType) == 0
-}
-
-// NormalizeVectorSpaceSettings applies segment defaults for Flat/HNSW, and clears
-// segment fields for training-based vector index types.
-func NormalizeVectorSpaceSettings(indexType string, settings SpaceSettings) SpaceSettings {
-	if !VectorSegmentsEnabled(indexType) {
-		return SpaceSettings{}
-	}
-	return NormalizeSpaceSettings(settings)
-}
-
 type SpaceSettingsApplier interface {
 	UpdateSpaceSettings(settings SpaceSettings) error
 }
