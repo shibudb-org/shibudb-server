@@ -29,18 +29,9 @@ var ErrDeletionNotSupported = errors.New("vector deletion not supported for HNSW
 type VectorEngineImpl struct {
 	wal           *wal.WAL
 	maxVectorSize int
-	settings      SpaceSettings
 
 	indexType string
 	metric    int
-
-	// vectorSegmentationEnabled is true for Flat and HNSW (no training batch).
-	// When false (IVF, PQ, …): single vector data file, no hot rollover or cold
-	// merge, and no sealed per-segment on-disk FAISS files. The active segment
-	// still uses IDMap,Flat for incremental updates; a configured IVF/PQ index
-	// is produced only for sealed segments when segmentation is enabled.
-	// Legacy multi-segment manifests are compacted to the primary data file on open.
-	vectorSegmentationEnabled bool
 
 	layout           SegmentLayout
 	primaryDataPath  string
@@ -61,10 +52,6 @@ type VectorEngineImpl struct {
 		id  int64
 		vec []float32
 	}
-	indexBuildQueue chan int64
-	mergeQueue      chan struct{}
-	backgroundStop  chan struct{}
-	backgroundWG    sync.WaitGroup
 }
 
 var _ VectorEngine = (*VectorEngineImpl)(nil)
@@ -86,7 +73,7 @@ func NewVectorEngine(dataPath, indexPath, walPath string, maxVectorSize int, ind
 	return NewVectorEngineWithSettings(dataPath, indexPath, walPath, maxVectorSize, indexDesc, metric, enableWAL, SpaceSettings{})
 }
 
-func NewVectorEngineWithSettings(dataPath, indexPath, walPath string, maxVectorSize int, indexDesc string, metric int, enableWAL bool, settings SpaceSettings) (*VectorEngineImpl, error) {
+func NewVectorEngineWithSettings(dataPath, indexPath, walPath string, maxVectorSize int, indexDesc string, metric int, enableWAL bool, _ SpaceSettings) (*VectorEngineImpl, error) {
 	var w *wal.WAL
 	var err error
 	if enableWAL {
@@ -97,18 +84,13 @@ func NewVectorEngineWithSettings(dataPath, indexPath, walPath string, maxVectorS
 	}
 
 	e := &VectorEngineImpl{
-		wal:                       w,
-		maxVectorSize:             maxVectorSize,
-		settings:                  NormalizeVectorSpaceSettings(indexDesc, settings),
-		indexType:                 indexDesc,
-		metric:                    metric,
-		vectorSegmentationEnabled: requiredTrainCountForIndex(indexDesc) == 0,
-		layout:                    NewSegmentLayout(filepath.Dir(dataPath), "vector", ".db", ".faiss"),
-		primaryDataPath:           dataPath,
-		primaryIndexPath:          indexPath,
-		indexBuildQueue:           make(chan int64, 32),
-		mergeQueue:                make(chan struct{}, 1),
-		backgroundStop:            make(chan struct{}),
+		wal:              w,
+		maxVectorSize:    maxVectorSize,
+		indexType:        indexDesc,
+		metric:           metric,
+		layout:           NewSegmentLayout(filepath.Dir(dataPath), "vector", ".db", ".faiss"),
+		primaryDataPath:  dataPath,
+		primaryIndexPath: indexPath,
 	}
 
 	manifest, err := e.loadOrCreateManifest()
@@ -120,13 +102,11 @@ func NewVectorEngineWithSettings(dataPath, indexPath, walPath string, maxVectorS
 	}
 	e.manifest = manifest
 
-	if !e.vectorSegmentationEnabled {
-		if err := e.compactNonSegmentedTrainingLayoutIfNeeded(); err != nil {
-			if e.wal != nil {
-				_ = e.wal.Close()
-			}
-			return nil, err
+	if err := e.compactLegacySegmentedLayoutIfNeeded(); err != nil {
+		if e.wal != nil {
+			_ = e.wal.Close()
 		}
+		return nil, err
 	}
 
 	if err := e.loadSegments(); err != nil {
@@ -136,7 +116,6 @@ func NewVectorEngineWithSettings(dataPath, indexPath, walPath string, maxVectorS
 		return nil, err
 	}
 
-	e.startBackgroundWorkers()
 	if enableWAL {
 		if err := e.replayWAL(); err != nil {
 			return nil, fmt.Errorf("WAL replay failed: %w", err)
@@ -146,11 +125,7 @@ func NewVectorEngineWithSettings(dataPath, indexPath, walPath string, maxVectorS
 	return e, nil
 }
 
-func (ve *VectorEngineImpl) UpdateSpaceSettings(settings SpaceSettings) error {
-	ve.lock.Lock()
-	defer ve.lock.Unlock()
-	ve.settings = NormalizeVectorSpaceSettings(ve.indexType, settings)
-	ve.scheduleMergeCheckLocked()
+func (ve *VectorEngineImpl) UpdateSpaceSettings(_ SpaceSettings) error {
 	return nil
 }
 
@@ -184,14 +159,13 @@ func (ve *VectorEngineImpl) loadOrCreateManifest() (*SegmentManifest, error) {
 	return manifest, nil
 }
 
-// compactNonSegmentedTrainingLayoutIfNeeded merges a legacy multi-segment manifest
-// into the primary vector data file. Training-based indexes never use per-segment
-// rollover; older builds may still have left multiple segments on disk.
-func (ve *VectorEngineImpl) compactNonSegmentedTrainingLayoutIfNeeded() error {
+// compactLegacySegmentedLayoutIfNeeded merges data created by older versions
+// into the single-file layout now used by every FAISS index type.
+func (ve *VectorEngineImpl) compactLegacySegmentedLayoutIfNeeded() error {
 	if len(ve.manifest.Segments) <= 1 {
 		return nil
 	}
-	log.Printf("storage: merging %d vector segments into single-file layout for training index %q",
+	log.Printf("storage: merging %d legacy vector segments into single-file layout for FAISS index %q",
 		len(ve.manifest.Segments), ve.indexType)
 
 	paths := make([]string, 0, len(ve.manifest.Segments))
@@ -259,13 +233,7 @@ func (ve *VectorEngineImpl) loadSegments() error {
 	ve.manifest.ActiveSegmentID = ve.manifest.Segments[len(ve.manifest.Segments)-1].ID
 	for idx, meta := range ve.manifest.Segments {
 		desc := ve.layout.Descriptor(meta)
-		flags := os.O_RDWR
-		// Only the active/hot segment is allowed to be created on open. Cold segment
-		// files must exist; recreating them would hide data loss/corruption.
-		if meta.ID == ve.manifest.ActiveSegmentID {
-			flags |= os.O_CREATE
-		}
-		dataFile, err := os.OpenFile(desc.DataPath, flags, 0666)
+		dataFile, err := os.OpenFile(desc.DataPath, os.O_RDWR|os.O_CREATE, 0666)
 		if err != nil {
 			return err
 		}
@@ -276,17 +244,8 @@ func (ve *VectorEngineImpl) loadSegments() error {
 			return err
 		}
 
-		var index faiss.Index
-		if idx == len(ve.manifest.Segments)-1 {
-			// Training indexes always use a Flat IDMap in the active segment so
-			// incremental inserts and RemoveIDs stay well-defined; configured
-			// IVF/PQ indexes exist only on sealed segments when segmentation is on.
-			index, err = buildVectorIndexFromDataFile(desc.DataPath, ve.maxVectorSize, ve.hotSegmentIndexDesc(), ve.metric)
-			meta.State = SegmentStateHot
-		} else {
-			index, err = loadOrBuildVectorSegmentIndex(desc, ve.maxVectorSize, ve.indexType, ve.metric)
-			meta.State = SegmentStateCold
-		}
+		index, err := buildVectorIndexFromDataFile(desc.DataPath, ve.maxVectorSize, ve.activeIndexDesc(), ve.metric)
+		meta.State = SegmentStateHot
 		if err != nil {
 			_ = dataFile.Close()
 			return err
@@ -306,12 +265,6 @@ func (ve *VectorEngineImpl) loadSegments() error {
 	}
 
 	return WriteSegmentManifest(ve.layout, ve.manifest)
-}
-
-func (ve *VectorEngineImpl) startBackgroundWorkers() {
-	ve.backgroundWG.Add(2)
-	go ve.indexBuildWorker()
-	go ve.mergeWorker()
 }
 
 func (ve *VectorEngineImpl) InsertVector(id int64, vector []float32) error {
@@ -599,7 +552,7 @@ func (ve *VectorEngineImpl) appendTombstoneToDataFile(id int64) error {
 		active.meta.SizeBytes = info.Size()
 		ve.updateSegmentMetaLocked(active.meta)
 	}
-	return ve.rotateHotSegmentLocked()
+	return nil
 }
 
 func (ve *VectorEngineImpl) Close() error {
@@ -612,9 +565,6 @@ func (ve *VectorEngineImpl) Close() error {
 
 		// Final flush of any pending data-file writes
 		ve.flushData(true)
-
-		close(ve.backgroundStop)
-		ve.backgroundWG.Wait()
 
 		if ve.wal != nil {
 			_ = ve.wal.Close()
@@ -777,14 +727,10 @@ func (ve *VectorEngineImpl) flushData(force bool) {
 		active.meta.SizeBytes = info.Size()
 		ve.updateSegmentMetaLocked(active.meta)
 	}
-	rotateErr := ve.rotateHotSegmentLocked()
 	ve.lock.Unlock()
 
 	if err := active.dataFile.Sync(); err != nil {
 		log.Printf("data file sync failed: %v", err)
-	}
-	if rotateErr != nil {
-		log.Printf("hot segment rotation failed: %v", rotateErr)
 	}
 }
 
@@ -829,313 +775,6 @@ func (ve *VectorEngineImpl) updateSegmentMetaLocked(meta SegmentMeta) {
 			break
 		}
 	}
-}
-
-func (ve *VectorEngineImpl) rotateHotSegmentLocked() error {
-	if !ve.vectorSegmentationEnabled {
-		return nil
-	}
-	active := ve.activeSegmentLocked()
-	if active == nil || active.meta.SizeBytes < ve.settings.SegmentRolloverBytes {
-		return nil
-	}
-
-	active.meta.State = SegmentStateSealed
-	active.meta.SealedAtUnixNs = time.Now().UnixNano()
-	ve.updateSegmentMetaLocked(active.meta)
-
-	newID := ve.manifest.NextSegmentID
-	ve.manifest.NextSegmentID++
-	newMeta := SegmentMeta{
-		ID:              newID,
-		State:           SegmentStateHot,
-		DataFile:        ve.layout.DataFileName(newID),
-		IndexFile:       ve.layout.IndexFileName(newID),
-		CreatedAtUnixNs: time.Now().UnixNano(),
-	}
-	index, err := faiss.IndexFactory(ve.maxVectorSize, "IDMap,"+ve.hotSegmentIndexDesc(), ve.metric)
-	if err != nil {
-		return err
-	}
-	dataFile, err := os.OpenFile(ve.layout.DataPath(newID), os.O_RDWR|os.O_CREATE, 0666)
-	if err != nil {
-		index.Delete()
-		return err
-	}
-
-	ve.manifest.ActiveSegmentID = newID
-	ve.manifest.Segments = append(ve.manifest.Segments, newMeta)
-	ve.segments = append(ve.segments, &vectorSegment{
-		meta:             newMeta,
-		dataFile:         dataFile,
-		index:            index,
-		fileOffsets:      make(map[int64]int64),
-		deletedIDs:       make(map[int64]bool),
-		pendingUpsertIDs: make(map[int64]struct{}),
-	})
-	if err := WriteSegmentManifest(ve.layout, ve.manifest); err != nil {
-		return err
-	}
-
-	ve.enqueueIndexBuildLocked(active.meta.ID)
-	ve.scheduleMergeCheckLocked()
-	return nil
-}
-
-func (ve *VectorEngineImpl) indexBuildWorker() {
-	defer ve.backgroundWG.Done()
-	for {
-		select {
-		case <-ve.backgroundStop:
-			return
-		case id := <-ve.indexBuildQueue:
-			ve.buildIndexForSegment(id)
-		}
-	}
-}
-
-func (ve *VectorEngineImpl) mergeWorker() {
-	defer ve.backgroundWG.Done()
-	for {
-		select {
-		case <-ve.backgroundStop:
-			return
-		case <-ve.mergeQueue:
-			for ve.tryMergeOldestColdSegments() {
-			}
-		}
-	}
-}
-
-func (ve *VectorEngineImpl) buildIndexForSegment(id int64) {
-	ve.lock.Lock()
-	segment := ve.segmentByIDLocked(id)
-	if segment == nil || id == ve.manifest.ActiveSegmentID {
-		ve.lock.Unlock()
-		return
-	}
-	segment.meta.State = SegmentStateIndexing
-	ve.updateSegmentMetaLocked(segment.meta)
-	desc := ve.layout.Descriptor(segment.meta)
-	_ = WriteSegmentManifest(ve.layout, ve.manifest)
-	ve.lock.Unlock()
-
-	if err := buildSealedVectorIndex(desc.DataPath, desc.IndexPath, ve.maxVectorSize, ve.indexType, ve.metric); err != nil {
-		log.Printf("build vector segment index failed for segment %d: %v", id, err)
-		ve.lock.Lock()
-		if segment := ve.segmentByIDLocked(id); segment != nil {
-			segment.meta.State = SegmentStateSealed
-			ve.updateSegmentMetaLocked(segment.meta)
-			_ = WriteSegmentManifest(ve.layout, ve.manifest)
-		}
-		ve.lock.Unlock()
-		return
-	}
-
-	ve.lock.Lock()
-	if segment := ve.segmentByIDLocked(id); segment != nil {
-		segment.meta.State = SegmentStateCold
-		if info, err := os.Stat(desc.DataPath); err == nil {
-			segment.meta.SizeBytes = info.Size()
-		}
-		ve.updateSegmentMetaLocked(segment.meta)
-		_ = WriteSegmentManifest(ve.layout, ve.manifest)
-		ve.scheduleMergeCheckLocked()
-	}
-	ve.lock.Unlock()
-}
-
-func (ve *VectorEngineImpl) tryMergeOldestColdSegments() bool {
-	ve.lock.Lock()
-	if !ve.vectorSegmentationEnabled {
-		ve.lock.Unlock()
-		return false
-	}
-	if len(ve.segments) <= ve.settings.MaxSegmentsBeforeMerge {
-		ve.lock.Unlock()
-		return false
-	}
-
-	var first, second *vectorSegment
-	for _, segment := range ve.segments {
-		if segment.meta.ID == ve.manifest.ActiveSegmentID {
-			continue
-		}
-		if segment.meta.State != SegmentStateCold {
-			continue
-		}
-		if first == nil {
-			first = segment
-			continue
-		}
-		second = segment
-		break
-	}
-	if first == nil || second == nil {
-		ve.lock.Unlock()
-		return false
-	}
-
-	first.meta.State = SegmentStateMerging
-	second.meta.State = SegmentStateMerging
-	ve.updateSegmentMetaLocked(first.meta)
-	ve.updateSegmentMetaLocked(second.meta)
-	newID := second.meta.ID
-	firstDesc := ve.layout.Descriptor(first.meta)
-	secondDesc := ve.layout.Descriptor(second.meta)
-	_ = WriteSegmentManifest(ve.layout, ve.manifest)
-	ve.lock.Unlock()
-
-	meta, mergedIndex, dataFile, offsets, deletedIDs, err := ve.mergeSegments(newID, firstDesc, secondDesc)
-	if err != nil {
-		log.Printf("merge vector segments %d and %d failed: %v", first.meta.ID, second.meta.ID, err)
-		ve.lock.Lock()
-		if segment := ve.segmentByIDLocked(first.meta.ID); segment != nil {
-			segment.meta.State = SegmentStateCold
-			ve.updateSegmentMetaLocked(segment.meta)
-		}
-		if segment := ve.segmentByIDLocked(second.meta.ID); segment != nil {
-			segment.meta.State = SegmentStateCold
-			ve.updateSegmentMetaLocked(segment.meta)
-		}
-		_ = WriteSegmentManifest(ve.layout, ve.manifest)
-		ve.lock.Unlock()
-		return false
-	}
-
-	ve.lock.Lock()
-	defer ve.lock.Unlock()
-	firstIdx := ve.segmentIndexByIDLocked(first.meta.ID)
-	secondIdx := ve.segmentIndexByIDLocked(second.meta.ID)
-	if firstIdx < 0 || secondIdx <= firstIdx {
-		_ = dataFile.Close()
-		mergedIndex.Delete()
-		return false
-	}
-
-	ve.segments[firstIdx].index.Delete()
-	ve.segments[secondIdx].index.Delete()
-	_ = ve.segments[firstIdx].dataFile.Close()
-	_ = ve.segments[secondIdx].dataFile.Close()
-	_ = os.Remove(firstDesc.DataPath)
-	_ = os.Remove(firstDesc.IndexPath)
-
-	mergedSegment := &vectorSegment{
-		meta:             meta,
-		dataFile:         dataFile,
-		index:            mergedIndex,
-		fileOffsets:      offsets,
-		deletedIDs:       deletedIDs,
-		pendingUpsertIDs: make(map[int64]struct{}),
-	}
-	ve.segments = append(append([]*vectorSegment{}, mergedSegment), ve.segments[secondIdx+1:]...)
-	ve.manifest.Segments = append(append([]SegmentMeta{}, meta), ve.manifest.Segments[secondIdx+1:]...)
-	_ = WriteSegmentManifest(ve.layout, ve.manifest)
-	return len(ve.segments) > ve.settings.MaxSegmentsBeforeMerge
-}
-
-func (ve *VectorEngineImpl) mergeSegments(newID int64, firstDesc, secondDesc SegmentDescriptor) (SegmentMeta, faiss.Index, *os.File, map[int64]int64, map[int64]bool, error) {
-	records, err := collectLatestVectorRecords(ve.maxVectorSize, firstDesc.DataPath, secondDesc.DataPath)
-	if err != nil {
-		return SegmentMeta{}, nil, nil, nil, nil, err
-	}
-
-	dataPath := ve.layout.DataPath(newID)
-	indexPath := ve.layout.IndexPath(newID)
-	if err := writeMergedVectorDataFile(dataPath, records); err != nil {
-		return SegmentMeta{}, nil, nil, nil, nil, err
-	}
-	if err := buildSealedVectorIndex(dataPath, indexPath, ve.maxVectorSize, ve.indexType, ve.metric); err != nil {
-		return SegmentMeta{}, nil, nil, nil, nil, err
-	}
-	index, err := faiss.ReadIndex(indexPath, 0)
-	if err != nil {
-		return SegmentMeta{}, nil, nil, nil, nil, err
-	}
-	dataFile, err := os.OpenFile(dataPath, os.O_RDWR|os.O_CREATE, 0666)
-	if err != nil {
-		index.Delete()
-		return SegmentMeta{}, nil, nil, nil, nil, err
-	}
-	offsets, deletedIDs, err := scanVectorDataFile(dataPath, ve.maxVectorSize)
-	if err != nil {
-		index.Delete()
-		_ = dataFile.Close()
-		return SegmentMeta{}, nil, nil, nil, nil, err
-	}
-
-	meta := SegmentMeta{
-		ID:              newID,
-		State:           SegmentStateCold,
-		DataFile:        filepath.Base(dataPath),
-		IndexFile:       filepath.Base(indexPath),
-		CreatedAtUnixNs: time.Now().UnixNano(),
-	}
-	if info, err := dataFile.Stat(); err == nil {
-		meta.SizeBytes = info.Size()
-	}
-	return meta, index, dataFile, offsets, deletedIDs, nil
-}
-
-func (ve *VectorEngineImpl) enqueueIndexBuildLocked(id int64) {
-	select {
-	case ve.indexBuildQueue <- id:
-	default:
-		go func() {
-			select {
-			case ve.indexBuildQueue <- id:
-			case <-ve.backgroundStop:
-			}
-		}()
-	}
-}
-
-func (ve *VectorEngineImpl) scheduleMergeCheckLocked() {
-	select {
-	case ve.mergeQueue <- struct{}{}:
-	default:
-	}
-}
-
-func (ve *VectorEngineImpl) segmentByIDLocked(id int64) *vectorSegment {
-	for _, segment := range ve.segments {
-		if segment.meta.ID == id {
-			return segment
-		}
-	}
-	return nil
-}
-
-func (ve *VectorEngineImpl) segmentIndexByIDLocked(id int64) int {
-	for idx, segment := range ve.segments {
-		if segment.meta.ID == id {
-			return idx
-		}
-	}
-	return -1
-}
-
-func loadOrBuildVectorSegmentIndex(desc SegmentDescriptor, dimension int, indexDesc string, metric int) (faiss.Index, error) {
-	index, err := faiss.ReadIndex(desc.IndexPath, 0)
-	if err == nil {
-		return index, nil
-	}
-	if err := buildSealedVectorIndex(desc.DataPath, desc.IndexPath, dimension, indexDesc, metric); err != nil {
-		return nil, err
-	}
-	return faiss.ReadIndex(desc.IndexPath, 0)
-}
-
-func buildSealedVectorIndex(dataPath, indexPath string, dimension int, indexDesc string, metric int) error {
-	if _, err := RebuildVectorIndex(dataPath, indexPath, dimension, indexDesc, metric); err == nil {
-		return nil
-	} else if !isVectorRebuildTrainingError(err) {
-		return err
-	}
-	return func() error {
-		_, err := RebuildVectorIndex(dataPath, indexPath, dimension, "Flat", metric)
-		return err
-	}()
 }
 
 func buildVectorIndexFromDataFile(dataPath string, dimension int, indexDesc string, metric int) (faiss.Index, error) {
@@ -1306,7 +945,7 @@ func maxInt(a, b int) int {
 	return b
 }
 
-func (ve *VectorEngineImpl) hotSegmentIndexDesc() string {
+func (ve *VectorEngineImpl) activeIndexDesc() string {
 	if requiredTrainCountForIndex(ve.indexType) > 0 {
 		return "Flat"
 	}

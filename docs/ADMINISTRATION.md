@@ -115,8 +115,9 @@ The management API also supports updating space settings:
 - HTTP: `PUT /spaces/settings`
 
 Important behavior:
-- Segment rollover / merge settings apply to **Flat** and **HNSW** vector index types (segmented vector storage).
-- For training-based vector index types (**IVF**, **PQ**, …), segment settings do not apply.
+- Segment rollover / merge settings do not apply to FAISS vector indexes; they
+  use a single data file for every index type.
+- The filterable Flat vector engine and key-value engine still use segmented storage.
 
 ## Rebuilding a space index
 

@@ -10,19 +10,14 @@ import (
 // supported index types. They cover the two hot-path operations: insert and
 // top-k search.
 //
-// A very large segment-rollover threshold is used so the whole dataset stays in
-// a single hot segment for the duration of the benchmark; this keeps results
-// deterministic (no background segment sealing / index rebuilds mid-run). The
-// hot segment uses the configured index for Flat/HNSW, while training indexes
-// (IVF/PQ) ingest through a Flat IDMap hot segment, so their hot-path numbers
-// reflect that behavior.
+// Training indexes (IVF/PQ) ingest through a Flat IDMap until they have enough
+// vectors to train, so their hot-path numbers reflect that behavior.
 
 const (
-	benchVecDim        = 64
-	benchVecDataset    = 10000
-	benchVecK          = 10
-	benchVecPool       = 4096
-	benchVecNoRollover = int64(1) << 40 // effectively disables segment rollover
+	benchVecDim     = 64
+	benchVecDataset = 10000
+	benchVecK       = 10
+	benchVecPool    = 4096
 )
 
 var benchVectorIndexTypes = []string{"Flat", "HNSW32", "HNSW64", "IVF32", "PQ8"}
@@ -34,8 +29,7 @@ func newBenchVectorEngine(b *testing.B, indexType string) *VectorEngineImpl {
 		dir+"/vec_data.db",
 		dir+"/vec_index.faiss",
 		dir+"/vec_wal.db",
-		benchVecDim, indexType, faiss.MetricL2, false,
-		SpaceSettings{SegmentRolloverBytes: benchVecNoRollover},
+		benchVecDim, indexType, faiss.MetricL2, false, SpaceSettings{},
 	)
 	if err != nil {
 		b.Fatalf("NewVectorEngineWithSettings(%s): %v", indexType, err)

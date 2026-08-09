@@ -375,7 +375,4 @@ func TestVectorEngineTrainingIndex_NoSegmentRollover(t *testing.T) {
 	if len(ve.manifest.Segments) != 1 {
 		t.Fatalf("expected single vector segment for IVF, got %d segments", len(ve.manifest.Segments))
 	}
-	if ve.vectorSegmentationEnabled {
-		t.Fatal("IVF index must disable vector segmentation (vectorSegmentationEnabled=false)")
-	}
 }
