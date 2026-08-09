@@ -165,7 +165,9 @@ func TestFAISSVectorIndexesNeverRollOver(t *testing.T) {
 					t.Fatalf("InsertVector %d failed: %v", id, err)
 				}
 			}
-			ve.flushData(true)
+			if err := ve.FlushBatch(); err != nil {
+				t.Fatalf("FlushBatch failed: %v", err)
+			}
 
 			if ve.store == nil || len(ve.manifest.Segments) != 1 {
 				t.Fatalf("FAISS index %q did not retain a single store", indexDesc)
@@ -200,7 +202,9 @@ func TestFAISSVectorSearchTopKExpandsOnlyWhenResultsAreFiltered(t *testing.T) {
 			t.Fatalf("InsertVector %d failed: %v", id, err)
 		}
 	}
-	ve.flushData(true)
+	if err := ve.FlushBatch(); err != nil {
+		t.Fatalf("FlushBatch failed: %v", err)
+	}
 
 	// Simulate stale FAISS entries that must be filtered. SearchTopK should retry
 	// only in this exceptional case instead of always requesting k*8 candidates.
@@ -236,7 +240,9 @@ func TestFAISSVectorCompactsLegacySegmentedLayout(t *testing.T) {
 	if err := ve.InsertVector(1, []float32{1, 0, 0, 0}); err != nil {
 		t.Fatalf("InsertVector failed: %v", err)
 	}
-	ve.flushData(true)
+	if err := ve.FlushBatch(); err != nil {
+		t.Fatalf("FlushBatch failed: %v", err)
+	}
 	if err := ve.Close(); err != nil {
 		t.Fatalf("Close failed: %v", err)
 	}

@@ -1,7 +1,6 @@
 package storage
 
 import (
-	"encoding/binary"
 	"fmt"
 	"sort"
 	"sync"
@@ -13,43 +12,15 @@ import (
 )
 
 type insertPhaseSample struct {
-	total      time.Duration
-	walWrite   time.Duration
-	indexWrite time.Duration
-	walCommit  time.Duration
+	total time.Duration
 }
 
 func benchmarkInsertWithBreakdown(ve *VectorEngineImpl, id int64, vector []float32) (insertPhaseSample, error) {
 	var sample insertPhaseSample
 	start := time.Now()
 
-	if len(vector) != ve.maxVectorSize {
-		return sample, fmt.Errorf("vector length mismatch: expected %d", ve.maxVectorSize)
-	}
-
-	if ve.wal != nil {
-		key := make([]byte, 8)
-		binary.LittleEndian.PutUint64(key, uint64(id))
-
-		walStart := time.Now()
-		if err := ve.wal.WriteEntry(string(key), string(float32ArrayToBytes(vector))); err != nil {
-			return sample, err
-		}
-		sample.walWrite = time.Since(walStart)
-	}
-
-	indexStart := time.Now()
-	if err := ve.insertAfterWAL(id, vector); err != nil {
+	if err := ve.InsertVector(id, vector); err != nil {
 		return sample, err
-	}
-	sample.indexWrite = time.Since(indexStart)
-
-	if ve.wal != nil {
-		commitStart := time.Now()
-		if err := ve.wal.MarkCommitted(); err != nil {
-			return sample, err
-		}
-		sample.walCommit = time.Since(commitStart)
 	}
 
 	sample.total = time.Since(start)
@@ -100,7 +71,9 @@ func runVectorEngineMultiClientInsertBenchmark(t *testing.T, enableWAL bool) {
 		}
 		seedVectors = append(seedVectors, seedSample{id: id, vec: vec})
 	}
-	ve.flushData(true)
+	if err := ve.FlushBatch(); err != nil {
+		t.Fatalf("FlushBatch failed: %v", err)
+	}
 
 	done := make(chan struct{})
 	resultsCh := make(chan insertPhaseSample, insertWorkers*insertsPerWorker)
@@ -227,20 +200,14 @@ func runVectorEngineMultiClientInsertBenchmark(t *testing.T, enableWAL bool) {
 	}
 
 	var (
-		insertCount        int
-		totalInsertTime    time.Duration
-		totalWALWriteTime  time.Duration
-		totalIndexTime     time.Duration
-		totalWALCommitTime time.Duration
-		latencies          []time.Duration
+		insertCount     int
+		totalInsertTime time.Duration
+		latencies       []time.Duration
 	)
 
 	for sample := range resultsCh {
 		insertCount++
 		totalInsertTime += sample.total
-		totalWALWriteTime += sample.walWrite
-		totalIndexTime += sample.indexWrite
-		totalWALCommitTime += sample.walCommit
 		latencies = append(latencies, sample.total)
 	}
 
@@ -252,11 +219,6 @@ func runVectorEngineMultiClientInsertBenchmark(t *testing.T, enableWAL bool) {
 	p50 := latencies[len(latencies)/2]
 	p95 := latencies[(len(latencies)*95)/100]
 	avgInsert := totalInsertTime / time.Duration(insertCount)
-	avgWALWrite := totalWALWriteTime / time.Duration(insertCount)
-	avgIndex := totalIndexTime / time.Duration(insertCount)
-	avgWALCommit := totalWALCommitTime / time.Duration(insertCount)
-	avgExplicitSync := (totalWALWriteTime + totalWALCommitTime) / time.Duration(insertCount)
-	syncShare := 100 * float64((totalWALWriteTime + totalWALCommitTime).Nanoseconds()) / float64(totalInsertTime.Nanoseconds())
 
 	mode := "WAL enabled"
 	if !enableWAL {
@@ -276,9 +238,4 @@ func runVectorEngineMultiClientInsertBenchmark(t *testing.T, enableWAL bool) {
 	fmt.Printf("Avg insert latency: %v\n", avgInsert)
 	fmt.Printf("P50 insert latency: %v\n", p50)
 	fmt.Printf("P95 insert latency: %v\n", p95)
-	fmt.Printf("Avg WAL write+sync time: %v\n", avgWALWrite)
-	fmt.Printf("Avg index mutation/enqueue time: %v\n", avgIndex)
-	fmt.Printf("Avg WAL commit+sync time: %v\n", avgWALCommit)
-	fmt.Printf("Avg explicit disk-sync time on insert path: %v\n", avgExplicitSync)
-	fmt.Printf("Explicit disk-sync share of total insert latency: %.2f%%\n", syncShare)
 }

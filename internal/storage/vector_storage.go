@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/DataIntelligenceCrew/go-faiss"
@@ -28,6 +29,7 @@ var ErrDeletionNotSupported = errors.New("vector deletion not supported for HNSW
 
 type VectorEngineImpl struct {
 	wal           *wal.WAL
+	walMu         sync.Mutex
 	maxVectorSize int
 
 	indexType string
@@ -47,11 +49,9 @@ type VectorEngineImpl struct {
 
 	lock sync.RWMutex
 
-	persistMu  sync.Mutex
-	persistBuf []struct {
-		id  int64
-		vec []float32
-	}
+	batchMu sync.Mutex
+	batch   map[int64]vectorBatchEntry
+	pending atomic.Bool
 }
 
 var _ VectorEngine = (*VectorEngineImpl)(nil)
@@ -61,9 +61,11 @@ type vectorStore struct {
 	index       faiss.Index
 	fileOffsets map[int64]int64
 	deletedIDs  map[int64]bool
-	// pendingUpsertIDs tracks IDs added to FAISS but not yet flushed to disk, so
-	// repeated inserts can replace the pending index entry.
-	pendingUpsertIDs map[int64]struct{}
+}
+
+type vectorBatchEntry struct {
+	vector  []float32
+	deleted bool
 }
 
 // NewVectorEngine builds/loads the ID-mapped FAISS index and opens data + WAL files.
@@ -86,6 +88,7 @@ func NewVectorEngineWithSettings(dataPath, indexPath, walPath string, maxVectorS
 		maxVectorSize:    maxVectorSize,
 		indexType:        indexDesc,
 		metric:           metric,
+		batch:            make(map[int64]vectorBatchEntry),
 		layout:           NewSegmentLayout(filepath.Dir(dataPath), "vector", ".db", ".faiss"),
 		primaryDataPath:  dataPath,
 		primaryIndexPath: indexPath,
@@ -253,11 +256,10 @@ func (ve *VectorEngineImpl) loadStore() error {
 	}
 	ve.manifest.Segments[0] = meta
 	ve.store = &vectorStore{
-		dataFile:         dataFile,
-		index:            index,
-		fileOffsets:      offsets,
-		deletedIDs:       deletedIDs,
-		pendingUpsertIDs: make(map[int64]struct{}),
+		dataFile:    dataFile,
+		index:       index,
+		fileOffsets: offsets,
+		deletedIDs:  deletedIDs,
 	}
 	return WriteSegmentManifest(ve.layout, ve.manifest)
 }
@@ -266,55 +268,33 @@ func (ve *VectorEngineImpl) InsertVector(id int64, vector []float32) error {
 	if len(vector) != ve.maxVectorSize {
 		return fmt.Errorf("vector length mismatch: expected %d", ve.maxVectorSize)
 	}
+	ve.maintenanceMu.RLock()
+	defer ve.maintenanceMu.RUnlock()
+	if ve.maintenanceClosed {
+		return errors.New("vector engine is closed")
+	}
 
-	// 1) WAL first (if enabled)
+	entry := vectorBatchEntry{vector: append([]float32(nil), vector...)}
 	if ve.wal != nil {
+		ve.walMu.Lock()
 		key := make([]byte, 8)
 		binary.LittleEndian.PutUint64(key, uint64(id))
 		if err := ve.wal.WriteEntry(string(key), string(float32ArrayToBytes(vector))); err != nil {
+			ve.walMu.Unlock()
 			return err
 		}
+		ve.batchMu.Lock()
+		ve.batch[id] = entry
+		ve.pending.Store(true)
+		ve.batchMu.Unlock()
+		ve.walMu.Unlock()
+	} else {
+		ve.batchMu.Lock()
+		ve.batch[id] = entry
+		ve.pending.Store(true)
+		ve.batchMu.Unlock()
 	}
-
-	// 2) Ingest (train if needed, add to FAISS, enqueue persistence), then mark committed.
-	if err := ve.insertAfterWAL(id, vector); err != nil {
-		return err
-	}
-
-	if ve.wal != nil {
-		return ve.wal.MarkCommitted()
-	}
-	return nil
-}
-
-// insertAfterWAL performs the ingest without writing to WAL (used by InsertVector and WAL replay).
-func (ve *VectorEngineImpl) insertAfterWAL(id int64, vector []float32) error {
-	ve.lock.Lock()
-	defer ve.lock.Unlock()
-
-	store := ve.store
-	if store == nil {
-		return errors.New("vector storage is not initialized")
-	}
-
-	replace := false
-	if _, ok := store.pendingUpsertIDs[id]; ok {
-		replace = true
-	} else if _, ok := store.fileOffsets[id]; ok && !store.deletedIDs[id] {
-		replace = true
-	}
-	if replace {
-		sel, _ := faiss.NewIDSelectorBatch([]int64{id})
-		_, _ = store.index.RemoveIDs(sel)
-		sel.Delete()
-	}
-
-	if err := store.index.AddWithIDs(vector, []int64{id}); err != nil {
-		return err
-	}
-	delete(store.deletedIDs, id)
-	store.pendingUpsertIDs[id] = struct{}{}
-	ve.enqueuePersist(id, vector)
+	maintenance.MarkVectorFlushDirty(ve)
 	return nil
 }
 
@@ -325,6 +305,7 @@ func (ve *VectorEngineImpl) SearchTopK(query []float32, k int) ([]int64, []float
 	if k <= 0 {
 		return []int64{}, []float32{}, nil
 	}
+	pending := ve.snapshotBatch()
 	ve.lock.RLock()
 	defer ve.lock.RUnlock()
 
@@ -336,6 +317,12 @@ func (ve *VectorEngineImpl) SearchTopK(query []float32, k int) ([]int64, []float
 	searchK := int64(k)
 	var dists []float32
 	var labels []int64
+	pendingLive := 0
+	for _, entry := range pending {
+		if !entry.deleted {
+			pendingLive++
+		}
+	}
 	for {
 		var err error
 		dists, labels, err = store.index.Search(query, searchK)
@@ -347,12 +334,15 @@ func (ve *VectorEngineImpl) SearchTopK(query []float32, k int) ([]int64, []float
 			if label < 0 || store.deletedIDs[label] {
 				continue
 			}
+			if _, staged := pending[label]; staged {
+				continue
+			}
 			if _, exists := store.fileOffsets[label]; exists {
 				valid++
 			}
 		}
 		total := store.index.Ntotal()
-		if valid >= k || searchK >= total {
+		if valid+pendingLive >= k || searchK >= total {
 			break
 		}
 		// Expand only when stale or unflushed entries were filtered. The normal
@@ -361,6 +351,43 @@ func (ve *VectorEngineImpl) SearchTopK(query []float32, k int) ([]int64, []float
 		if searchK > total {
 			searchK = total
 		}
+	}
+
+	if len(pending) > 0 {
+		type pair struct {
+			id       int64
+			distance float32
+		}
+		candidates := make([]pair, 0, len(labels)+pendingLive)
+		for i, label := range labels {
+			if label < 0 || store.deletedIDs[label] {
+				continue
+			}
+			if _, staged := pending[label]; staged {
+				continue
+			}
+			if _, exists := store.fileOffsets[label]; exists {
+				candidates = append(candidates, pair{id: label, distance: dists[i]})
+			}
+		}
+		for id, entry := range pending {
+			if !entry.deleted {
+				candidates = append(candidates, pair{id: id, distance: vectorDistance(ve.metric, query, entry.vector)})
+			}
+		}
+		sort.Slice(candidates, func(i, j int) bool {
+			return betterDistanceForMetric(ve.metric, candidates[i].distance, candidates[j].distance)
+		})
+		if len(candidates) > k {
+			candidates = candidates[:k]
+		}
+		ids := make([]int64, len(candidates))
+		filteredDists := make([]float32, len(candidates))
+		for i, candidate := range candidates {
+			ids[i] = candidate.id
+			filteredDists[i] = candidate.distance
+		}
+		return ids, filteredDists, nil
 	}
 
 	ids := make([]int64, 0, k)
@@ -386,6 +413,7 @@ func (ve *VectorEngineImpl) RangeSearch(query []float32, radius float32) ([]int6
 		return nil, nil, errors.New("invalid query size")
 	}
 
+	pending := ve.snapshotBatch()
 	ve.lock.RLock()
 	defer ve.lock.RUnlock()
 	store := ve.store
@@ -413,12 +441,24 @@ func (ve *VectorEngineImpl) RangeSearch(query []float32, radius float32) ([]int6
 		if store.deletedIDs[labels[i]] {
 			continue
 		}
+		if _, staged := pending[labels[i]]; staged {
+			continue
+		}
 		if _, exists := store.fileOffsets[labels[i]]; !exists {
 			continue
 		}
 		ps = append(ps, pair{id: labels[i], dst: dists[i]})
 	}
 	res.Delete()
+	for id, entry := range pending {
+		if entry.deleted {
+			continue
+		}
+		distance := vectorDistance(ve.metric, query, entry.vector)
+		if distanceWithinRadius(ve.metric, distance, radius) {
+			ps = append(ps, pair{id: id, dst: distance})
+		}
+	}
 
 	sort.Slice(ps, func(i, j int) bool {
 		return betterDistanceForMetric(ve.metric, ps[i].dst, ps[j].dst)
@@ -433,6 +473,18 @@ func (ve *VectorEngineImpl) RangeSearch(query []float32, radius float32) ([]int6
 }
 
 func (ve *VectorEngineImpl) GetVectorByID(id int64) ([]float32, error) {
+	if ve.pending.Load() {
+		ve.batchMu.Lock()
+		entry, exists := ve.batch[id]
+		ve.batchMu.Unlock()
+		if exists {
+			if entry.deleted {
+				return nil, fmt.Errorf("ID %d not found", id)
+			}
+			return append([]float32(nil), entry.vector...), nil
+		}
+	}
+
 	ve.lock.RLock()
 	defer ve.lock.RUnlock()
 	store := ve.store
@@ -459,88 +511,33 @@ func (ve *VectorEngineImpl) RemoveVector(id int64) error {
 	if strings.HasPrefix(ve.indexType, "HNSW") {
 		return ErrDeletionNotSupported
 	}
-
-	// 1) Persist tombstone in the same data file (like key_value_storage Delete: no extra file).
-	if err := ve.appendTombstoneToDataFile(id); err != nil {
-		return err
+	ve.maintenanceMu.RLock()
+	defer ve.maintenanceMu.RUnlock()
+	if ve.maintenanceClosed {
+		return errors.New("vector engine is closed")
 	}
 
-	// 2) WAL - log the deletion (if enabled) for crash recovery
+	entry := vectorBatchEntry{deleted: true}
 	if ve.wal != nil {
+		ve.walMu.Lock()
 		key := make([]byte, 8)
 		binary.LittleEndian.PutUint64(key, uint64(id))
 		if err := ve.wal.WriteDelete(string(key)); err != nil {
+			ve.walMu.Unlock()
 			return err
 		}
+		ve.batchMu.Lock()
+		ve.batch[id] = entry
+		ve.pending.Store(true)
+		ve.batchMu.Unlock()
+		ve.walMu.Unlock()
+	} else {
+		ve.batchMu.Lock()
+		ve.batch[id] = entry
+		ve.pending.Store(true)
+		ve.batchMu.Unlock()
 	}
-
-	// 3) Remove from FAISS index and pendingAdd; fileOffsets[id] already points to tombstone
-	if err := ve.removeAfterWAL(id); err != nil {
-		return err
-	}
-
-	if ve.wal != nil {
-		return ve.wal.MarkCommitted()
-	}
-	return nil
-}
-
-// removeAfterWAL performs the removal without writing to WAL (used by RemoveVector and WAL replay).
-func (ve *VectorEngineImpl) removeAfterWAL(id int64) error {
-	ve.lock.Lock()
-	defer ve.lock.Unlock()
-
-	store := ve.store
-	if store == nil {
-		return errors.New("vector storage is not initialized")
-	}
-
-	sel, err := faiss.NewIDSelectorBatch([]int64{id})
-	if err != nil {
-		return fmt.Errorf("create ID selector: %w", err)
-	}
-	defer sel.Delete()
-
-	_, err = store.index.RemoveIDs(sel)
-	if err != nil {
-		log.Printf("warning: RemoveIDs failed for index type %s: %v", ve.indexType, err)
-	}
-	store.deletedIDs[id] = true
-	delete(store.pendingUpsertIDs, id)
-
-	return nil
-}
-
-// appendTombstoneToDataFile appends a tombstone record for id to the data file (same format as
-// normal records; first float32 of payload = tombstoneMarker) and updates fileOffsets[id].
-// Same pattern as key_value_storage.Delete: persist delete on disk in the main file.
-func (ve *VectorEngineImpl) appendTombstoneToDataFile(id int64) error {
-	ve.lock.Lock()
-	defer ve.lock.Unlock()
-
-	store := ve.store
-	if store == nil {
-		return errors.New("vector storage is not initialized")
-	}
-
-	pos, err := store.dataFile.Seek(0, io.SeekEnd)
-	if err != nil {
-		return err
-	}
-	recordSize := 8 + 4*ve.maxVectorSize
-	buf := make([]byte, recordSize)
-	binary.LittleEndian.PutUint64(buf[0:8], uint64(id))
-	binary.LittleEndian.PutUint32(buf[8:12], tombstoneMarker)
-	// rest is zero; same size as a normal vector record
-	if _, err := store.dataFile.Write(buf); err != nil {
-		return err
-	}
-	if err := store.dataFile.Sync(); err != nil {
-		return err
-	}
-	store.fileOffsets[id] = pos
-	store.deletedIDs[id] = true
-	delete(store.pendingUpsertIDs, id)
+	maintenance.MarkVectorFlushDirty(ve)
 	return nil
 }
 
@@ -552,8 +549,9 @@ func (ve *VectorEngineImpl) Close() error {
 		maintenance.UnregisterVectorCheckpoint(ve)
 		ve.maintenanceMu.Unlock()
 
-		// Final flush of any pending data-file writes
-		ve.flushData(true)
+		if err := ve.FlushBatch(); err != nil {
+			log.Printf("final vector batch flush failed: %v", err)
+		}
 
 		if ve.wal != nil {
 			_ = ve.wal.Close()
@@ -605,12 +603,9 @@ func (ve *VectorEngineImpl) replayWAL() error {
 		}
 		id := int64(binary.LittleEndian.Uint64(keyBytes))
 
-		// Check if this is a deletion (empty value)
 		if entry.Flag == wal.EntryDeleted {
-			// IMPORTANT: do not write to WAL here again — just remove.
-			if err := ve.removeAfterWAL(id); err != nil {
-				return fmt.Errorf("replay remove id=%d: %w", id, err)
-			}
+			ve.batch[id] = vectorBatchEntry{deleted: true}
+			ve.pending.Store(true)
 			continue
 		}
 
@@ -619,46 +614,10 @@ func (ve *VectorEngineImpl) replayWAL() error {
 			return fmt.Errorf("WAL decode: %w", err)
 		}
 
-		if err := ve.insertAfterWAL(id, vec); err != nil {
-			return fmt.Errorf("replay insert id=%d: %w", id, err)
-		}
+		ve.batch[id] = vectorBatchEntry{vector: vec}
+		ve.pending.Store(true)
 	}
-
-	ve.wal.Clear()
-	return nil
-}
-
-func (ve *VectorEngineImpl) appendToDataFile(id int64, vector []float32) error {
-	store := ve.store
-	if store == nil {
-		return errors.New("vector storage is not initialized")
-	}
-
-	pos, err := store.dataFile.Seek(0, io.SeekEnd)
-	if err != nil {
-		return err
-	}
-	buf := make([]byte, 8+len(vector)*4)
-	binary.LittleEndian.PutUint64(buf[0:8], uint64(id))
-	for i, v := range vector {
-		binary.LittleEndian.PutUint32(buf[8+i*4:], math.Float32bits(v))
-	}
-	if _, err := store.dataFile.Write(buf); err != nil {
-		return err
-	}
-	store.fileOffsets[id] = pos
-	delete(store.deletedIDs, id)
-	return nil
-}
-
-func (ve *VectorEngineImpl) enqueuePersist(id int64, vec []float32) {
-	ve.persistMu.Lock()
-	ve.persistBuf = append(ve.persistBuf, struct {
-		id  int64
-		vec []float32
-	}{id: id, vec: vec})
-	ve.persistMu.Unlock()
-	maintenance.MarkVectorFlushDirty(ve)
+	return ve.FlushBatch()
 }
 
 // MaintenanceFlush participates in the shared vector flush loop.
@@ -668,7 +627,9 @@ func (ve *VectorEngineImpl) MaintenanceFlush() {
 	if ve.maintenanceClosed {
 		return
 	}
-	ve.flushData(false)
+	if err := ve.FlushBatch(); err != nil {
+		log.Printf("vector batch flush failed: %v", err)
+	}
 }
 
 // MaintenanceCheckpoint participates in the shared vector checkpoint loop.
@@ -683,41 +644,180 @@ func (ve *VectorEngineImpl) MaintenanceCheckpoint() {
 	}
 }
 
-func (ve *VectorEngineImpl) flushData(force bool) {
-	ve.persistMu.Lock()
-	buf := ve.persistBuf
-	if !force && len(buf) == 0 {
-		ve.persistMu.Unlock()
-		return
-	}
-	ve.persistBuf = nil
-	ve.persistMu.Unlock()
-
-	if len(buf) == 0 {
-		return
+func (ve *VectorEngineImpl) FlushBatch() error {
+	if ve.wal != nil {
+		ve.walMu.Lock()
+		defer ve.walMu.Unlock()
 	}
 
-	// Hold the write lock only for the in-memory fileOffsets updates and
-	// the raw file writes. Release before fsync so searches are not blocked
-	// for the full duration of the (potentially slow) syscall.
-	ve.lock.Lock()
-	store := ve.store
-	if store == nil {
-		ve.lock.Unlock()
-		return
+	ve.batchMu.Lock()
+	batch := ve.batch
+	ve.batch = make(map[int64]vectorBatchEntry)
+	ve.pending.Store(false)
+	ve.batchMu.Unlock()
+
+	if len(batch) == 0 {
+		if ve.wal != nil {
+			return ve.wal.Clear()
+		}
+		return nil
 	}
-	for _, it := range buf {
-		if err := ve.appendToDataFile(it.id, it.vec); err != nil {
-			log.Printf("appendToDataFile failed for id=%d: %v", it.id, err)
-		} else {
-			delete(store.pendingUpsertIDs, it.id)
+
+	if err := ve.flushBatch(batch); err != nil {
+		ve.batchMu.Lock()
+		for id, entry := range batch {
+			if _, newer := ve.batch[id]; !newer {
+				ve.batch[id] = entry
+			}
+		}
+		ve.pending.Store(len(ve.batch) > 0)
+		ve.batchMu.Unlock()
+		maintenance.MarkVectorFlushDirty(ve)
+		return err
+	}
+
+	if ve.wal != nil {
+		if err := ve.wal.Clear(); err != nil {
+			maintenance.MarkVectorFlushDirty(ve)
+			return err
 		}
 	}
-	ve.lock.Unlock()
+	return nil
+}
+
+func (ve *VectorEngineImpl) flushBatch(batch map[int64]vectorBatchEntry) error {
+	ve.lock.Lock()
+	defer ve.lock.Unlock()
+
+	store := ve.store
+	if store == nil {
+		return errors.New("vector storage is not initialized")
+	}
+
+	type appliedEntry struct {
+		id      int64
+		offset  int64
+		deleted bool
+	}
+	applied := make([]appliedEntry, 0, len(batch))
+	ids := make([]int64, 0, len(batch))
+	vectors := make([]float32, 0, len(batch)*ve.maxVectorSize)
+	removeIDs := make([]int64, 0, len(batch))
+	rebuildIndex := false
+
+	for id, entry := range batch {
+		offset, err := appendVectorBatchRecord(store.dataFile, id, entry, ve.maxVectorSize)
+		if err != nil {
+			return fmt.Errorf("append vector batch record %d: %w", id, err)
+		}
+		applied = append(applied, appliedEntry{id: id, offset: offset, deleted: entry.deleted})
+
+		if _, exists := store.fileOffsets[id]; exists && !store.deletedIDs[id] {
+			removeIDs = append(removeIDs, id)
+			if strings.HasPrefix(ve.indexType, "HNSW") {
+				rebuildIndex = true
+			}
+		}
+		if !entry.deleted {
+			ids = append(ids, id)
+			vectors = append(vectors, entry.vector...)
+		}
+	}
 
 	if err := store.dataFile.Sync(); err != nil {
-		log.Printf("data file sync failed: %v", err)
+		return fmt.Errorf("sync vector data batch: %w", err)
 	}
+
+	if rebuildIndex {
+		return ve.rebuildStoreIndexLocked()
+	}
+
+	if len(removeIDs) > 0 {
+		selector, err := faiss.NewIDSelectorBatch(removeIDs)
+		if err != nil {
+			return fmt.Errorf("create batch ID selector: %w", err)
+		}
+		_, removeErr := store.index.RemoveIDs(selector)
+		selector.Delete()
+		if removeErr != nil {
+			if err := ve.rebuildStoreIndexLocked(); err != nil {
+				return fmt.Errorf("remove batch IDs: %v; rebuild index: %w", removeErr, err)
+			}
+			return nil
+		}
+	}
+
+	if len(ids) > 0 {
+		if err := store.index.AddWithIDs(vectors, ids); err != nil {
+			if rebuildErr := ve.rebuildStoreIndexLocked(); rebuildErr != nil {
+				return fmt.Errorf("add vector batch: %v; rebuild index: %w", err, rebuildErr)
+			}
+			return nil
+		}
+	}
+
+	for _, entry := range applied {
+		store.fileOffsets[entry.id] = entry.offset
+		if entry.deleted {
+			store.deletedIDs[entry.id] = true
+		} else {
+			delete(store.deletedIDs, entry.id)
+		}
+	}
+	return nil
+}
+
+func (ve *VectorEngineImpl) rebuildStoreIndexLocked() error {
+	index, err := buildVectorIndexFromDataFile(ve.primaryDataPath, ve.maxVectorSize, ve.activeIndexDesc(), ve.metric)
+	if err != nil {
+		return fmt.Errorf("rebuild vector index after batch update: %w", err)
+	}
+	offsets, deletedIDs, err := scanVectorDataFile(ve.primaryDataPath, ve.maxVectorSize)
+	if err != nil {
+		index.Delete()
+		return fmt.Errorf("rescan vector data after batch update: %w", err)
+	}
+	ve.store.index.Delete()
+	ve.store.index = index
+	ve.store.fileOffsets = offsets
+	ve.store.deletedIDs = deletedIDs
+	return nil
+}
+
+func appendVectorBatchRecord(file *os.File, id int64, entry vectorBatchEntry, dimension int) (int64, error) {
+	offset, err := file.Seek(0, io.SeekEnd)
+	if err != nil {
+		return 0, err
+	}
+	buf := make([]byte, 8+4*dimension)
+	binary.LittleEndian.PutUint64(buf[:8], uint64(id))
+	if entry.deleted {
+		binary.LittleEndian.PutUint32(buf[8:12], tombstoneMarker)
+	} else {
+		for i, value := range entry.vector {
+			binary.LittleEndian.PutUint32(buf[8+i*4:], math.Float32bits(value))
+		}
+	}
+	if _, err := file.Write(buf); err != nil {
+		return 0, err
+	}
+	return offset, nil
+}
+
+func (ve *VectorEngineImpl) snapshotBatch() map[int64]vectorBatchEntry {
+	if !ve.pending.Load() {
+		return nil
+	}
+	ve.batchMu.Lock()
+	defer ve.batchMu.Unlock()
+	if len(ve.batch) == 0 {
+		return nil
+	}
+	batch := make(map[int64]vectorBatchEntry, len(ve.batch))
+	for id, entry := range ve.batch {
+		batch[id] = entry
+	}
+	return batch
 }
 
 func float32ArrayToBytes(arr []float32) []byte {
@@ -916,4 +1016,26 @@ func betterDistanceForMetric(metric int, left, right float32) bool {
 		return left > right
 	}
 	return left < right
+}
+
+func vectorDistance(metric int, left, right []float32) float32 {
+	var distance float32
+	if metric == faiss.MetricInnerProduct {
+		for i := range left {
+			distance += left[i] * right[i]
+		}
+		return distance
+	}
+	for i := range left {
+		delta := left[i] - right[i]
+		distance += delta * delta
+	}
+	return distance
+}
+
+func distanceWithinRadius(metric int, distance, radius float32) bool {
+	if metric == faiss.MetricInnerProduct {
+		return distance > radius
+	}
+	return distance < radius
 }

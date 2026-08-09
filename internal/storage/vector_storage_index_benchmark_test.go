@@ -54,6 +54,9 @@ func BenchmarkVectorEngineInsert(b *testing.B) {
 					b.Fatalf("insert(%s): %v", indexType, err)
 				}
 			}
+			if err := e.FlushBatch(); err != nil {
+				b.Fatalf("FlushBatch(%s): %v", indexType, err)
+			}
 		})
 	}
 }
@@ -74,7 +77,9 @@ func seedBenchVectorEngine(b *testing.B, indexType string) (*VectorEngineImpl, [
 			queries = append(queries, vec)
 		}
 	}
-	e.flushData(true)
+	if err := e.FlushBatch(); err != nil {
+		b.Fatalf("FlushBatch failed: %v", err)
+	}
 	return e, queries
 }
 
