@@ -167,8 +167,8 @@ func TestFAISSVectorIndexesNeverRollOver(t *testing.T) {
 			}
 			ve.flushData(true)
 
-			if len(ve.segments) != 1 || len(ve.manifest.Segments) != 1 {
-				t.Fatalf("FAISS index %q rolled over: segments=%d manifest=%d", indexDesc, len(ve.segments), len(ve.manifest.Segments))
+			if ve.store == nil || len(ve.manifest.Segments) != 1 {
+				t.Fatalf("FAISS index %q did not retain a single store", indexDesc)
 			}
 			if matches, err := filepath.Glob(filepath.Join(dir, "vector_segment_*")); err != nil || len(matches) != 0 {
 				t.Fatalf("unexpected FAISS segment files %v, err=%v", matches, err)
@@ -205,8 +205,8 @@ func TestFAISSVectorSearchTopKExpandsOnlyWhenResultsAreFiltered(t *testing.T) {
 	// Simulate stale FAISS entries that must be filtered. SearchTopK should retry
 	// only in this exceptional case instead of always requesting k*8 candidates.
 	ve.lock.Lock()
-	ve.segments[0].deletedIDs[1] = true
-	ve.segments[0].deletedIDs[2] = true
+	ve.store.deletedIDs[1] = true
+	ve.store.deletedIDs[2] = true
 	ve.lock.Unlock()
 
 	ids, _, err := ve.SearchTopK([]float32{0, 0}, 2)

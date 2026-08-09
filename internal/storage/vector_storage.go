@@ -37,7 +37,7 @@ type VectorEngineImpl struct {
 	primaryDataPath  string
 	primaryIndexPath string
 	manifest         *SegmentManifest
-	segments         []*vectorSegment
+	store            *vectorStore
 
 	// Lifecycle / checkpointing
 	closeOnce         sync.Once
@@ -56,15 +56,13 @@ type VectorEngineImpl struct {
 
 var _ VectorEngine = (*VectorEngineImpl)(nil)
 
-type vectorSegment struct {
-	meta        SegmentMeta
+type vectorStore struct {
 	dataFile    *os.File
 	index       faiss.Index
 	fileOffsets map[int64]int64
 	deletedIDs  map[int64]bool
-	// pendingUpsertIDs tracks IDs present in the FAISS index but not yet flushed to
-	// the data file. RemoveIDs on some IVF variants aborts if the ID is missing;
-	// we only remove when replacing an existing vector (disk or pending).
+	// pendingUpsertIDs tracks IDs added to FAISS but not yet flushed to disk, so
+	// repeated inserts can replace the pending index entry.
 	pendingUpsertIDs map[int64]struct{}
 }
 
@@ -109,7 +107,7 @@ func NewVectorEngineWithSettings(dataPath, indexPath, walPath string, maxVectorS
 		return nil, err
 	}
 
-	if err := e.loadSegments(); err != nil {
+	if err := e.loadStore(); err != nil {
 		if e.wal != nil {
 			_ = e.wal.Close()
 		}
@@ -221,49 +219,46 @@ func (ve *VectorEngineImpl) compactLegacySegmentedLayoutIfNeeded() error {
 	return WriteSegmentManifest(ve.layout, ve.manifest)
 }
 
-func (ve *VectorEngineImpl) loadSegments() error {
+func (ve *VectorEngineImpl) loadStore() error {
 	ve.lock.Lock()
 	defer ve.lock.Unlock()
 
-	ve.segments = nil
-	if len(ve.manifest.Segments) == 0 {
-		return errors.New("segment manifest has no segments")
+	ve.store = nil
+	if len(ve.manifest.Segments) != 1 {
+		return fmt.Errorf("FAISS manifest must contain one storage file, got %d", len(ve.manifest.Segments))
 	}
 
-	ve.manifest.ActiveSegmentID = ve.manifest.Segments[len(ve.manifest.Segments)-1].ID
-	for idx, meta := range ve.manifest.Segments {
-		desc := ve.layout.Descriptor(meta)
-		dataFile, err := os.OpenFile(desc.DataPath, os.O_RDWR|os.O_CREATE, 0666)
-		if err != nil {
-			return err
-		}
-
-		offsets, deletedIDs, err := scanVectorDataFile(desc.DataPath, ve.maxVectorSize)
-		if err != nil {
-			_ = dataFile.Close()
-			return err
-		}
-
-		index, err := buildVectorIndexFromDataFile(desc.DataPath, ve.maxVectorSize, ve.activeIndexDesc(), ve.metric)
-		meta.State = SegmentStateHot
-		if err != nil {
-			_ = dataFile.Close()
-			return err
-		}
-		if info, err := dataFile.Stat(); err == nil {
-			meta.SizeBytes = info.Size()
-		}
-		ve.manifest.Segments[idx] = meta
-		ve.segments = append(ve.segments, &vectorSegment{
-			meta:             meta,
-			dataFile:         dataFile,
-			index:            index,
-			fileOffsets:      offsets,
-			deletedIDs:       deletedIDs,
-			pendingUpsertIDs: make(map[int64]struct{}),
-		})
+	meta := ve.manifest.Segments[0]
+	ve.manifest.ActiveSegmentID = meta.ID
+	desc := ve.layout.Descriptor(meta)
+	dataFile, err := os.OpenFile(desc.DataPath, os.O_RDWR|os.O_CREATE, 0666)
+	if err != nil {
+		return err
 	}
 
+	offsets, deletedIDs, err := scanVectorDataFile(desc.DataPath, ve.maxVectorSize)
+	if err != nil {
+		_ = dataFile.Close()
+		return err
+	}
+
+	index, err := buildVectorIndexFromDataFile(desc.DataPath, ve.maxVectorSize, ve.activeIndexDesc(), ve.metric)
+	if err != nil {
+		_ = dataFile.Close()
+		return err
+	}
+	meta.State = SegmentStateHot
+	if info, err := dataFile.Stat(); err == nil {
+		meta.SizeBytes = info.Size()
+	}
+	ve.manifest.Segments[0] = meta
+	ve.store = &vectorStore{
+		dataFile:         dataFile,
+		index:            index,
+		fileOffsets:      offsets,
+		deletedIDs:       deletedIDs,
+		pendingUpsertIDs: make(map[int64]struct{}),
+	}
 	return WriteSegmentManifest(ve.layout, ve.manifest)
 }
 
@@ -297,28 +292,28 @@ func (ve *VectorEngineImpl) insertAfterWAL(id int64, vector []float32) error {
 	ve.lock.Lock()
 	defer ve.lock.Unlock()
 
-	active := ve.activeSegmentLocked()
-	if active == nil {
-		return errors.New("no active vector segment")
+	store := ve.store
+	if store == nil {
+		return errors.New("vector storage is not initialized")
 	}
 
 	replace := false
-	if _, ok := active.pendingUpsertIDs[id]; ok {
+	if _, ok := store.pendingUpsertIDs[id]; ok {
 		replace = true
-	} else if _, ok := active.fileOffsets[id]; ok && !active.deletedIDs[id] {
+	} else if _, ok := store.fileOffsets[id]; ok && !store.deletedIDs[id] {
 		replace = true
 	}
 	if replace {
 		sel, _ := faiss.NewIDSelectorBatch([]int64{id})
-		_, _ = active.index.RemoveIDs(sel)
+		_, _ = store.index.RemoveIDs(sel)
 		sel.Delete()
 	}
 
-	if err := active.index.AddWithIDs(vector, []int64{id}); err != nil {
+	if err := store.index.AddWithIDs(vector, []int64{id}); err != nil {
 		return err
 	}
-	delete(active.deletedIDs, id)
-	active.pendingUpsertIDs[id] = struct{}{}
+	delete(store.deletedIDs, id)
+	store.pendingUpsertIDs[id] = struct{}{}
 	ve.enqueuePersist(id, vector)
 	return nil
 }
@@ -333,78 +328,57 @@ func (ve *VectorEngineImpl) SearchTopK(query []float32, k int) ([]int64, []float
 	ve.lock.RLock()
 	defer ve.lock.RUnlock()
 
-	type pair struct {
-		id  int64
-		dst float32
+	store := ve.store
+	if store == nil {
+		return nil, nil, errors.New("vector storage is not initialized")
 	}
-	shadowed := make(map[int64]struct{})
-	candidates := make([]pair, 0, k*len(ve.segments))
 
-	for segIdx := len(ve.segments) - 1; segIdx >= 0; segIdx-- {
-		segment := ve.segments[segIdx]
-		searchK := int64(k)
-		var dists []float32
-		var labels []int64
-		for {
-			var err error
-			dists, labels, err = segment.index.Search(query, searchK)
-			if err != nil {
-				return nil, nil, err
+	searchK := int64(k)
+	var dists []float32
+	var labels []int64
+	for {
+		var err error
+		dists, labels, err = store.index.Search(query, searchK)
+		if err != nil {
+			return nil, nil, err
+		}
+		valid := 0
+		for _, label := range labels {
+			if label < 0 || store.deletedIDs[label] {
+				continue
 			}
-			valid := 0
-			for _, label := range labels {
-				if label < 0 || segment.deletedIDs[label] {
-					continue
-				}
-				if _, seen := shadowed[label]; seen {
-					continue
-				}
-				if _, exists := segment.fileOffsets[label]; exists {
-					valid++
-				}
-			}
-			total := segment.index.Ntotal()
-			if valid >= k || searchK >= total {
-				break
-			}
-			searchK *= 2
-			if searchK > total {
-				searchK = total
+			if _, exists := store.fileOffsets[label]; exists {
+				valid++
 			}
 		}
-		for i, label := range labels {
-			if label < 0 {
-				continue
-			}
-			if _, seen := shadowed[label]; seen {
-				continue
-			}
-			if segment.deletedIDs[label] {
-				continue
-			}
-			if _, exists := segment.fileOffsets[label]; !exists {
-				continue
-			}
-			candidates = append(candidates, pair{id: label, dst: dists[i]})
+		total := store.index.Ntotal()
+		if valid >= k || searchK >= total {
+			break
 		}
-		for id := range segment.fileOffsets {
-			shadowed[id] = struct{}{}
+		// Expand only when stale or unflushed entries were filtered. The normal
+		// path asks FAISS for exactly k neighbors.
+		searchK *= 2
+		if searchK > total {
+			searchK = total
 		}
 	}
 
-	sort.Slice(candidates, func(i, j int) bool {
-		return betterDistanceForMetric(ve.metric, candidates[i].dst, candidates[j].dst)
-	})
-	if len(candidates) > k {
-		candidates = candidates[:k]
+	ids := make([]int64, 0, k)
+	filteredDists := make([]float32, 0, k)
+	for i, label := range labels {
+		if label < 0 || store.deletedIDs[label] {
+			continue
+		}
+		if _, exists := store.fileOffsets[label]; !exists {
+			continue
+		}
+		ids = append(ids, label)
+		filteredDists = append(filteredDists, dists[i])
+		if len(ids) == k {
+			break
+		}
 	}
-	ids := make([]int64, len(candidates))
-	dists := make([]float32, len(candidates))
-	for i, candidate := range candidates {
-		ids[i] = candidate.id
-		dists[i] = candidate.dst
-	}
-	return ids, dists, nil
+	return ids, filteredDists, nil
 }
 
 func (ve *VectorEngineImpl) RangeSearch(query []float32, radius float32) ([]int64, []float32, error) {
@@ -414,43 +388,37 @@ func (ve *VectorEngineImpl) RangeSearch(query []float32, radius float32) ([]int6
 
 	ve.lock.RLock()
 	defer ve.lock.RUnlock()
+	store := ve.store
+	if store == nil {
+		return nil, nil, errors.New("vector storage is not initialized")
+	}
 
 	type pair struct {
 		id  int64
 		dst float32
 	}
-	shadowed := make(map[int64]struct{})
 	var ps []pair
 
-	for segIdx := len(ve.segments) - 1; segIdx >= 0; segIdx-- {
-		segment := ve.segments[segIdx]
-		res, err := segment.index.RangeSearch(query, radius)
-		if err != nil {
-			return nil, nil, err
-		}
-		labels, dists := res.Labels()
-		lims := res.Lims()
-		if len(lims) != 2 {
-			res.Delete()
-			return nil, nil, fmt.Errorf("expected 1 query, got %d", len(lims)-1)
-		}
-		for i := int(lims[0]); i < int(lims[1]); i++ {
-			if _, seen := shadowed[labels[i]]; seen {
-				continue
-			}
-			if segment.deletedIDs[labels[i]] {
-				continue
-			}
-			if _, exists := segment.fileOffsets[labels[i]]; !exists {
-				continue
-			}
-			ps = append(ps, pair{id: labels[i], dst: dists[i]})
-		}
-		res.Delete()
-		for id := range segment.fileOffsets {
-			shadowed[id] = struct{}{}
-		}
+	res, err := store.index.RangeSearch(query, radius)
+	if err != nil {
+		return nil, nil, err
 	}
+	labels, dists := res.Labels()
+	lims := res.Lims()
+	if len(lims) != 2 {
+		res.Delete()
+		return nil, nil, fmt.Errorf("expected 1 query, got %d", len(lims)-1)
+	}
+	for i := int(lims[0]); i < int(lims[1]); i++ {
+		if store.deletedIDs[labels[i]] {
+			continue
+		}
+		if _, exists := store.fileOffsets[labels[i]]; !exists {
+			continue
+		}
+		ps = append(ps, pair{id: labels[i], dst: dists[i]})
+	}
+	res.Delete()
 
 	sort.Slice(ps, func(i, j int) bool {
 		return betterDistanceForMetric(ve.metric, ps[i].dst, ps[j].dst)
@@ -467,26 +435,23 @@ func (ve *VectorEngineImpl) RangeSearch(query []float32, radius float32) ([]int6
 func (ve *VectorEngineImpl) GetVectorByID(id int64) ([]float32, error) {
 	ve.lock.RLock()
 	defer ve.lock.RUnlock()
-	for idx := len(ve.segments) - 1; idx >= 0; idx-- {
-		segment := ve.segments[idx]
-		offset, ok := segment.fileOffsets[id]
-		if !ok {
-			continue
-		}
-		if segment.deletedIDs[id] {
-			return nil, fmt.Errorf("ID %d not found", id)
-		}
-		recordSize := 8 + 4*ve.maxVectorSize
-		buf := make([]byte, recordSize)
-		if _, err := segment.dataFile.ReadAt(buf, offset); err != nil {
-			return nil, fmt.Errorf("read vector at offset %d: %w", offset, err)
-		}
-		if len(buf) >= 12 && binary.LittleEndian.Uint32(buf[8:12]) == tombstoneMarker {
-			return nil, fmt.Errorf("ID %d not found", id)
-		}
-		return bytesToFloat32Array(buf[8:])
+	store := ve.store
+	if store == nil {
+		return nil, errors.New("vector storage is not initialized")
 	}
-	return nil, fmt.Errorf("ID %d not found", id)
+	offset, ok := store.fileOffsets[id]
+	if !ok || store.deletedIDs[id] {
+		return nil, fmt.Errorf("ID %d not found", id)
+	}
+	recordSize := 8 + 4*ve.maxVectorSize
+	buf := make([]byte, recordSize)
+	if _, err := store.dataFile.ReadAt(buf, offset); err != nil {
+		return nil, fmt.Errorf("read vector at offset %d: %w", offset, err)
+	}
+	if len(buf) >= 12 && binary.LittleEndian.Uint32(buf[8:12]) == tombstoneMarker {
+		return nil, fmt.Errorf("ID %d not found", id)
+	}
+	return bytesToFloat32Array(buf[8:])
 }
 
 func (ve *VectorEngineImpl) RemoveVector(id int64) error {
@@ -525,9 +490,9 @@ func (ve *VectorEngineImpl) removeAfterWAL(id int64) error {
 	ve.lock.Lock()
 	defer ve.lock.Unlock()
 
-	active := ve.activeSegmentLocked()
-	if active == nil {
-		return errors.New("no active vector segment")
+	store := ve.store
+	if store == nil {
+		return errors.New("vector storage is not initialized")
 	}
 
 	sel, err := faiss.NewIDSelectorBatch([]int64{id})
@@ -536,12 +501,12 @@ func (ve *VectorEngineImpl) removeAfterWAL(id int64) error {
 	}
 	defer sel.Delete()
 
-	_, err = active.index.RemoveIDs(sel)
+	_, err = store.index.RemoveIDs(sel)
 	if err != nil {
 		log.Printf("warning: RemoveIDs failed for index type %s: %v", ve.indexType, err)
 	}
-	active.deletedIDs[id] = true
-	delete(active.pendingUpsertIDs, id)
+	store.deletedIDs[id] = true
+	delete(store.pendingUpsertIDs, id)
 
 	return nil
 }
@@ -553,12 +518,12 @@ func (ve *VectorEngineImpl) appendTombstoneToDataFile(id int64) error {
 	ve.lock.Lock()
 	defer ve.lock.Unlock()
 
-	active := ve.activeSegmentLocked()
-	if active == nil {
-		return errors.New("no active vector segment")
+	store := ve.store
+	if store == nil {
+		return errors.New("vector storage is not initialized")
 	}
 
-	pos, err := active.dataFile.Seek(0, io.SeekEnd)
+	pos, err := store.dataFile.Seek(0, io.SeekEnd)
 	if err != nil {
 		return err
 	}
@@ -567,19 +532,15 @@ func (ve *VectorEngineImpl) appendTombstoneToDataFile(id int64) error {
 	binary.LittleEndian.PutUint64(buf[0:8], uint64(id))
 	binary.LittleEndian.PutUint32(buf[8:12], tombstoneMarker)
 	// rest is zero; same size as a normal vector record
-	if _, err := active.dataFile.Write(buf); err != nil {
+	if _, err := store.dataFile.Write(buf); err != nil {
 		return err
 	}
-	if err := active.dataFile.Sync(); err != nil {
+	if err := store.dataFile.Sync(); err != nil {
 		return err
 	}
-	active.fileOffsets[id] = pos
-	active.deletedIDs[id] = true
-	delete(active.pendingUpsertIDs, id)
-	if info, err := active.dataFile.Stat(); err == nil {
-		active.meta.SizeBytes = info.Size()
-		ve.updateSegmentMetaLocked(active.meta)
-	}
+	store.fileOffsets[id] = pos
+	store.deletedIDs[id] = true
+	delete(store.pendingUpsertIDs, id)
 	return nil
 }
 
@@ -598,9 +559,9 @@ func (ve *VectorEngineImpl) Close() error {
 			_ = ve.wal.Close()
 		}
 		ve.lock.Lock()
-		for _, segment := range ve.segments {
-			_ = segment.dataFile.Close()
-			segment.index.Delete()
+		if ve.store != nil {
+			_ = ve.store.dataFile.Close()
+			ve.store.index.Delete()
 		}
 		ve.lock.Unlock()
 	})
@@ -615,10 +576,11 @@ func (ve *VectorEngineImpl) checkpoint() error {
 
 	ve.lock.RLock()
 	defer ve.lock.RUnlock()
-	for _, segment := range ve.segments {
-		if err := segment.dataFile.Sync(); err != nil {
-			return fmt.Errorf("sync data file: %w", err)
-		}
+	if ve.store == nil {
+		return errors.New("vector storage is not initialized")
+	}
+	if err := ve.store.dataFile.Sync(); err != nil {
+		return fmt.Errorf("sync data file: %w", err)
 	}
 	return nil
 }
@@ -667,12 +629,12 @@ func (ve *VectorEngineImpl) replayWAL() error {
 }
 
 func (ve *VectorEngineImpl) appendToDataFile(id int64, vector []float32) error {
-	active := ve.activeSegmentLocked()
-	if active == nil {
-		return errors.New("no active vector segment")
+	store := ve.store
+	if store == nil {
+		return errors.New("vector storage is not initialized")
 	}
 
-	pos, err := active.dataFile.Seek(0, io.SeekEnd)
+	pos, err := store.dataFile.Seek(0, io.SeekEnd)
 	if err != nil {
 		return err
 	}
@@ -681,11 +643,11 @@ func (ve *VectorEngineImpl) appendToDataFile(id int64, vector []float32) error {
 	for i, v := range vector {
 		binary.LittleEndian.PutUint32(buf[8+i*4:], math.Float32bits(v))
 	}
-	if _, err := active.dataFile.Write(buf); err != nil {
+	if _, err := store.dataFile.Write(buf); err != nil {
 		return err
 	}
-	active.fileOffsets[id] = pos
-	delete(active.deletedIDs, id)
+	store.fileOffsets[id] = pos
+	delete(store.deletedIDs, id)
 	return nil
 }
 
@@ -739,8 +701,8 @@ func (ve *VectorEngineImpl) flushData(force bool) {
 	// the raw file writes. Release before fsync so searches are not blocked
 	// for the full duration of the (potentially slow) syscall.
 	ve.lock.Lock()
-	active := ve.activeSegmentLocked()
-	if active == nil {
+	store := ve.store
+	if store == nil {
 		ve.lock.Unlock()
 		return
 	}
@@ -748,16 +710,12 @@ func (ve *VectorEngineImpl) flushData(force bool) {
 		if err := ve.appendToDataFile(it.id, it.vec); err != nil {
 			log.Printf("appendToDataFile failed for id=%d: %v", it.id, err)
 		} else {
-			delete(active.pendingUpsertIDs, it.id)
+			delete(store.pendingUpsertIDs, it.id)
 		}
-	}
-	if info, err := active.dataFile.Stat(); err == nil {
-		active.meta.SizeBytes = info.Size()
-		ve.updateSegmentMetaLocked(active.meta)
 	}
 	ve.lock.Unlock()
 
-	if err := active.dataFile.Sync(); err != nil {
+	if err := store.dataFile.Sync(); err != nil {
 		log.Printf("data file sync failed: %v", err)
 	}
 }
@@ -779,30 +737,6 @@ func bytesToFloat32Array(buf []byte) ([]float32, error) {
 		vec[i] = math.Float32frombits(binary.LittleEndian.Uint32(buf[i*4:]))
 	}
 	return vec, nil
-}
-
-func (ve *VectorEngineImpl) activeSegmentLocked() *vectorSegment {
-	for _, segment := range ve.segments {
-		if segment.meta.ID == ve.manifest.ActiveSegmentID {
-			return segment
-		}
-	}
-	return nil
-}
-
-func (ve *VectorEngineImpl) updateSegmentMetaLocked(meta SegmentMeta) {
-	for idx := range ve.segments {
-		if ve.segments[idx].meta.ID == meta.ID {
-			ve.segments[idx].meta = meta
-			break
-		}
-	}
-	for idx := range ve.manifest.Segments {
-		if ve.manifest.Segments[idx].ID == meta.ID {
-			ve.manifest.Segments[idx] = meta
-			break
-		}
-	}
 }
 
 func buildVectorIndexFromDataFile(dataPath string, dimension int, indexDesc string, metric int) (faiss.Index, error) {
@@ -903,7 +837,11 @@ func scanVectorDataFile(dataPath string, dimension int) (map[int64]int64, map[in
 		}
 		id := int64(binary.LittleEndian.Uint64(buf[0:8]))
 		offsets[id] = offset
-		deletedIDs[id] = len(buf) >= 12 && binary.LittleEndian.Uint32(buf[8:12]) == tombstoneMarker
+		if len(buf) >= 12 && binary.LittleEndian.Uint32(buf[8:12]) == tombstoneMarker {
+			deletedIDs[id] = true
+		} else {
+			delete(deletedIDs, id)
+		}
 		offset += int64(recordSize)
 	}
 	return offsets, deletedIDs, nil
