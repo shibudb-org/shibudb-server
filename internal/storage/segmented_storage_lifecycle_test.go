@@ -177,6 +177,52 @@ func TestFAISSVectorIndexesNeverRollOver(t *testing.T) {
 	}
 }
 
+func TestFAISSVectorSearchTopKExpandsOnlyWhenResultsAreFiltered(t *testing.T) {
+	dir := t.TempDir()
+	ve, err := NewVectorEngine(
+		filepath.Join(dir, "vector_data.db"),
+		filepath.Join(dir, "vector_index.faiss"),
+		filepath.Join(dir, "vector_wal.db"),
+		2, "Flat", faiss.MetricL2, false,
+	)
+	if err != nil {
+		t.Fatalf("NewVectorEngine failed: %v", err)
+	}
+	defer ve.Close()
+
+	for id, vector := range map[int64][]float32{
+		1: {0, 0},
+		2: {0.1, 0},
+		3: {1, 0},
+		4: {2, 0},
+	} {
+		if err := ve.InsertVector(id, vector); err != nil {
+			t.Fatalf("InsertVector %d failed: %v", id, err)
+		}
+	}
+	ve.flushData(true)
+
+	// Simulate stale FAISS entries that must be filtered. SearchTopK should retry
+	// only in this exceptional case instead of always requesting k*8 candidates.
+	ve.lock.Lock()
+	ve.segments[0].deletedIDs[1] = true
+	ve.segments[0].deletedIDs[2] = true
+	ve.lock.Unlock()
+
+	ids, _, err := ve.SearchTopK([]float32{0, 0}, 2)
+	if err != nil {
+		t.Fatalf("SearchTopK failed: %v", err)
+	}
+	if len(ids) != 2 || ids[0] != 3 || ids[1] != 4 {
+		t.Fatalf("SearchTopK returned %v, want [3 4]", ids)
+	}
+
+	ids, dists, err := ve.SearchTopK([]float32{0, 0}, 0)
+	if err != nil || len(ids) != 0 || len(dists) != 0 {
+		t.Fatalf("SearchTopK k=0 returned ids=%v dists=%v err=%v", ids, dists, err)
+	}
+}
+
 func TestFAISSVectorCompactsLegacySegmentedLayout(t *testing.T) {
 	dir := t.TempDir()
 	dataPath := filepath.Join(dir, "vector_data.db")

@@ -327,6 +327,9 @@ func (ve *VectorEngineImpl) SearchTopK(query []float32, k int) ([]int64, []float
 	if len(query) != ve.maxVectorSize {
 		return nil, nil, errors.New("invalid query size")
 	}
+	if k <= 0 {
+		return []int64{}, []float32{}, nil
+	}
 	ve.lock.RLock()
 	defer ve.lock.RUnlock()
 
@@ -336,13 +339,38 @@ func (ve *VectorEngineImpl) SearchTopK(query []float32, k int) ([]int64, []float
 	}
 	shadowed := make(map[int64]struct{})
 	candidates := make([]pair, 0, k*len(ve.segments))
-	searchK := int64(maxInt(k*8, 32))
 
 	for segIdx := len(ve.segments) - 1; segIdx >= 0; segIdx-- {
 		segment := ve.segments[segIdx]
-		dists, labels, err := segment.index.Search(query, searchK)
-		if err != nil {
-			return nil, nil, err
+		searchK := int64(k)
+		var dists []float32
+		var labels []int64
+		for {
+			var err error
+			dists, labels, err = segment.index.Search(query, searchK)
+			if err != nil {
+				return nil, nil, err
+			}
+			valid := 0
+			for _, label := range labels {
+				if label < 0 || segment.deletedIDs[label] {
+					continue
+				}
+				if _, seen := shadowed[label]; seen {
+					continue
+				}
+				if _, exists := segment.fileOffsets[label]; exists {
+					valid++
+				}
+			}
+			total := segment.index.Ntotal()
+			if valid >= k || searchK >= total {
+				break
+			}
+			searchK *= 2
+			if searchK > total {
+				searchK = total
+			}
 		}
 		for i, label := range labels {
 			if label < 0 {
@@ -936,13 +964,6 @@ func writeMergedVectorDataFile(dataPath string, records map[int64][]byte) error 
 		return err
 	}
 	return os.Rename(tmpPath, dataPath)
-}
-
-func maxInt(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
 }
 
 func (ve *VectorEngineImpl) activeIndexDesc() string {
