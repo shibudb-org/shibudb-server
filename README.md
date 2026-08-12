@@ -17,6 +17,10 @@ ShibuDb is a lightweight database system with vector search capabilities powered
 - **📊 Dynamic Connection Management**: Runtime connection limit updates
 - **🛡️ Data Durability**: Write-Ahead Logging for crash recovery
 
+## 📈 Performance
+
+Benchmarked on v1.2.0 with SIFT1M (single 16-vCPU node): **~62k ops/s** key-value reads/writes at 1M keys, and sub-millisecond HNSW vector search (**0.85 recall@10, ~4,600 QPS peak** at 1M vectors). See the full [Performance Benchmarks](PERFORMANCE_BENCHMARKING.md) for all index types, scales, and WAL cost analysis.
+
 ## 🚀 Quick Start
 
 ### Installation
@@ -65,6 +69,7 @@ GET user:1
 
 ### Reference
 - **[API Reference](docs/API_REFERENCE.md)** - Complete command reference
+- **[Performance Benchmarks](PERFORMANCE_BENCHMARKING.md)** - Measured throughput, latency, and recall across all engines and index types
 - **[Troubleshooting](docs/TROUBLESHOOTING.md)** - Common issues and solutions
 
 ## 🏗️ Architecture
