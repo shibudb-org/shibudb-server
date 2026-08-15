@@ -336,6 +336,44 @@ func TestVectorFlatMetadataErrorsE2E(t *testing.T) {
 			t.Fatalf("expected ERROR creating non-Flat space with metadata fields, got: %s", strings.TrimSpace(resp))
 		}
 	})
+
+	t.Run("compression on non-flat-meta vector spaces is rejected", func(t *testing.T) {
+		cases := []struct {
+			space     string
+			indexType string
+			fields    []storage.MetadataFieldSpec
+			want      string
+		}{
+			{"vec_flat_comp_nometa_e2e", "Flat", nil, "indexed metadata fields"},
+			{"vec_hnsw_comp_e2e", "HNSW32", nil, `got index type "HNSW32"`},
+			{"vec_ivf_comp_e2e", "IVF32,Flat", nil, `got index type "IVF32,Flat"`},
+			{"vec_pq_comp_e2e", "PQ8", nil, `got index type "PQ8"`},
+		}
+		for _, tc := range cases {
+			CleanSpace(tc.space, conn, reader)
+			createQ := models.Query{
+				Type:                  models.TypeCreateSpace,
+				Space:                 tc.space,
+				EngineType:            "vector",
+				Dimension:             8,
+				IndexType:             tc.indexType,
+				Metric:                "L2",
+				IndexedMetadataFields: tc.fields,
+				Compression:           storage.VectorCompressionTurboQuant4Bits,
+			}
+			resp := sendQueryAndGetResponse(createQ, conn, reader)
+			if !strings.Contains(resp, "ERROR") {
+				t.Fatalf("%s: expected ERROR, got: %s", tc.space, strings.TrimSpace(resp))
+			}
+			if !strings.Contains(resp, "compression is only supported for Flat spaces declared with indexed metadata fields") {
+				t.Fatalf("%s: missing compression restriction in %s", tc.space, strings.TrimSpace(resp))
+			}
+			if !strings.Contains(resp, tc.want) {
+				t.Fatalf("%s: want %q in %s", tc.space, tc.want, strings.TrimSpace(resp))
+			}
+			CleanSpace(tc.space, conn, reader)
+		}
+	})
 }
 
 func TestVectorFlatMetadataTurboQuantE2E(t *testing.T) {

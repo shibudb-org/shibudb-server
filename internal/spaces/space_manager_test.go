@@ -618,24 +618,40 @@ func TestSpaceManager_TurboQuantCompression(t *testing.T) {
 		t.Fatalf("Compression = %q, want %q", meta.Compression, storage.VectorCompressionTurboQuant4Bits)
 	}
 
-	if _, err := sm.CreateSpaceWithSettingsAndMetadata(
-		"plain_comp", "vector", 8, "Flat", "L2", false,
-		storage.SpaceSettings{}, nil, storage.VectorCompressionTurboQuant4Bits,
-	); err == nil {
-		t.Fatal("expected error: compression requires indexed metadata fields")
+	comp := storage.VectorCompressionTurboQuant4Bits
+	cases := []struct {
+		name      string
+		engine    string
+		indexType string
+		fields    []storage.MetadataFieldSpec
+		wantSub   string
+	}{
+		{"faiss flat without metadata", "vector", "Flat", nil, "indexed metadata fields"},
+		{"hnsw32", "vector", "HNSW32", nil, `got index type "HNSW32"`},
+		{"hnsw32 with metadata fields", "vector", "HNSW32", fields, `got index type "HNSW32"`},
+		{"ivf32 flat", "vector", "IVF32,Flat", nil, `got index type "IVF32,Flat"`},
+		{"pq8", "vector", "PQ8", nil, `got index type "PQ8"`},
+		{"key-value btree", "key-value", "btree", nil, `got engine type "key-value"`},
 	}
-
-	if _, err := sm.CreateSpaceWithSettingsAndMetadata(
-		"hnsw_comp", "vector", 8, "HNSW32", "L2", false,
-		storage.SpaceSettings{}, fields, storage.VectorCompressionTurboQuant4Bits,
-	); err == nil {
-		t.Fatal("expected error: compression requires Flat index with metadata fields")
-	}
-
-	if _, err := sm.CreateSpaceWithSettingsAndMetadata(
-		"kv_comp", "key-value", 0, "btree", "", false,
-		storage.SpaceSettings{}, nil, storage.VectorCompressionTurboQuant4Bits,
-	); err == nil {
-		t.Fatal("expected error: compression is not supported for key-value spaces")
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			space := fmt.Sprintf("reject_comp_%d", i)
+			_, err := sm.CreateSpaceWithSettingsAndMetadata(
+				space, tc.engine, 8, tc.indexType, "L2", false,
+				storage.SpaceSettings{}, tc.fields, comp,
+			)
+			if err == nil {
+				t.Fatalf("expected error creating %s with --compression", tc.name)
+			}
+			if !strings.Contains(err.Error(), "compression is only supported for Flat spaces declared with indexed metadata fields") {
+				t.Fatalf("error %q missing compression restriction", err)
+			}
+			if tc.wantSub != "" && !strings.Contains(err.Error(), tc.wantSub) {
+				t.Fatalf("error %q, want substring %q", err, tc.wantSub)
+			}
+			if _, ok := sm.SpaceMeta(space); ok {
+				t.Fatalf("rejected space %q should not be published", space)
+			}
+		})
 	}
 }

@@ -116,6 +116,26 @@ func isAllowedMetric(metric string) bool {
 	return false
 }
 
+func requireFlatMetaCompression(engineType, indexType string, fields []storage.MetadataFieldSpec, dim int, compression string) error {
+	if compression == "" {
+		return nil
+	}
+	if engineType != "vector" {
+		got := engineType
+		if got == "" {
+			got = "key-value"
+		}
+		return fmt.Errorf("compression is only supported for Flat spaces declared with indexed metadata fields, got engine type %q", got)
+	}
+	if indexType != "Flat" {
+		return fmt.Errorf("compression is only supported for Flat spaces declared with indexed metadata fields, got index type %q", indexType)
+	}
+	if len(fields) == 0 {
+		return errors.New("compression is only supported for Flat spaces declared with indexed metadata fields")
+	}
+	return storage.ValidateVectorCompression(dim, compression)
+}
+
 type spaceMeta struct {
 	LayoutVersion          int    `json:"layout_version,omitempty"`
 	Name                   string `json:"name"`
@@ -554,19 +574,14 @@ func (sm *SpaceManager) CreateSpaceWithSettingsAndMetadata(space, engineType str
 		if err := storage.ValidateVectorIndexConfig(meta.Dimension, meta.IndexType, getFAISSMetric(meta.Metric)); err != nil {
 			return nil, err
 		}
+		if err := requireFlatMetaCompression(engineType, meta.IndexType, meta.IndexedMetadataFields, meta.Dimension, compression); err != nil {
+			return nil, err
+		}
 		if len(meta.IndexedMetadataFields) > 0 {
 			if meta.IndexType != "Flat" {
 				return nil, fmt.Errorf("indexed metadata fields are only supported for the Flat index type, got '%s'", meta.IndexType)
 			}
 			if err := storage.ValidateFieldSpecs(meta.IndexedMetadataFields); err != nil {
-				return nil, err
-			}
-		}
-		if compression != "" {
-			if meta.IndexType != "Flat" || len(meta.IndexedMetadataFields) == 0 {
-				return nil, errors.New("compression is only supported for Flat spaces declared with indexed metadata fields")
-			}
-			if err := storage.ValidateVectorCompression(meta.Dimension, compression); err != nil {
 				return nil, err
 			}
 		}
@@ -577,13 +592,13 @@ func (sm *SpaceManager) CreateSpaceWithSettingsAndMetadata(space, engineType str
 		if len(meta.IndexedMetadataFields) > 0 {
 			return nil, errors.New("indexed metadata fields are only supported for vector spaces")
 		}
-		if compression != "" {
-			return nil, errors.New("compression is only supported for Flat spaces declared with indexed metadata fields")
+		if err := requireFlatMetaCompression(engineType, meta.IndexType, meta.IndexedMetadataFields, meta.Dimension, compression); err != nil {
+			return nil, err
 		}
 	} else if len(meta.IndexedMetadataFields) > 0 {
 		return nil, errors.New("indexed metadata fields are only supported for vector spaces")
-	} else if compression != "" {
-		return nil, errors.New("compression is only supported for Flat spaces declared with indexed metadata fields")
+	} else if err := requireFlatMetaCompression(engineType, meta.IndexType, meta.IndexedMetadataFields, meta.Dimension, compression); err != nil {
+		return nil, err
 	}
 
 	spacePath := filepath.Join(sm.baseDir, space)

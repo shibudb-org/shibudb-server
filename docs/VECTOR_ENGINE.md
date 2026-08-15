@@ -757,7 +757,7 @@ SEARCH-TOPK 0.1,0.1,0.1,0.1 10 --where price>cheap
 # Declaring --metadata-fields on a non-Flat index
 # ERROR: indexed metadata fields are only supported for the Flat index type, got 'HNSW32'
 
-# Compression without metadata fields, or on a non-Flat index
+# Compression on a non-Flat index (HNSW, IVF, PQ) or a Flat space without --metadata-fields
 # ERROR: compression is only supported for Flat spaces declared with indexed metadata fields
 ```
 

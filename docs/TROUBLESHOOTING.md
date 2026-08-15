@@ -54,7 +54,7 @@ Your query vector must have exactly `<space dimension>` values. Recreate the spa
 ## Metadata filtering (`--meta` / `--where`) errors
 
 - **“metadata filtering is only supported for Flat spaces declared with indexed metadata fields”**: the space was not created with `--index-type Flat` and `--metadata-fields`. Recreate it with both.
-- **“compression is only supported for Flat spaces declared with indexed metadata fields”**: `--compression` is only valid with `--index-type Flat` and `--metadata-fields`.
+- **“compression is only supported for Flat spaces declared with indexed metadata fields”**: `--compression` is only valid on a filterable Flat space (`--index-type Flat` and `--metadata-fields`). HNSW, IVF, PQ, and plain Flat spaces (no metadata fields) are rejected.
 - **“unsupported compression …”**: valid values are `TurboQuant2Bits`, `TurboQuant3Bits`, and `TurboQuant4Bits` (6-bit and 8-bit are not implemented).
 - **“TurboQuant compression requires dimension >= 2”**: recreate the space with a larger `--dimension`.
 - **“filter field "X" is not an indexed metadata field”**: `X` was not declared in `--metadata-fields`. Only declared fields can be filtered.
