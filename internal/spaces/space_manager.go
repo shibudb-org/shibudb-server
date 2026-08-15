@@ -128,6 +128,8 @@ type spaceMeta struct {
 	MaxSegmentsBeforeMerge int    `json:"max_segments_before_merge,omitempty"`
 
 	IndexedMetadataFields []storage.MetadataFieldSpec `json:"indexed_metadata_fields,omitempty"`
+	// Compression is a TurboQuant scheme for filterable Flat spaces (e.g. TurboQuant4Bits).
+	Compression string `json:"compression,omitempty"`
 }
 
 type manifestRecord struct {
@@ -420,6 +422,10 @@ func normalizeSpaceMeta(meta spaceMeta) spaceMeta {
 		}
 		meta.Metric = ""
 		meta.IndexedMetadataFields = nil
+		meta.Compression = ""
+	}
+	if meta.EngineType == "vector" && (meta.IndexType != "Flat" || len(meta.IndexedMetadataFields) == 0) {
+		meta.Compression = ""
 	}
 	if meta.EngineType == "vector" && len(meta.IndexedMetadataFields) == 0 {
 		meta.SegmentRolloverBytes = 0
@@ -464,7 +470,7 @@ func (sm *SpaceManager) openSpaceEngine(meta spaceMeta) (interface{}, error) {
 		if meta.IndexType == "Flat" && len(meta.IndexedMetadataFields) > 0 {
 			dataFile := filepath.Join(spacePath, "flat_meta_data.db")
 			walFile := filepath.Join(spacePath, "flat_meta_wal.db")
-			return storage.NewFlatMetaVectorEngineWithSettings(dataFile, walFile, meta.Dimension, getFAISSMetric(meta.Metric), meta.IndexedMetadataFields, meta.EnableWAL, settings)
+			return storage.NewFlatMetaVectorEngineWithCompression(dataFile, walFile, meta.Dimension, getFAISSMetric(meta.Metric), meta.IndexedMetadataFields, meta.EnableWAL, settings, meta.Compression)
 		}
 		dataFile := filepath.Join(spacePath, "vector_data.db")
 		indexFile := filepath.Join(spacePath, "vector_index.faiss")
@@ -502,10 +508,10 @@ func (sm *SpaceManager) CreateSpaceWithWAL(space, engineType string, dimension i
 }
 
 func (sm *SpaceManager) CreateSpaceWithSettings(space, engineType string, dimension int, indexType string, metric string, enableWAL bool, settings storage.SpaceSettings) (interface{}, error) {
-	return sm.CreateSpaceWithSettingsAndMetadata(space, engineType, dimension, indexType, metric, enableWAL, settings, nil)
+	return sm.CreateSpaceWithSettingsAndMetadata(space, engineType, dimension, indexType, metric, enableWAL, settings, nil, "")
 }
 
-func (sm *SpaceManager) CreateSpaceWithSettingsAndMetadata(space, engineType string, dimension int, indexType string, metric string, enableWAL bool, settings storage.SpaceSettings, indexedMetadataFields []storage.MetadataFieldSpec) (interface{}, error) {
+func (sm *SpaceManager) CreateSpaceWithSettingsAndMetadata(space, engineType string, dimension int, indexType string, metric string, enableWAL bool, settings storage.SpaceSettings, indexedMetadataFields []storage.MetadataFieldSpec, compression string) (interface{}, error) {
 	sm.lock.Lock()
 	defer sm.lock.Unlock()
 
@@ -514,6 +520,11 @@ func (sm *SpaceManager) CreateSpaceWithSettingsAndMetadata(space, engineType str
 	}
 	if _, exists := sm.spaceMetas[space]; exists {
 		return nil, errors.New("space already exists")
+	}
+
+	compression, err := storage.NormalizeVectorCompression(compression)
+	if err != nil {
+		return nil, err
 	}
 
 	meta := normalizeSpaceMeta(spaceMeta{
@@ -526,6 +537,7 @@ func (sm *SpaceManager) CreateSpaceWithSettingsAndMetadata(space, engineType str
 		SegmentRolloverBytes:   settings.SegmentRolloverBytes,
 		MaxSegmentsBeforeMerge: settings.MaxSegmentsBeforeMerge,
 		IndexedMetadataFields:  indexedMetadataFields,
+		Compression:            compression,
 		LayoutVersion:          currentSpaceLayoutVersion,
 	})
 
@@ -550,6 +562,14 @@ func (sm *SpaceManager) CreateSpaceWithSettingsAndMetadata(space, engineType str
 				return nil, err
 			}
 		}
+		if compression != "" {
+			if meta.IndexType != "Flat" || len(meta.IndexedMetadataFields) == 0 {
+				return nil, errors.New("compression is only supported for Flat spaces declared with indexed metadata fields")
+			}
+			if err := storage.ValidateVectorCompression(meta.Dimension, compression); err != nil {
+				return nil, err
+			}
+		}
 	} else if engineType == "key-value" {
 		if meta.IndexType != "btree" && meta.IndexType != "hashmap" {
 			return nil, fmt.Errorf("index type '%s' is not allowed for key-value engines", meta.IndexType)
@@ -557,8 +577,13 @@ func (sm *SpaceManager) CreateSpaceWithSettingsAndMetadata(space, engineType str
 		if len(meta.IndexedMetadataFields) > 0 {
 			return nil, errors.New("indexed metadata fields are only supported for vector spaces")
 		}
+		if compression != "" {
+			return nil, errors.New("compression is only supported for Flat spaces declared with indexed metadata fields")
+		}
 	} else if len(meta.IndexedMetadataFields) > 0 {
 		return nil, errors.New("indexed metadata fields are only supported for vector spaces")
+	} else if compression != "" {
+		return nil, errors.New("compression is only supported for Flat spaces declared with indexed metadata fields")
 	}
 
 	spacePath := filepath.Join(sm.baseDir, space)

@@ -1,6 +1,6 @@
 # ShibuDb
 
-[![Go Version](https://img.shields.io/badge/Go-1.23.0-blue.svg)](https://golang.org)
+[![Go Version](https://img.shields.io/badge/Go-1.24.0-blue.svg)](https://golang.org)
 [![License](https://img.shields.io/badge/License-AGPL%203.0-green.svg)](LICENSE)
 [![Platforms](https://img.shields.io/badge/Platforms-Linux%20%7C%20macOS-blue.svg)](https://github.com/shibudb-org/shibudb-server)
 
@@ -88,7 +88,7 @@ ShibuDb follows a modular architecture with clear separation of concerns:
 
 ### Prerequisites
 
-- Go 1.23.0 or later
+- Go 1.24.0 or later
 - FAISS libraries (included in resources/)
 
 ### Build and Test
@@ -124,7 +124,7 @@ make connect-local-client
 **Available CLI Commands:**
 - `help` or `?` - Show the full interactive command reference
 - `USE <space>` - Switch to a specific space
-- `create-space <name> [--engine key-value|vector] [--dimension N] [--index-type TYPE] [--metric METRIC] [--metadata-fields name:type,...]` - Create a new space
+- `create-space <name> [--engine key-value|vector] [--dimension N] [--index-type TYPE] [--metric METRIC] [--metadata-fields name:type,...] [--compression TurboQuant2Bits|TurboQuant3Bits|TurboQuant4Bits]` - Create a new space
 - `put <key> <value>` - Store a key-value pair
 - `get <key>` - Retrieve a value by key
 - `delete <key>` - Delete a key-value pair
@@ -191,6 +191,7 @@ search to matching vectors (e.g. per-tenant data) for better recall and speed.
 Notes:
 - `--metadata-fields`, `--meta`, and `--where` are only available on vector spaces created with `--index-type Flat`.
 - The `--metadata-fields` and `--meta` lists must not contain spaces (they are comma-separated).
+- `--compression TurboQuant2Bits`, `TurboQuant3Bits`, or `TurboQuant4Bits` is optional on those same Flat+metadata spaces. It stores quantized vectors in memory and on disk (approximately 16× / 10× / 8× smaller than float32, plus a per-vector norm). Search reconstructs approximate float32 values. 6-bit and 8-bit schemes are not available; the TurboQuant library only supports 2/3/4-bit quantization.
 
 See [Vector Engine — Metadata Filtering](docs/VECTOR_ENGINE.md#metadata-filtering) for the full grammar, internals, and error reference.
 
@@ -256,7 +257,7 @@ curl -fsSL https://raw.githubusercontent.com/shibudb-org/shibudb-server/main/scr
 
 The source installer supports Linux `amd64` and `arm64`. It installs build
 dependencies with `apt`, `dnf`, or `yum`, and downloads a temporary Go toolchain
-if Go 1.23 or later is not already available.
+if Go 1.24 or later is not already available.
 
 ## 🎯 Use Cases
 

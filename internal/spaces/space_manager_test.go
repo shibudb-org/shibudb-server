@@ -584,6 +584,7 @@ func TestSpaceManager_FilterableFlatKeepsSegmentSettings(t *testing.T) {
 		"flat_meta_seg", "vector", 4, "Flat", "L2", true,
 		storage.SpaceSettings{SegmentRolloverBytes: 2048, MaxSegmentsBeforeMerge: 9},
 		[]storage.MetadataFieldSpec{{Name: "user_id", Type: storage.MetadataTypeString}},
+		"",
 	); err != nil {
 		t.Fatalf("CreateSpaceWithSettingsAndMetadata: %v", err)
 	}
@@ -594,5 +595,47 @@ func TestSpaceManager_FilterableFlatKeepsSegmentSettings(t *testing.T) {
 	if meta.SegmentRolloverBytes != 2048 || meta.MaxSegmentsBeforeMerge != 9 {
 		t.Fatalf("filterable Flat space lost segment settings, got rollover=%d merge=%d",
 			meta.SegmentRolloverBytes, meta.MaxSegmentsBeforeMerge)
+	}
+}
+
+func TestSpaceManager_TurboQuantCompression(t *testing.T) {
+	dir := t.TempDir()
+	sm := NewSpaceManager(dir)
+	defer sm.CloseAll()
+
+	fields := []storage.MetadataFieldSpec{{Name: "user_id", Type: storage.MetadataTypeString}}
+	if _, err := sm.CreateSpaceWithSettingsAndMetadata(
+		"tq4", "vector", 8, "Flat", "L2", false,
+		storage.SpaceSettings{}, fields, storage.VectorCompressionTurboQuant4Bits,
+	); err != nil {
+		t.Fatalf("create compressed space: %v", err)
+	}
+	meta, ok := sm.SpaceMeta("tq4")
+	if !ok {
+		t.Fatal("SpaceMeta missing")
+	}
+	if meta.Compression != storage.VectorCompressionTurboQuant4Bits {
+		t.Fatalf("Compression = %q, want %q", meta.Compression, storage.VectorCompressionTurboQuant4Bits)
+	}
+
+	if _, err := sm.CreateSpaceWithSettingsAndMetadata(
+		"plain_comp", "vector", 8, "Flat", "L2", false,
+		storage.SpaceSettings{}, nil, storage.VectorCompressionTurboQuant4Bits,
+	); err == nil {
+		t.Fatal("expected error: compression requires indexed metadata fields")
+	}
+
+	if _, err := sm.CreateSpaceWithSettingsAndMetadata(
+		"hnsw_comp", "vector", 8, "HNSW32", "L2", false,
+		storage.SpaceSettings{}, fields, storage.VectorCompressionTurboQuant4Bits,
+	); err == nil {
+		t.Fatal("expected error: compression requires Flat index with metadata fields")
+	}
+
+	if _, err := sm.CreateSpaceWithSettingsAndMetadata(
+		"kv_comp", "key-value", 0, "btree", "", false,
+		storage.SpaceSettings{}, nil, storage.VectorCompressionTurboQuant4Bits,
+	); err == nil {
+		t.Fatal("expected error: compression is not supported for key-value spaces")
 	}
 }

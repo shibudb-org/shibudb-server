@@ -146,3 +146,71 @@ func TestQueryEngine_FilterOnPlainVectorSpaceErrors(t *testing.T) {
 		t.Fatalf("expected error filtering on a plain vector space")
 	}
 }
+
+func TestQueryEngine_TurboQuantFlatSpace(t *testing.T) {
+	dir := t.TempDir()
+	sm := spaces.NewSpaceManager(dir)
+	defer sm.CloseAll()
+	qe := NewQueryEngine(sm, &mockAuth{})
+
+	space := "tq"
+	if _, err := qe.Execute(models.Query{
+		Type:        models.TypeCreateSpace,
+		Space:       space,
+		EngineType:  "vector",
+		Dimension:   8,
+		IndexType:   "Flat",
+		Metric:      "L2",
+		User:        "admin",
+		Compression: storage.VectorCompressionTurboQuant4Bits,
+		IndexedMetadataFields: []storage.MetadataFieldSpec{
+			{Name: "user_id", Type: storage.MetadataTypeString},
+		},
+	}); err != nil {
+		t.Fatalf("create compressed space: %v", err)
+	}
+
+	if _, err := qe.Execute(models.Query{
+		Type:     models.TypeInsertVector,
+		Space:    space,
+		Key:      "1",
+		Value:    "1,0,0,0,0,0,0,0",
+		Metadata: map[string]any{"user_id": "alice"},
+	}); err != nil {
+		t.Fatalf("insert 1: %v", err)
+	}
+	if _, err := qe.Execute(models.Query{
+		Type:     models.TypeInsertVector,
+		Space:    space,
+		Key:      "2",
+		Value:    "0,1,0,0,0,0,0,0",
+		Metadata: map[string]any{"user_id": "bob"},
+	}); err != nil {
+		t.Fatalf("insert 2: %v", err)
+	}
+
+	res, err := qe.Execute(models.Query{
+		Type:      models.TypeSearchTopK,
+		Space:     space,
+		Value:     "1,0,0,0,0,0,0,0",
+		Dimension: 1,
+		Filter:    &storage.MetadataFilter{Op: storage.FilterOpEq, Field: "user_id", Value: "alice"},
+	})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if !strings.Contains(res, `"id": 1`) {
+		t.Fatalf("expected id 1, got %s", res)
+	}
+	if strings.Contains(res, `"id": 2`) {
+		t.Fatalf("did not expect id 2, got %s", res)
+	}
+
+	if _, err := qe.Execute(models.Query{
+		Type: models.TypeCreateSpace, Space: "bad_comp", EngineType: "vector",
+		Dimension: 8, IndexType: "Flat", Metric: "L2", User: "admin",
+		Compression: storage.VectorCompressionTurboQuant4Bits,
+	}); err == nil {
+		t.Fatal("expected error creating compressed space without metadata fields")
+	}
+}

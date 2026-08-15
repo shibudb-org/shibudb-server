@@ -65,7 +65,7 @@ EXIT, QUIT                       Disconnect and exit
 ```text
 USE <space>
 LIST-SPACES
-CREATE-SPACE <name> [--engine key-value|vector] [--dimension N] [--index-type TYPE] [--metric METRIC] [--enable-wal] [--disable-wal] [--segment-rollover-bytes N] [--max-segments-before-merge N] [--metadata-fields name:type,...]
+CREATE-SPACE <name> [--engine key-value|vector] [--dimension N] [--index-type TYPE] [--metric METRIC] [--enable-wal] [--disable-wal] [--segment-rollover-bytes N] [--max-segments-before-merge N] [--metadata-fields name:type,...] [--compression TurboQuant2Bits|TurboQuant3Bits|TurboQuant4Bits]
 DELETE-SPACE <name>
 ```
 
@@ -74,6 +74,7 @@ Notes:
 - `--index-type` for `--engine key-value` defaults to `btree` (supports `btree` or `hashmap`).
 - WAL is **disabled by default** unless `--enable-wal` is provided.
 - `--metadata-fields` declares indexed metadata fields for filtering and is **only valid with `--index-type Flat`**. Format is comma-separated `name:type` (no spaces); `type` is `string`, `int`, or `float`. See [Metadata Filtering](VECTOR_ENGINE.md#metadata-filtering).
+- `--compression` is **only valid with `--index-type Flat` and `--metadata-fields`**. Values: `TurboQuant2Bits`, `TurboQuant3Bits`, `TurboQuant4Bits`. See [TurboQuant compression](VECTOR_ENGINE.md#turboquant-compression).
 
 ### Key-value operations (require `USE <space>` on a key-value space)
 

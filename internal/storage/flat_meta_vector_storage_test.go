@@ -377,7 +377,7 @@ func TestFlatMetaWALReplay(t *testing.T) {
 	key := make([]byte, 8)
 	binary.LittleEndian.PutUint64(key, uint64(7))
 	meta, _ := json.Marshal(map[string]any{"user_id": "alice"})
-	if err := w.WriteEntry(string(key), string(encodeFlatMetaWALValue(meta, []float32{1, 2}))); err != nil {
+	if err := w.WriteEntry(string(key), string(encodeFlatMetaWALValue(meta, encodeFloat32Vector([]float32{1, 2})))); err != nil {
 		t.Fatalf("wal write: %v", err)
 	}
 	_ = w.Close()
@@ -648,5 +648,125 @@ func TestFlatMetaFAISSParity(t *testing.T) {
 				t.Errorf("metric %s: nearest id mismatch faiss=%d meta=%d", name, faissIDs[0], metaIDs[0])
 			}
 		})
+	}
+}
+
+func newTestFlatMetaEngineWithCompression(t *testing.T, dim, metric int, specs []MetadataFieldSpec, compression string, enableWAL bool) *FlatMetaVectorEngine {
+	t.Helper()
+	dir := t.TempDir()
+	e, err := NewFlatMetaVectorEngineWithCompression(
+		filepath.Join(dir, "flat_meta_data.db"),
+		filepath.Join(dir, "flat_meta_wal.db"),
+		dim, metric, specs, enableWAL, SpaceSettings{}, compression,
+	)
+	if err != nil {
+		t.Fatalf("NewFlatMetaVectorEngineWithCompression(%s): %v", compression, err)
+	}
+	t.Cleanup(func() { _ = e.Close() })
+	return e
+}
+
+func TestFlatMetaTurboQuantSearchAndFilter(t *testing.T) {
+	specs := []MetadataFieldSpec{{Name: "user_id", Type: MetadataTypeString}}
+	const dim = 8
+	query := []float32{1, 0, 0, 0, 0, 0, 0, 0}
+	alice := []float32{1, 0, 0, 0, 0, 0, 0, 0}
+	bob := []float32{0, 1, 0, 0, 0, 0, 0, 0}
+	carol := []float32{0, 0, 1, 0, 0, 0, 0, 0}
+
+	for _, scheme := range []string{VectorCompressionTurboQuant2Bits, VectorCompressionTurboQuant3Bits, VectorCompressionTurboQuant4Bits} {
+		t.Run(scheme, func(t *testing.T) {
+			e := newTestFlatMetaEngineWithCompression(t, dim, faiss.MetricL2, specs, scheme, false)
+			if e.quantizer == nil {
+				t.Fatal("expected quantizer to be initialized")
+			}
+			mustInsert := func(id int64, vec []float32, user string) {
+				if err := e.InsertVectorWithMetadata(id, vec, map[string]any{"user_id": user}); err != nil {
+					t.Fatalf("insert %d: %v", id, err)
+				}
+			}
+			mustInsert(1, alice, "alice")
+			mustInsert(2, bob, "bob")
+			mustInsert(3, carol, "alice")
+
+			ids, _, err := e.SearchTopK(query, 1)
+			if err != nil {
+				t.Fatalf("SearchTopK: %v", err)
+			}
+			if len(ids) != 1 || ids[0] != 1 {
+				t.Fatalf("expected nearest id 1, got %v", ids)
+			}
+
+			got, err := e.GetVectorByID(1)
+			if err != nil {
+				t.Fatalf("GetVectorByID: %v", err)
+			}
+			if cosineSimilarity(alice, got) < 0.7 {
+				t.Fatalf("reconstructed vector cosine too low: %f", cosineSimilarity(alice, got))
+			}
+
+			filtered, _, err := e.SearchTopKFiltered(query, 10, &MetadataFilter{Op: FilterOpEq, Field: "user_id", Value: "alice"})
+			if err != nil {
+				t.Fatalf("filtered search: %v", err)
+			}
+			assertIDSet(t, filtered, 1, 3)
+		})
+	}
+}
+
+func TestFlatMetaTurboQuantPersistenceRebuild(t *testing.T) {
+	dir := t.TempDir()
+	dataPath := filepath.Join(dir, "flat_meta_data.db")
+	walPath := filepath.Join(dir, "flat_meta_wal.db")
+	specs := []MetadataFieldSpec{{Name: "user_id", Type: MetadataTypeString}}
+	const dim = 8
+	alice := []float32{1, 0, 0, 0, 0, 0, 0, 0}
+	bob := []float32{0, 1, 0, 0, 0, 0, 0, 0}
+
+	e1, err := NewFlatMetaVectorEngineWithCompression(dataPath, walPath, dim, faiss.MetricL2, specs, false, SpaceSettings{}, VectorCompressionTurboQuant4Bits)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if err := e1.InsertVectorWithMetadata(1, alice, map[string]any{"user_id": "alice"}); err != nil {
+		t.Fatalf("insert 1: %v", err)
+	}
+	if err := e1.InsertVectorWithMetadata(2, bob, map[string]any{"user_id": "bob"}); err != nil {
+		t.Fatalf("insert 2: %v", err)
+	}
+	if err := e1.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	e2, err := NewFlatMetaVectorEngineWithCompression(dataPath, walPath, dim, faiss.MetricL2, specs, false, SpaceSettings{}, VectorCompressionTurboQuant4Bits)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	t.Cleanup(func() { _ = e2.Close() })
+
+	ids, _, err := e2.SearchTopK(alice, 1)
+	if err != nil {
+		t.Fatalf("search after restart: %v", err)
+	}
+	if len(ids) != 1 || ids[0] != 1 {
+		t.Fatalf("expected nearest id 1 after restart, got %v", ids)
+	}
+	filtered, _, err := e2.SearchTopKFiltered(alice, 10, &MetadataFilter{Op: FilterOpEq, Field: "user_id", Value: "bob"})
+	if err != nil {
+		t.Fatalf("filtered search after restart: %v", err)
+	}
+	assertIDSet(t, filtered, 2)
+}
+
+func TestNewFlatMetaVectorEngineRejectsUnknownCompression(t *testing.T) {
+	dir := t.TempDir()
+	_, err := NewFlatMetaVectorEngineWithCompression(
+		filepath.Join(dir, "flat_meta_data.db"),
+		filepath.Join(dir, "flat_meta_wal.db"),
+		8, faiss.MetricL2,
+		[]MetadataFieldSpec{{Name: "user_id", Type: MetadataTypeString}},
+		false, SpaceSettings{}, "TurboQuant8Bits",
+	)
+	if err == nil {
+		t.Fatal("expected error for unsupported compression")
 	}
 }

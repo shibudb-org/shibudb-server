@@ -337,3 +337,39 @@ func TestVectorFlatMetadataErrorsE2E(t *testing.T) {
 		}
 	})
 }
+
+func TestVectorFlatMetadataTurboQuantE2E(t *testing.T) {
+	conn, reader := dialAndLogin(t)
+	defer conn.Close()
+
+	space := "vec_flat_meta_tq4_e2e"
+	CleanSpace(space, conn, reader)
+	defer CleanSpace(space, conn, reader)
+
+	createQ := models.Query{
+		Type:                  models.TypeCreateSpace,
+		Space:                 space,
+		EngineType:            "vector",
+		Dimension:             8,
+		IndexType:             "Flat",
+		Metric:                "L2",
+		EnableWAL:             true,
+		IndexedMetadataFields: []storage.MetadataFieldSpec{{Name: "user_id", Type: storage.MetadataTypeString}},
+		Compression:           storage.VectorCompressionTurboQuant4Bits,
+	}
+	if !CreateSpaceWithSettings(createQ, conn, reader) {
+		t.Fatalf("failed to create TurboQuant Flat space %q", space)
+	}
+
+	insertVectorWithMeta(space, "1", "1,0,0,0,0,0,0,0", map[string]any{"user_id": "alice"}, conn, reader)
+	insertVectorWithMeta(space, "2", "0,1,0,0,0,0,0,0", map[string]any{"user_id": "bob"}, conn, reader)
+	time.Sleep(300 * time.Millisecond)
+
+	resp := searchTopKFiltered(space, "1,0,0,0,0,0,0,0", 1, nil, conn, reader)
+	assertExactIDs(t, "nearest", resp, 1)
+
+	filter := &storage.MetadataFilter{Op: storage.FilterOpEq, Field: "user_id", Value: "alice"}
+	resp = searchTopKFiltered(space, "1,0,0,0,0,0,0,0", 10, filter, conn, reader)
+	assertExactIDs(t, "user_id=alice", resp, 1)
+	assertMissingIDs(t, "user_id=alice", resp, 2)
+}

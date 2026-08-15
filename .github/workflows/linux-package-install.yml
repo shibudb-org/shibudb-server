@@ -141,7 +141,7 @@ jobs:
           set -eu
 
           install_go() {
-            go_version="1.23.7"
+            go_version="1.24.0"
             case "$(uname -m)" in
               x86_64) go_arch="amd64" ;;
               aarch64) go_arch="arm64" ;;
@@ -278,7 +278,7 @@ jobs:
           set -eu
 
           install_go() {
-            go_version="1.23.7"
+            go_version="1.24.0"
             case "$(uname -m)" in
               x86_64) go_arch="amd64" ;;
               aarch64) go_arch="arm64" ;;
@@ -446,7 +446,7 @@ jobs:
               set -euo pipefail
 
               install_go() {
-                go_version="1.23.7"
+                go_version="1.24.0"
                 case "$(uname -m)" in
                   x86_64) go_arch="amd64" ;;
                   aarch64) go_arch="arm64" ;;
