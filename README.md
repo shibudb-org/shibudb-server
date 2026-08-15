@@ -376,6 +376,7 @@ This project is licensed under the GNU Affero General Public License v3.0 (AGPL-
 ## 🙏 Acknowledgments
 
 - [FAISS](https://github.com/facebookresearch/faiss) - Vector similarity search
+- [TurboQuant](https://github.com/mredencom/turboquant) - Data-oblivious vector quantization (2/3/4-bit)
 - [Go B-tree](https://github.com/google/btree) - B-tree implementation
 - [Go Crypto](https://golang.org/x/crypto) - Cryptographic functions
 
