@@ -1,6 +1,7 @@
 package queryengine
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -144,5 +145,118 @@ func TestQueryEngine_FilterOnPlainVectorSpaceErrors(t *testing.T) {
 		Filter: &storage.MetadataFilter{Op: storage.FilterOpEq, Field: "user_id", Value: "alice"},
 	}); err == nil {
 		t.Fatalf("expected error filtering on a plain vector space")
+	}
+}
+
+func TestQueryEngine_TurboQuantFlatSpace(t *testing.T) {
+	dir := t.TempDir()
+	sm := spaces.NewSpaceManager(dir)
+	defer sm.CloseAll()
+	qe := NewQueryEngine(sm, &mockAuth{})
+
+	space := "tq"
+	if _, err := qe.Execute(models.Query{
+		Type:        models.TypeCreateSpace,
+		Space:       space,
+		EngineType:  "vector",
+		Dimension:   8,
+		IndexType:   "Flat",
+		Metric:      "L2",
+		User:        "admin",
+		Compression: storage.VectorCompressionTurboQuant4Bits,
+		IndexedMetadataFields: []storage.MetadataFieldSpec{
+			{Name: "user_id", Type: storage.MetadataTypeString},
+		},
+	}); err != nil {
+		t.Fatalf("create compressed space: %v", err)
+	}
+
+	if _, err := qe.Execute(models.Query{
+		Type:     models.TypeInsertVector,
+		Space:    space,
+		Key:      "1",
+		Value:    "1,0,0,0,0,0,0,0",
+		Metadata: map[string]any{"user_id": "alice"},
+	}); err != nil {
+		t.Fatalf("insert 1: %v", err)
+	}
+	if _, err := qe.Execute(models.Query{
+		Type:     models.TypeInsertVector,
+		Space:    space,
+		Key:      "2",
+		Value:    "0,1,0,0,0,0,0,0",
+		Metadata: map[string]any{"user_id": "bob"},
+	}); err != nil {
+		t.Fatalf("insert 2: %v", err)
+	}
+
+	res, err := qe.Execute(models.Query{
+		Type:      models.TypeSearchTopK,
+		Space:     space,
+		Value:     "1,0,0,0,0,0,0,0",
+		Dimension: 1,
+		Filter:    &storage.MetadataFilter{Op: storage.FilterOpEq, Field: "user_id", Value: "alice"},
+	})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if !strings.Contains(res, `"id": 1`) {
+		t.Fatalf("expected id 1, got %s", res)
+	}
+	if strings.Contains(res, `"id": 2`) {
+		t.Fatalf("did not expect id 2, got %s", res)
+	}
+
+	if _, err := qe.Execute(models.Query{
+		Type: models.TypeCreateSpace, Space: "bad_comp", EngineType: "vector",
+		Dimension: 8, IndexType: "Flat", Metric: "L2", User: "admin",
+		Compression: storage.VectorCompressionTurboQuant4Bits,
+	}); err == nil {
+		t.Fatal("expected error creating compressed space without metadata fields")
+	}
+}
+
+func TestQueryEngine_CompressionRejectedOnNonFlatMeta(t *testing.T) {
+	dir := t.TempDir()
+	sm := spaces.NewSpaceManager(dir)
+	defer sm.CloseAll()
+	qe := NewQueryEngine(sm, &mockAuth{})
+
+	fields := []storage.MetadataFieldSpec{{Name: "user_id", Type: storage.MetadataTypeString}}
+	cases := []struct {
+		name      string
+		indexType string
+		fields    []storage.MetadataFieldSpec
+		wantSub   string
+	}{
+		{"plain flat", "Flat", nil, "indexed metadata fields"},
+		{"hnsw32", "HNSW32", nil, `got index type "HNSW32"`},
+		{"ivf32 flat", "IVF32,Flat", nil, `got index type "IVF32,Flat"`},
+		{"pq8", "PQ8", nil, `got index type "PQ8"`},
+		{"hnsw32 with metadata", "HNSW32", fields, `got index type "HNSW32"`},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := qe.Execute(models.Query{
+				Type:                  models.TypeCreateSpace,
+				Space:                 fmt.Sprintf("rej_%d", i),
+				EngineType:            "vector",
+				Dimension:             8,
+				IndexType:             tc.indexType,
+				Metric:                "L2",
+				User:                  "admin",
+				IndexedMetadataFields: tc.fields,
+				Compression:           storage.VectorCompressionTurboQuant4Bits,
+			})
+			if err == nil {
+				t.Fatalf("expected compression error for %s", tc.name)
+			}
+			if !strings.Contains(err.Error(), "compression is only supported for Flat spaces declared with indexed metadata fields") {
+				t.Fatalf("got %v", err)
+			}
+			if !strings.Contains(err.Error(), tc.wantSub) {
+				t.Fatalf("got %v, want substring %q", err, tc.wantSub)
+			}
+		})
 	}
 }

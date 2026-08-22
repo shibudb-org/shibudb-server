@@ -93,6 +93,7 @@ CREATE-SPACE fast_embeddings --engine vector --dimension 128 --disable-wal
 - `--metric METRIC`: Distance metric (default: L2)
 - `--enable-wal`: Enable Write-Ahead Logging for enhanced durability (default: disabled for vector spaces)
 - `--disable-wal`: Disable Write-Ahead Logging for maximum performance (default for vector spaces)
+- `--compression SCHEME`: TurboQuant quantization for filterable Flat spaces (`TurboQuant2Bits`, `TurboQuant3Bits`, or `TurboQuant4Bits`; see [TurboQuant compression](#turboquant-compression))
 
 ### Automatic Training
 
@@ -652,6 +653,31 @@ candidate set is reduced first.
 - `--metadata-fields` and `--meta` are comma-separated and **must not contain spaces**.
 - Only fields declared at creation are indexed; filtering on an undeclared field returns an error.
 
+### TurboQuant compression
+
+Filterable Flat spaces can store vectors with [TurboQuant](https://github.com/mredencom/turboquant) quantization instead of float32. Enable it at create time:
+
+```bash
+CREATE-SPACE products --engine vector --dimension 128 --index-type Flat --metric L2 \
+    --metadata-fields user_id:string \
+    --compression TurboQuant4Bits
+```
+
+| Scheme | Bits / dim | Typical size vs float32 | Quality |
+|---|---|---|---|
+| *(none)* | 32 | 1× | Exact |
+| `TurboQuant4Bits` | 4 | ~8× smaller | High cosine similarity (usually > 0.98) |
+| `TurboQuant3Bits` | 3 | ~10× smaller | Strong quality/size middle ground |
+| `TurboQuant2Bits` | 2 | ~16× smaller | Lower fidelity; still good for well-separated vectors |
+
+The compressed payload is a float32 L2 norm plus bit-packed indices, so the ratio approaches 32/bits as dimension grows.
+
+Search and `GET-VECTOR` reconstruct approximate float32 vectors. Ranking is therefore approximate. Compression cannot be changed after the space is created.
+
+**6-bit and 8-bit schemes are not offered.** `github.com/mredencom/turboquant` only implements 2/3/4-bit quantization. 8-bit would only be ~4× smaller than float32; 4-bit is the high-quality option, 3-bit the middle ground, and 2-bit the extra-memory option.
+
+`--compression` is rejected unless the space is `--engine vector --index-type Flat` with `--metadata-fields`, and dimension is at least 2.
+
 ### 1. Declare Indexed Fields (at space creation)
 
 ```bash
@@ -730,9 +756,12 @@ SEARCH-TOPK 0.1,0.1,0.1,0.1 10 --where price>cheap
 
 # Declaring --metadata-fields on a non-Flat index
 # ERROR: indexed metadata fields are only supported for the Flat index type, got 'HNSW32'
+
+# Compression on a non-Flat index (HNSW, IVF, PQ) or a Flat space without --metadata-fields
+# ERROR: compression is only supported for Flat spaces declared with indexed metadata fields
 ```
 
-> Wire protocol: these map to the `indexed_metadata_fields` (CREATE_SPACE), `metadata`
+> Wire protocol: these map to the `indexed_metadata_fields` and `compression` (CREATE_SPACE), `metadata`
 > (INSERT_VECTOR), and `filter` (SEARCH_TOPK / RANGE_SEARCH) fields of the JSON query. The `--where`
 > DSL is a client-side convenience that compiles to the structured `filter` AST.
 

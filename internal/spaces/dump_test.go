@@ -309,6 +309,90 @@ func TestDumpRestoreFlatMetaVector(t *testing.T) {
 	}
 }
 
+func TestDumpRestoreFlatMetaTurboQuant(t *testing.T) {
+	baseDir := t.TempDir()
+	spaceName := "test_flat_meta_tq"
+	spacePath := filepath.Join(baseDir, spaceName)
+	if err := os.MkdirAll(spacePath, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	dimension := 8
+	meta := spaceMeta{
+		LayoutVersion: currentSpaceLayoutVersion,
+		Name:          spaceName,
+		EngineType:    "vector",
+		IndexType:     "Flat",
+		Metric:        "L2",
+		Dimension:     dimension,
+		Compression:   storage.VectorCompressionTurboQuant4Bits,
+		IndexedMetadataFields: []storage.MetadataFieldSpec{
+			{Name: "color", Type: "string"},
+		},
+	}
+	meta = normalizeSpaceMeta(meta)
+	metaBytes, _ := json.MarshalIndent(meta, "", "  ")
+	if err := os.WriteFile(filepath.Join(spacePath, spaceMetaFileName), append(metaBytes, '\n'), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	q, err := storage.NewVectorQuantizer(dimension, storage.VectorCompressionTurboQuant4Bits)
+	if err != nil {
+		t.Fatalf("NewVectorQuantizer: %v", err)
+	}
+	orig := []float32{1, 0, 0, 0, 0, 0, 0, 0}
+	payload, err := q.Quantize(orig)
+	if err != nil {
+		t.Fatalf("Quantize: %v", err)
+	}
+
+	dataPath := filepath.Join(spacePath, "flat_meta_data.db")
+	dataFile, err := os.Create(dataPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	header := make([]byte, 13)
+	metaJSON := []byte(`{"color":"red"}`)
+	binary.LittleEndian.PutUint64(header[0:8], 7)
+	header[8] = 0
+	binary.LittleEndian.PutUint32(header[9:13], uint32(len(metaJSON)))
+	if _, err := dataFile.Write(header); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dataFile.Write(metaJSON); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dataFile.Write(payload); err != nil {
+		t.Fatal(err)
+	}
+	dataFile.Close()
+
+	manifestPath := filepath.Join(baseDir, spacesManifestFileName)
+	record := manifestRecord{Version: currentSpaceLayoutVersion, Op: manifestOpCreate, Space: spaceName}
+	line, _ := json.Marshal(record)
+	if err := os.WriteFile(manifestPath, append(line, '\n'), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	stats, err := DumpAll(baseDir, &buf, "")
+	if err != nil {
+		t.Fatalf("DumpAll failed: %v", err)
+	}
+	if stats.VectorRecords != 1 {
+		t.Fatalf("expected 1 vector dumped, got %d", stats.VectorRecords)
+	}
+
+	restoreDir := t.TempDir()
+	restoreStats, err := RestoreAll(restoreDir, bytes.NewReader(buf.Bytes()), "overwrite")
+	if err != nil {
+		t.Fatalf("RestoreAll failed: %v", err)
+	}
+	if restoreStats.VectorRecords != 1 {
+		t.Fatalf("expected 1 vector restored, got %d", restoreStats.VectorRecords)
+	}
+}
+
 // TestDumpSpaceFilter tests that --space filters correctly.
 func TestDumpSpaceFilter(t *testing.T) {
 	baseDir := t.TempDir()

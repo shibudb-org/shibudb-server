@@ -27,7 +27,9 @@ import (
 // an unfiltered query scans all live vectors. Vectors and indexes live in
 // memory; durability is provided by a set of append-only segment data files plus
 // the WAL, and the in-memory indexes are rebuilt by scanning the segments on
-// open.
+// open. When created with TurboQuant compression, live vectors are stored in
+// quantized form (in memory and on disk) and reconstructed for search and
+// GetVectorByID; ranking is approximate.
 //
 // Persistence uses the same segmented layout as the key-value engine: writes
 // land in the active (hot) segment, which is sealed and
@@ -48,10 +50,13 @@ type FlatMetaVectorEngine struct {
 
 	lock sync.RWMutex
 
-	settings SpaceSettings
+	settings    SpaceSettings
+	compression string
+	quantizer   *VectorQuantizer // nil when uncompressed
 
 	// In-memory state (guarded by lock).
-	vectors  map[int64][]float32
+	vectors  map[int64][]float32 // live float32 vectors when uncompressed
+	qvectors map[int64][]byte    // serialized TurboQuant payloads when compressed
 	metadata map[int64]map[string]any
 	liveIDs  *roaring64.Bitmap
 	// stringIdx: field -> value -> set of ids (equality / IN).
@@ -93,7 +98,7 @@ type flatMetaRecord struct {
 	tombstone bool
 	raw       []byte
 	meta      []byte
-	vec       []float32
+	payload   []byte // on-disk vector bytes (float32 or quantized)
 }
 
 type flatMetaNumEntry struct {
@@ -107,7 +112,7 @@ type flatMetaPersistItem struct {
 	id        int64
 	tombstone bool
 	meta      []byte
-	vec       []float32
+	payload   []byte // on-disk vector bytes (float32 or quantized)
 }
 
 const flatMetaDataFlagLive = 0
@@ -126,11 +131,34 @@ func NewFlatMetaVectorEngine(dataPath, walPath string, dim, metric int, specs []
 // NewFlatMetaVectorEngineWithSettings opens (or creates) a filterable Flat vector
 // space using the provided segment rollover/merge settings.
 func NewFlatMetaVectorEngineWithSettings(dataPath, walPath string, dim, metric int, specs []MetadataFieldSpec, enableWAL bool, settings SpaceSettings) (*FlatMetaVectorEngine, error) {
+	return NewFlatMetaVectorEngineWithCompression(dataPath, walPath, dim, metric, specs, enableWAL, settings, VectorCompressionNone)
+}
+
+// NewFlatMetaVectorEngineWithCompression opens (or creates) a filterable Flat
+// vector space, optionally storing TurboQuant-compressed vectors in memory and
+// on disk. compression is one of VectorCompressionNone, TurboQuant2Bits,
+// TurboQuant3Bits, or TurboQuant4Bits.
+func NewFlatMetaVectorEngineWithCompression(dataPath, walPath string, dim, metric int, specs []MetadataFieldSpec, enableWAL bool, settings SpaceSettings, compression string) (*FlatMetaVectorEngine, error) {
 	if dim <= 0 {
 		return nil, fmt.Errorf("invalid vector dimension %d", dim)
 	}
 	if err := ValidateFieldSpecs(specs); err != nil {
 		return nil, err
+	}
+	compression, err := NormalizeVectorCompression(compression)
+	if err != nil {
+		return nil, err
+	}
+	if err := ValidateVectorCompression(dim, compression); err != nil {
+		return nil, err
+	}
+
+	var quantizer *VectorQuantizer
+	if compression != VectorCompressionNone {
+		quantizer, err = NewVectorQuantizer(dim, compression)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	var w *wal.WAL
@@ -149,7 +177,10 @@ func NewFlatMetaVectorEngineWithSettings(dataPath, walPath string, dim, metric i
 		specTypes:       fieldSpecTypes(specs),
 		wal:             w,
 		settings:        NormalizeSpaceSettings(settings),
+		compression:     compression,
+		quantizer:       quantizer,
 		vectors:         make(map[int64][]float32),
+		qvectors:        make(map[int64][]byte),
 		metadata:        make(map[int64]map[string]any),
 		liveIDs:         roaring64.New(),
 		stringIdx:       make(map[string]map[string]*roaring64.Bitmap),
@@ -267,7 +298,7 @@ func (e *FlatMetaVectorEngine) loadSegments() error {
 func (e *FlatMetaVectorEngine) rebuildInMemoryLocked() error {
 	for _, segment := range e.segments {
 		desc := e.layout.Descriptor(segment.meta)
-		err := streamFlatMetaDataFile(desc.DataPath, e.dim, func(rec flatMetaRecord) error {
+		err := streamFlatMetaDataFile(desc.DataPath, e.vectorPayloadSize(), func(rec flatMetaRecord) error {
 			if rec.tombstone {
 				e.indexRemoveLocked(rec.id)
 				return nil
@@ -282,7 +313,11 @@ func (e *FlatMetaVectorEngine) rebuildInMemoryLocked() error {
 			if err != nil {
 				return fmt.Errorf("metadata for id %d: %w", rec.id, err)
 			}
-			e.indexInsertLocked(rec.id, rec.vec, norm)
+			vec, err := e.decodeStoredVector(rec.payload)
+			if err != nil {
+				return fmt.Errorf("decode vector for id %d: %w", rec.id, err)
+			}
+			e.indexInsertLocked(rec.id, vec, rec.payload, norm)
 			return nil
 		})
 		if err != nil {
@@ -318,7 +353,7 @@ func (e *FlatMetaVectorEngine) RangeSearch(query []float32, radius float32) ([]i
 func (e *FlatMetaVectorEngine) GetVectorByID(id int64) ([]float32, error) {
 	e.lock.RLock()
 	defer e.lock.RUnlock()
-	vec, ok := e.vectors[id]
+	vec, ok := e.liveVectorLocked(id)
 	if !ok {
 		return nil, fmt.Errorf("ID %d not found", id)
 	}
@@ -395,20 +430,28 @@ func (e *FlatMetaVectorEngine) InsertVectorWithMetadata(id int64, vector []float
 		return fmt.Errorf("encode metadata: %w", err)
 	}
 
+	payload, err := e.encodeVectorPayload(vector)
+	if err != nil {
+		return err
+	}
+
 	if e.wal != nil {
 		key := make([]byte, 8)
 		binary.LittleEndian.PutUint64(key, uint64(id))
-		if err := e.wal.WriteEntry(string(key), string(encodeFlatMetaWALValue(metaBytes, vector))); err != nil {
+		if err := e.wal.WriteEntry(string(key), string(encodeFlatMetaWALValue(metaBytes, payload))); err != nil {
 			return err
 		}
 	}
 
-	vecCopy := append([]float32(nil), vector...)
+	var vecCopy []float32
+	if e.quantizer == nil {
+		vecCopy = append([]float32(nil), vector...)
+	}
 	e.lock.Lock()
-	e.indexInsertLocked(id, vecCopy, norm)
+	e.indexInsertLocked(id, vecCopy, payload, norm)
 	e.lock.Unlock()
 
-	e.enqueuePersist(flatMetaPersistItem{id: id, meta: metaBytes, vec: vecCopy})
+	e.enqueuePersist(flatMetaPersistItem{id: id, meta: metaBytes, payload: payload})
 	if e.wal != nil {
 		return e.wal.MarkCommitted()
 	}
@@ -627,7 +670,7 @@ func (e *FlatMetaVectorEngine) scoreCandidatesLocked(query []float32, candidates
 	pairs := make([]flatMetaPair, 0, len(ids))
 	for _, u := range ids {
 		id := int64(u)
-		vec, ok := e.vectors[id]
+		vec, ok := e.liveVectorLocked(id)
 		if !ok {
 			continue
 		}
@@ -652,11 +695,17 @@ func splitPairs(pairs []flatMetaPair) ([]int64, []float32, error) {
 
 // === in-memory index maintenance (lock held) ===
 
-func (e *FlatMetaVectorEngine) indexInsertLocked(id int64, vec []float32, norm map[string]any) {
+func (e *FlatMetaVectorEngine) indexInsertLocked(id int64, vec []float32, payload []byte, norm map[string]any) {
 	if old, ok := e.metadata[id]; ok {
 		e.removeFromIndexesLocked(id, old)
 	}
-	e.vectors[id] = vec
+	if e.quantizer != nil {
+		e.qvectors[id] = payload
+		delete(e.vectors, id)
+	} else {
+		e.vectors[id] = vec
+		delete(e.qvectors, id)
+	}
 	e.metadata[id] = norm
 	e.liveIDs.Add(uint64(id))
 	e.addToIndexesLocked(id, norm)
@@ -667,8 +716,51 @@ func (e *FlatMetaVectorEngine) indexRemoveLocked(id int64) {
 		e.removeFromIndexesLocked(id, old)
 	}
 	delete(e.vectors, id)
+	delete(e.qvectors, id)
 	delete(e.metadata, id)
 	e.liveIDs.Remove(uint64(id))
+}
+
+func (e *FlatMetaVectorEngine) liveVectorLocked(id int64) ([]float32, bool) {
+	if e.quantizer != nil {
+		data, ok := e.qvectors[id]
+		if !ok {
+			return nil, false
+		}
+		vec, err := e.quantizer.Dequantize(data)
+		if err != nil {
+			logger.Errorf("storage", "flat-meta dequantize failed for id=%d: %v", id, err)
+			return nil, false
+		}
+		return vec, true
+	}
+	vec, ok := e.vectors[id]
+	return vec, ok
+}
+
+func (e *FlatMetaVectorEngine) vectorPayloadSize() int {
+	if e.quantizer != nil {
+		return e.quantizer.PayloadSize()
+	}
+	return 4 * e.dim
+}
+
+func (e *FlatMetaVectorEngine) encodeVectorPayload(vector []float32) ([]byte, error) {
+	if e.quantizer != nil {
+		return e.quantizer.Quantize(vector)
+	}
+	return encodeFloat32Vector(vector), nil
+}
+
+func (e *FlatMetaVectorEngine) decodeStoredVector(payload []byte) ([]float32, error) {
+	if e.quantizer != nil {
+		if len(payload) != e.quantizer.PayloadSize() {
+			return nil, fmt.Errorf("quantized vector length mismatch: expected %d bytes, got %d", e.quantizer.PayloadSize(), len(payload))
+		}
+		// Compressed payloads are kept as-is; float32 is reconstructed on read.
+		return nil, nil
+	}
+	return decodeFloat32Vector(payload, e.dim)
 }
 
 func (e *FlatMetaVectorEngine) addToIndexesLocked(id int64, norm map[string]any) {
@@ -827,7 +919,7 @@ func (e *FlatMetaVectorEngine) flushData(force bool) {
 }
 
 // appendFlatMetaRecord appends one record to file.
-// Layout: [id:8][flag:1][metaLen:4][meta][vector: dim*4 (live only)].
+// Layout: [id:8][flag:1][metaLen:4][meta][vector payload (live only)].
 func appendFlatMetaRecord(file *os.File, item flatMetaPersistItem) error {
 	header := make([]byte, 13)
 	binary.LittleEndian.PutUint64(header[0:8], uint64(item.id))
@@ -843,14 +935,10 @@ func appendFlatMetaRecord(file *os.File, item flatMetaPersistItem) error {
 
 	header[8] = flatMetaDataFlagLive
 	binary.LittleEndian.PutUint32(header[9:13], uint32(len(item.meta)))
-	body := make([]byte, 0, 13+len(item.meta)+4*len(item.vec))
+	body := make([]byte, 0, 13+len(item.meta)+len(item.payload))
 	body = append(body, header...)
 	body = append(body, item.meta...)
-	vecBytes := make([]byte, 4*len(item.vec))
-	for i, v := range item.vec {
-		binary.LittleEndian.PutUint32(vecBytes[i*4:], math.Float32bits(v))
-	}
-	body = append(body, vecBytes...)
+	body = append(body, item.payload...)
 	if _, err := file.Seek(0, io.SeekEnd); err != nil {
 		return err
 	}
@@ -1043,7 +1131,7 @@ func (e *FlatMetaVectorEngine) tryMergeOldestColdSegments() bool {
 // keeping the latest record per id (including tombstones). It returns the new
 // segment meta and an open handle to the merged file.
 func (e *FlatMetaVectorEngine) mergeSegments(newID int64, firstDesc, secondDesc SegmentDescriptor) (SegmentMeta, *os.File, error) {
-	latestRecords, err := collectLatestFlatMetaRecords(e.dim, firstDesc.DataPath, secondDesc.DataPath)
+	latestRecords, err := collectLatestFlatMetaRecords(e.vectorPayloadSize(), firstDesc.DataPath, secondDesc.DataPath)
 	if err != nil {
 		return SegmentMeta{}, nil, err
 	}
@@ -1069,10 +1157,10 @@ func (e *FlatMetaVectorEngine) mergeSegments(newID int64, firstDesc, secondDesc 
 	return meta, dataFile, nil
 }
 
-func collectLatestFlatMetaRecords(dim int, paths ...string) (map[int64][]byte, error) {
+func collectLatestFlatMetaRecords(payloadSize int, paths ...string) (map[int64][]byte, error) {
 	records := make(map[int64][]byte)
 	for _, path := range paths {
-		err := streamFlatMetaDataFile(path, dim, func(rec flatMetaRecord) error {
+		err := streamFlatMetaDataFile(path, payloadSize, func(rec flatMetaRecord) error {
 			records[rec.id] = append([]byte(nil), rec.raw...)
 			return nil
 		})
@@ -1138,7 +1226,7 @@ func (e *FlatMetaVectorEngine) replayWAL() error {
 			}
 			continue
 		}
-		metaBytes, vec, err := decodeFlatMetaWALValue([]byte(entry.Value), e.dim)
+		metaBytes, payload, err := decodeFlatMetaWALValue([]byte(entry.Value), e.vectorPayloadSize())
 		if err != nil {
 			return fmt.Errorf("decode WAL value for id %d: %w", id, err)
 		}
@@ -1152,10 +1240,14 @@ func (e *FlatMetaVectorEngine) replayWAL() error {
 		if err != nil {
 			return err
 		}
+		vec, err := e.decodeStoredVector(payload)
+		if err != nil {
+			return fmt.Errorf("decode WAL vector for id %d: %w", id, err)
+		}
 		e.lock.Lock()
-		e.indexInsertLocked(id, vec, norm)
+		e.indexInsertLocked(id, vec, payload, norm)
 		e.lock.Unlock()
-		e.enqueuePersist(flatMetaPersistItem{id: id, meta: metaBytes, vec: vec})
+		e.enqueuePersist(flatMetaPersistItem{id: id, meta: metaBytes, payload: payload})
 	}
 	e.flushData(true)
 	return e.wal.Clear()
@@ -1164,7 +1256,7 @@ func (e *FlatMetaVectorEngine) replayWAL() error {
 // streamFlatMetaDataFile reads an append-only data file record by record (in file
 // order) and invokes fn for each. A truncated trailing record (e.g. from a crash
 // mid-append) is treated as end-of-file. A missing file is not an error.
-func streamFlatMetaDataFile(path string, dim int, fn func(flatMetaRecord) error) error {
+func streamFlatMetaDataFile(path string, payloadSize int, fn func(flatMetaRecord) error) error {
 	file, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -1199,37 +1291,49 @@ func streamFlatMetaDataFile(path string, dim int, fn func(flatMetaRecord) error)
 			}
 			continue
 		}
-		vecBuf := make([]byte, 4*dim)
+		vecBuf := make([]byte, payloadSize)
 		if _, err := io.ReadFull(file, vecBuf); err != nil {
 			break
-		}
-		vec := make([]float32, dim)
-		for i := 0; i < dim; i++ {
-			vec[i] = math.Float32frombits(binary.LittleEndian.Uint32(vecBuf[i*4:]))
 		}
 		raw := make([]byte, 0, 13+len(metaBuf)+len(vecBuf))
 		raw = append(raw, header...)
 		raw = append(raw, metaBuf...)
 		raw = append(raw, vecBuf...)
-		if err := fn(flatMetaRecord{id: id, tombstone: false, raw: raw, meta: metaBuf, vec: vec}); err != nil {
+		if err := fn(flatMetaRecord{id: id, tombstone: false, raw: raw, meta: metaBuf, payload: vecBuf}); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func encodeFlatMetaWALValue(meta []byte, vec []float32) []byte {
-	buf := make([]byte, 4+len(meta)+4*len(vec))
-	binary.LittleEndian.PutUint32(buf[0:4], uint32(len(meta)))
-	copy(buf[4:], meta)
-	off := 4 + len(meta)
+func encodeFloat32Vector(vec []float32) []byte {
+	buf := make([]byte, 4*len(vec))
 	for i, v := range vec {
-		binary.LittleEndian.PutUint32(buf[off+i*4:], math.Float32bits(v))
+		binary.LittleEndian.PutUint32(buf[i*4:], math.Float32bits(v))
 	}
 	return buf
 }
 
-func decodeFlatMetaWALValue(b []byte, dim int) ([]byte, []float32, error) {
+func decodeFloat32Vector(b []byte, dim int) ([]float32, error) {
+	if len(b) != 4*dim {
+		return nil, fmt.Errorf("vector length mismatch: expected %d bytes, got %d", 4*dim, len(b))
+	}
+	vec := make([]float32, dim)
+	for i := 0; i < dim; i++ {
+		vec[i] = math.Float32frombits(binary.LittleEndian.Uint32(b[i*4:]))
+	}
+	return vec, nil
+}
+
+func encodeFlatMetaWALValue(meta []byte, payload []byte) []byte {
+	buf := make([]byte, 4+len(meta)+len(payload))
+	binary.LittleEndian.PutUint32(buf[0:4], uint32(len(meta)))
+	copy(buf[4:], meta)
+	copy(buf[4+len(meta):], payload)
+	return buf
+}
+
+func decodeFlatMetaWALValue(b []byte, payloadSize int) ([]byte, []byte, error) {
 	if len(b) < 4 {
 		return nil, nil, fmt.Errorf("short WAL value")
 	}
@@ -1238,15 +1342,11 @@ func decodeFlatMetaWALValue(b []byte, dim int) ([]byte, []float32, error) {
 		return nil, nil, fmt.Errorf("truncated WAL metadata")
 	}
 	meta := b[4 : 4+metaLen]
-	vecBytes := b[4+metaLen:]
-	if len(vecBytes) != 4*dim {
-		return nil, nil, fmt.Errorf("WAL vector length mismatch: expected %d bytes, got %d", 4*dim, len(vecBytes))
+	payload := b[4+metaLen:]
+	if len(payload) != payloadSize {
+		return nil, nil, fmt.Errorf("WAL vector length mismatch: expected %d bytes, got %d", payloadSize, len(payload))
 	}
-	vec := make([]float32, dim)
-	for i := 0; i < dim; i++ {
-		vec[i] = math.Float32frombits(binary.LittleEndian.Uint32(vecBytes[i*4:]))
-	}
-	return append([]byte(nil), meta...), vec, nil
+	return append([]byte(nil), meta...), append([]byte(nil), payload...), nil
 }
 
 // === distances ===

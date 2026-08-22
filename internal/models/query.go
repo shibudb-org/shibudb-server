@@ -45,6 +45,7 @@ type Query struct {
 
 	// Filterable Flat vector space fields.
 	IndexedMetadataFields []storage.MetadataFieldSpec `json:"indexed_metadata_fields,omitempty"`
+	Compression           string                      `json:"compression,omitempty"`
 	Metadata              map[string]any              `json:"metadata,omitempty"`
 	Filter                *storage.MetadataFilter     `json:"filter,omitempty"`
 }

@@ -584,6 +584,7 @@ func TestSpaceManager_FilterableFlatKeepsSegmentSettings(t *testing.T) {
 		"flat_meta_seg", "vector", 4, "Flat", "L2", true,
 		storage.SpaceSettings{SegmentRolloverBytes: 2048, MaxSegmentsBeforeMerge: 9},
 		[]storage.MetadataFieldSpec{{Name: "user_id", Type: storage.MetadataTypeString}},
+		"",
 	); err != nil {
 		t.Fatalf("CreateSpaceWithSettingsAndMetadata: %v", err)
 	}
@@ -594,5 +595,63 @@ func TestSpaceManager_FilterableFlatKeepsSegmentSettings(t *testing.T) {
 	if meta.SegmentRolloverBytes != 2048 || meta.MaxSegmentsBeforeMerge != 9 {
 		t.Fatalf("filterable Flat space lost segment settings, got rollover=%d merge=%d",
 			meta.SegmentRolloverBytes, meta.MaxSegmentsBeforeMerge)
+	}
+}
+
+func TestSpaceManager_TurboQuantCompression(t *testing.T) {
+	dir := t.TempDir()
+	sm := NewSpaceManager(dir)
+	defer sm.CloseAll()
+
+	fields := []storage.MetadataFieldSpec{{Name: "user_id", Type: storage.MetadataTypeString}}
+	if _, err := sm.CreateSpaceWithSettingsAndMetadata(
+		"tq4", "vector", 8, "Flat", "L2", false,
+		storage.SpaceSettings{}, fields, storage.VectorCompressionTurboQuant4Bits,
+	); err != nil {
+		t.Fatalf("create compressed space: %v", err)
+	}
+	meta, ok := sm.SpaceMeta("tq4")
+	if !ok {
+		t.Fatal("SpaceMeta missing")
+	}
+	if meta.Compression != storage.VectorCompressionTurboQuant4Bits {
+		t.Fatalf("Compression = %q, want %q", meta.Compression, storage.VectorCompressionTurboQuant4Bits)
+	}
+
+	comp := storage.VectorCompressionTurboQuant4Bits
+	cases := []struct {
+		name      string
+		engine    string
+		indexType string
+		fields    []storage.MetadataFieldSpec
+		wantSub   string
+	}{
+		{"faiss flat without metadata", "vector", "Flat", nil, "indexed metadata fields"},
+		{"hnsw32", "vector", "HNSW32", nil, `got index type "HNSW32"`},
+		{"hnsw32 with metadata fields", "vector", "HNSW32", fields, `got index type "HNSW32"`},
+		{"ivf32 flat", "vector", "IVF32,Flat", nil, `got index type "IVF32,Flat"`},
+		{"pq8", "vector", "PQ8", nil, `got index type "PQ8"`},
+		{"key-value btree", "key-value", "btree", nil, `got engine type "key-value"`},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			space := fmt.Sprintf("reject_comp_%d", i)
+			_, err := sm.CreateSpaceWithSettingsAndMetadata(
+				space, tc.engine, 8, tc.indexType, "L2", false,
+				storage.SpaceSettings{}, tc.fields, comp,
+			)
+			if err == nil {
+				t.Fatalf("expected error creating %s with --compression", tc.name)
+			}
+			if !strings.Contains(err.Error(), "compression is only supported for Flat spaces declared with indexed metadata fields") {
+				t.Fatalf("error %q missing compression restriction", err)
+			}
+			if tc.wantSub != "" && !strings.Contains(err.Error(), tc.wantSub) {
+				t.Fatalf("error %q, want substring %q", err, tc.wantSub)
+			}
+			if _, ok := sm.SpaceMeta(space); ok {
+				t.Fatalf("rejected space %q should not be published", space)
+			}
+		})
 	}
 }

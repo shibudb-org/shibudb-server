@@ -16,7 +16,7 @@
 ### System Requirements
 
 - **Operating System**: Linux (AMD64/ARM64) or macOS (Apple Silicon)
-- **Go Version**: 1.23.0 or later (for source builds)
+- **Go Version**: 1.24.0 or later (for source builds)
 - **Memory**: Minimum 512MB RAM, recommended 2GB+
 - **Disk Space**: Minimum 1GB free space
 - **Network**: TCP port access for client connections
@@ -85,7 +85,7 @@ libraries from the ShibuDB source tree.
 
 The installer supports Linux `amd64` and `arm64`. It can install dependencies
 through `apt`, `dnf`, or `yum`, and downloads a temporary Go toolchain if Go
-1.23 or later is not already installed.
+1.24 or later is not already installed.
 
 ```bash
 # Install the latest release

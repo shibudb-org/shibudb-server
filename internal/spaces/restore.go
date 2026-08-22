@@ -298,6 +298,10 @@ func restoreVectorData(spacePath string, meta spaceMeta, data []DumpVectorRecord
 func restoreFlatMetaVectorData(spacePath string, meta spaceMeta, data []DumpVectorRecord, mode string) (int, error) {
 	dataPath := filepath.Join(spacePath, "flat_meta_data.db")
 	dimension := meta.Dimension
+	quantizer, payloadSize, err := flatMetaQuantizer(meta)
+	if err != nil {
+		return 0, err
+	}
 
 	if mode == "merge" {
 		// Read existing live records.
@@ -308,10 +312,14 @@ func restoreFlatMetaVectorData(spacePath string, meta spaceMeta, data []DumpVect
 		existing := make(map[int64]*existEntry)
 		if paths, err := collectFlatMetaDataPaths(spacePath); err == nil {
 			for _, path := range paths {
-				_ = streamFlatMetaFile(path, dimension, func(id int64, tombstone bool, vec []float32, metaBytes []byte) error {
+				_ = streamFlatMetaFile(path, payloadSize, func(id int64, tombstone bool, payload []byte, metaBytes []byte) error {
 					if tombstone {
 						existing[id] = nil
 					} else {
+						vec, err := decodeFlatMetaVectorPayload(payload, dimension, quantizer)
+						if err != nil {
+							return err
+						}
 						existing[id] = &existEntry{vec: vec, metaJSON: metaBytes}
 					}
 					return nil
@@ -374,9 +382,9 @@ func restoreFlatMetaVectorData(spacePath string, meta spaceMeta, data []DumpVect
 			return 0, err
 		}
 
-		vecBuf := make([]byte, 4*dimension)
-		for i, v := range rec.Vector {
-			binary.LittleEndian.PutUint32(vecBuf[i*4:], math.Float32bits(v))
+		vecBuf, err := encodeFlatMetaVectorPayload(rec.Vector, quantizer)
+		if err != nil {
+			return 0, err
 		}
 		if _, err := file.Write(vecBuf); err != nil {
 			return 0, err

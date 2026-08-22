@@ -7,7 +7,7 @@ VERSION="${SHIBUDB_VERSION:-latest}"
 PREFIX="${SHIBUDB_PREFIX:-/usr/local}"
 SKIP_DEPS="${SHIBUDB_SKIP_DEPS:-0}"
 KEEP_BUILD_DIR="${SHIBUDB_KEEP_BUILD_DIR:-0}"
-GO_VERSION="${SHIBUDB_GO_VERSION:-1.23.7}"
+GO_VERSION="${SHIBUDB_GO_VERSION:-1.24.0}"
 
 usage() {
 	cat <<EOF
@@ -201,7 +201,7 @@ prepare_go() {
 	if command -v go >/dev/null 2>&1; then
 		local current
 		current="$(go env GOVERSION 2>/dev/null | sed 's/^go//')"
-		if [[ -n "$current" ]] && version_at_least "$current" "1.23.0"; then
+		if [[ -n "$current" ]] && version_at_least "$current" "1.24.0"; then
 			echo "Using existing Go: $(go version)"
 			return
 		fi

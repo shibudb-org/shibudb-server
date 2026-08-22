@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"sort"
 	"time"
+
+	"github.com/shibudb.org/shibudb-server/internal/storage"
 )
 
 // DumpFormatVersion identifies the dump file format so restores can detect
@@ -447,6 +449,10 @@ func dumpFlatMetaVectorSpace(enc *json.Encoder, spacePath string, meta spaceMeta
 	}
 
 	dimension := meta.Dimension
+	quantizer, payloadSize, err := flatMetaQuantizer(meta)
+	if err != nil {
+		return 0, err
+	}
 
 	// Collect latest record per ID (last-writer-wins).
 	type flatMetaEntry struct {
@@ -457,7 +463,15 @@ func dumpFlatMetaVectorSpace(enc *json.Encoder, spacePath string, meta spaceMeta
 	latest := make(map[int64]*flatMetaEntry)
 
 	for _, path := range dataPaths {
-		if err := streamFlatMetaFile(path, dimension, func(id int64, tombstone bool, vec []float32, metaBytes []byte) error {
+		if err := streamFlatMetaFile(path, payloadSize, func(id int64, tombstone bool, payload []byte, metaBytes []byte) error {
+			var vec []float32
+			if !tombstone {
+				var err error
+				vec, err = decodeFlatMetaVectorPayload(payload, dimension, quantizer)
+				if err != nil {
+					return err
+				}
+			}
 			latest[id] = &flatMetaEntry{
 				vec:       vec,
 				metaJSON:  metaBytes,
@@ -533,8 +547,8 @@ func collectFlatMetaDataPaths(spacePath string) ([]string, error) {
 }
 
 // streamFlatMetaFile reads a flat-meta vector data file record by record.
-// Record format: [8B id LE][1B flag][4B metaLen LE][metaBytes][vecBytes if live]
-func streamFlatMetaFile(path string, dim int, fn func(id int64, tombstone bool, vec []float32, metaBytes []byte) error) error {
+// Record format: [8B id LE][1B flag][4B metaLen LE][metaBytes][payload if live].
+func streamFlatMetaFile(path string, payloadSize int, fn func(id int64, tombstone bool, payload []byte, metaBytes []byte) error) error {
 	file, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -568,17 +582,49 @@ func streamFlatMetaFile(path string, dim int, fn func(id int64, tombstone bool, 
 			continue
 		}
 
-		vecBuf := make([]byte, 4*dim)
+		vecBuf := make([]byte, payloadSize)
 		if _, err := io.ReadFull(file, vecBuf); err != nil {
 			break
 		}
-		vec := make([]float32, dim)
-		for i := 0; i < dim; i++ {
-			vec[i] = math.Float32frombits(binary.LittleEndian.Uint32(vecBuf[i*4:]))
-		}
-		if err := fn(id, false, vec, metaBuf); err != nil {
+		if err := fn(id, false, vecBuf, metaBuf); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func flatMetaQuantizer(meta spaceMeta) (*storage.VectorQuantizer, int, error) {
+	if meta.Compression == "" {
+		return nil, 4 * meta.Dimension, nil
+	}
+	q, err := storage.NewVectorQuantizer(meta.Dimension, meta.Compression)
+	if err != nil {
+		return nil, 0, err
+	}
+	return q, q.PayloadSize(), nil
+}
+
+func decodeFlatMetaVectorPayload(payload []byte, dim int, q *storage.VectorQuantizer) ([]float32, error) {
+	if q != nil {
+		return q.Dequantize(payload)
+	}
+	if len(payload) != 4*dim {
+		return nil, fmt.Errorf("vector length mismatch: expected %d bytes, got %d", 4*dim, len(payload))
+	}
+	vec := make([]float32, dim)
+	for i := 0; i < dim; i++ {
+		vec[i] = math.Float32frombits(binary.LittleEndian.Uint32(payload[i*4:]))
+	}
+	return vec, nil
+}
+
+func encodeFlatMetaVectorPayload(vec []float32, q *storage.VectorQuantizer) ([]byte, error) {
+	if q != nil {
+		return q.Quantize(vec)
+	}
+	buf := make([]byte, 4*len(vec))
+	for i, v := range vec {
+		binary.LittleEndian.PutUint32(buf[i*4:], math.Float32bits(v))
+	}
+	return buf, nil
 }

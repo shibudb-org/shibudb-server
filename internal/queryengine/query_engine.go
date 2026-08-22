@@ -231,7 +231,7 @@ func (qe *QueryEngine) Execute(query models.Query) (string, error) {
 			SegmentRolloverBytes:   query.SegmentRolloverBytes,
 			MaxSegmentsBeforeMerge: query.MaxSegmentsBeforeMerge,
 		}
-		_, err = qe.spaceManager.CreateSpaceWithSettingsAndMetadata(query.Space, query.EngineType, query.Dimension, indexType, metric, query.EnableWAL, settings, query.IndexedMetadataFields)
+		_, err = qe.spaceManager.CreateSpaceWithSettingsAndMetadata(query.Space, query.EngineType, query.Dimension, indexType, metric, query.EnableWAL, settings, query.IndexedMetadataFields, query.Compression)
 		if err != nil {
 			return "", err
 		}

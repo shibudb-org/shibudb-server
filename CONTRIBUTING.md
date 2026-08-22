@@ -22,7 +22,7 @@ This project and everyone participating in it is governed by our Code of Conduct
 
 ### Prerequisites
 
-- Go 1.23.0 or later
+- Go 1.24.0 or later
 - Git
 - Make (required for build scripts)
 
@@ -40,7 +40,7 @@ Clone the canonical repository locally:
 
 ```bash
 # Install dependencies and verify the toolchain
-install go version 1.23.0 or above
+install go version 1.24.0 or above
 ```
 
 ### 2. Run Tests

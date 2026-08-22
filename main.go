@@ -526,6 +526,7 @@ Space management
                                     --segment-rollover-bytes N
                                     --max-segments-before-merge N
                                     --metadata-fields name:type,...  (Flat vector only; type: string|int|float)
+                                    --compression SCHEME            (Flat+metadata only; TurboQuant2Bits, TurboQuant3Bits, or TurboQuant4Bits)
   update-space-settings <name> [--segment-rollover-bytes N] [--max-segments-before-merge N]
   delete-space <name>             Delete a space and its data
 
@@ -567,6 +568,9 @@ User management (admin)
 
 Notes
   - --metadata-fields and --meta are comma-separated and must not contain spaces.
+  - --compression is only valid on Flat vector spaces created with --metadata-fields.
+    Stored vectors are TurboQuant-quantized (2, 3, or 4 bits); search reconstructs approximate float32.
+    6-bit and 8-bit schemes are not available — the TurboQuant library only supports 2/3/4-bit.
   - Vector ids are parsed as int64; query vector length must match the space dimension.
 `)
 }
@@ -787,7 +791,7 @@ func connectToServer(port, providedUser, providedPass string) {
 			query = models.Query{Type: models.TypeGetUser, Data: parts[1]}
 		case "create-space":
 			if len(parts) < 2 {
-				fmt.Println("Usage: create-space <name> [--engine key-value|vector] [--dimension N] [--index-type TYPE] [--metric METRIC] [--enable-wal] [--disable-wal] [--segment-rollover-bytes N] [--max-segments-before-merge N] [--metadata-fields name:type,...]")
+				fmt.Println("Usage: create-space <name> [--engine key-value|vector] [--dimension N] [--index-type TYPE] [--metric METRIC] [--enable-wal] [--disable-wal] [--segment-rollover-bytes N] [--max-segments-before-merge N] [--metadata-fields name:type,...] [--compression TurboQuant2Bits|TurboQuant3Bits|TurboQuant4Bits]")
 				continue
 			}
 			engineType := "key-value"
@@ -799,6 +803,7 @@ func connectToServer(port, providedUser, providedPass string) {
 			segmentRolloverBytes := int64(0)
 			maxSegmentsBeforeMerge := 0
 			metadataFieldsSpec := ""
+			compression := ""
 			for i := 2; i < len(parts); i++ {
 				if parts[i] == "--engine" && i+1 < len(parts) {
 					engineType = parts[i+1]
@@ -837,6 +842,9 @@ func connectToServer(port, providedUser, providedPass string) {
 				} else if parts[i] == "--metadata-fields" && i+1 < len(parts) {
 					metadataFieldsSpec = parts[i+1]
 					i++
+				} else if parts[i] == "--compression" && i+1 < len(parts) {
+					compression = parts[i+1]
+					i++
 				}
 			}
 
@@ -866,6 +874,7 @@ func connectToServer(port, providedUser, providedPass string) {
 				SegmentRolloverBytes:   segmentRolloverBytes,
 				MaxSegmentsBeforeMerge: maxSegmentsBeforeMerge,
 				IndexedMetadataFields:  indexedFields,
+				Compression:            compression,
 			}
 		case "update-space-settings":
 			if len(parts) < 2 {
