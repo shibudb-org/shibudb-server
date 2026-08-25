@@ -164,14 +164,10 @@ install_deps() {
 			libstdc++6 \
 			make \
 			tar
-		# FlatMeta GPU library needs nvcc. Prefer Debian's toolkit when an
-		# NVIDIA GPU is present (or when CUDA was explicitly requested).
+		# FlatMeta GPU library needs nvcc. Try distro packages first, then
+		# NVIDIA's official CUDA apt repository (common on GCP/minimal images).
 		if should_install_cuda_toolkit; then
-			echo "Installing CUDA toolkit (nvcc) for FlatMeta GPU library..."
-			$SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y \
-				nvidia-cuda-toolkit \
-				nvidia-cuda-dev || \
-				echo "Warning: could not install nvidia-cuda-toolkit from apt; install CUDA toolkit manually if you need GPU scoring." >&2
+			install_cuda_toolkit_apt
 		fi
 	elif command -v dnf >/dev/null 2>&1; then
 		$SUDO dnf install -y dnf-plugins-core || true
@@ -273,6 +269,151 @@ ensure_nvcc_on_path() {
 		fi
 	done
 	return 1
+}
+
+# Install nvcc + cudart headers/libs via apt. Distro packages are preferred;
+# GCP/minimal Debian images often lack nvidia-cuda-toolkit, so fall back to
+# NVIDIA's cuda-keyring repository.
+install_cuda_toolkit_apt() {
+	echo "Installing CUDA toolkit (nvcc) for FlatMeta GPU library..."
+
+	if $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y \
+		nvidia-cuda-toolkit \
+		nvidia-cuda-dev; then
+		ensure_nvcc_on_path || true
+		return 0
+	fi
+
+	echo "Distro CUDA packages unavailable; trying NVIDIA CUDA apt repository..."
+	if ! install_nvidia_cuda_repo_apt; then
+		print_cuda_manual_install_help
+		return 1
+	fi
+
+	# Prefer a compact compiler + runtime-dev set over the full toolkit meta package.
+	local candidates=()
+	mapfile -t candidates < <(apt-cache search --names-only '^cuda-nvcc-[0-9]+-[0-9]+$' 2>/dev/null | awk '{print $1}' | sort -V)
+	if [[ ${#candidates[@]} -eq 0 ]]; then
+		# Fallback list for when apt-cache search is empty/odd.
+		candidates=(cuda-nvcc-12-8 cuda-nvcc-12-6 cuda-nvcc-12-4 cuda-nvcc-12-2 cuda-nvcc-11-8)
+	fi
+
+	# Try newest first.
+	local nvcc_pkg cudart_pkg
+	local i
+	for ((i=${#candidates[@]}-1; i>=0; i--)); do
+		nvcc_pkg="${candidates[$i]}"
+		cudart_pkg="${nvcc_pkg/cuda-nvcc-/cuda-cudart-dev-}"
+		echo "Trying $nvcc_pkg + $cudart_pkg ..."
+		if $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y "$nvcc_pkg" "$cudart_pkg"; then
+			# NVIDIA installs nvcc under /usr/local/cuda/bin
+			export PATH="/usr/local/cuda/bin:$PATH"
+			if ensure_nvcc_on_path && command -v nvcc >/dev/null 2>&1; then
+				echo "Installed CUDA toolkit via NVIDIA repo: $(nvcc --version | tail -n1)"
+				return 0
+			fi
+		fi
+	done
+
+	# Last resort: larger meta package.
+	if $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y cuda-toolkit-12-6 || \
+		$SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y cuda-toolkit-12-4 || \
+		$SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y cuda-toolkit; then
+		export PATH="/usr/local/cuda/bin:$PATH"
+		if ensure_nvcc_on_path && command -v nvcc >/dev/null 2>&1; then
+			echo "Installed CUDA toolkit meta package: $(nvcc --version | tail -n1)"
+			return 0
+		fi
+	fi
+
+	print_cuda_manual_install_help
+	return 1
+}
+
+install_nvidia_cuda_repo_apt() {
+	local id version_id arch repo_distro keyring_url keyring_deb
+	if [[ ! -f /etc/os-release ]]; then
+		return 1
+	fi
+	# shellcheck disable=SC1091
+	. /etc/os-release
+	id="${ID:-}"
+	version_id="${VERSION_ID:-}"
+	case "$(uname -m)" in
+		x86_64) arch="x86_64" ;;
+		aarch64|arm64) arch="sbsa" ;; # NVIDIA arm64 server repo
+		*) echo "Unsupported arch for NVIDIA CUDA repo: $(uname -m)" >&2; return 1 ;;
+	esac
+
+	case "$id" in
+		debian)
+			case "$version_id" in
+				12*) repo_distro="debian12" ;;
+				11*) repo_distro="debian11" ;;
+				*)
+					echo "Unsupported Debian version for NVIDIA CUDA repo: $version_id" >&2
+					return 1
+					;;
+			esac
+			;;
+		ubuntu)
+			case "$version_id" in
+				24.04*) repo_distro="ubuntu2404" ;;
+				22.04*) repo_distro="ubuntu2204" ;;
+				20.04*) repo_distro="ubuntu2004" ;;
+				*)
+					echo "Unsupported Ubuntu version for NVIDIA CUDA repo: $version_id" >&2
+					return 1
+					;;
+			esac
+			# Ubuntu arm64 uses arm64/cross repo naming; keep x86_64 path for amd64 VMs.
+			if [[ "$arch" == "sbsa" && "$id" == "ubuntu" ]]; then
+				arch="arm64"
+			fi
+			;;
+		*)
+			echo "NVIDIA CUDA apt repo auto-setup supports Debian/Ubuntu only (got ID=$id)." >&2
+			return 1
+			;;
+	esac
+
+	keyring_deb="cuda-keyring_1.1-1_all.deb"
+	keyring_url="https://developer.download.nvidia.com/compute/cuda/repos/${repo_distro}/${arch}/${keyring_deb}"
+	echo "Adding NVIDIA CUDA apt repo ($repo_distro/$arch)..."
+	if ! curl -fsSL "$keyring_url" -o "$WORK_DIR/$keyring_deb"; then
+		# Some arm Ubuntu repos use x86_64 keyring package path differently; retry common alt.
+		if [[ "$arch" == "arm64" ]]; then
+			keyring_url="https://developer.download.nvidia.com/compute/cuda/repos/${repo_distro}/arm64/${keyring_deb}"
+			curl -fsSL "$keyring_url" -o "$WORK_DIR/$keyring_deb" || return 1
+		else
+			return 1
+		fi
+	fi
+	$SUDO dpkg -i "$WORK_DIR/$keyring_deb"
+	$SUDO apt-get update
+	return 0
+}
+
+print_cuda_manual_install_help() {
+	cat >&2 <<EOF
+Warning: could not install CUDA toolkit automatically.
+
+On this GCP/Debian image, install NVIDIA's toolkit, then re-run the installer:
+
+  curl -fsSL -o /tmp/cuda-keyring.deb \\
+    https://developer.download.nvidia.com/compute/cuda/repos/debian12/x86_64/cuda-keyring_1.1-1_all.deb
+  sudo dpkg -i /tmp/cuda-keyring.deb
+  sudo apt-get update
+  sudo apt-get install -y cuda-nvcc-12-6 cuda-cudart-dev-12-6
+  export PATH=/usr/local/cuda/bin:\$PATH
+  nvcc --version
+
+  # Then rebuild/install only the FlatMeta GPU library:
+  make build-gpudist-cuda
+  sudo install -m 0755 internal/storage/gpudist/cuda/libshibudb_gpudist.so $LIB_DIR/
+  sudo ldconfig
+
+EOF
 }
 
 version_at_least() {
@@ -400,19 +541,7 @@ detect_cuda() {
 
 	if ! command -v nvcc >/dev/null 2>&1; then
 		if has_nvidia_gpu; then
-			cat <<EOF
-NVIDIA GPU detected, but nvcc (CUDA toolkit) is still missing.
-Install the toolkit, then re-run this installer (or only rebuild the GPU library):
-
-  # Debian/Ubuntu:
-  sudo apt-get install -y nvidia-cuda-toolkit nvidia-cuda-dev
-
-  # Then rebuild just the GPU library from a source checkout:
-  make build-gpudist-cuda
-  sudo install -m 0755 internal/storage/gpudist/cuda/libshibudb_gpudist.so $LIB_DIR/
-  sudo ldconfig
-
-EOF
+			print_cuda_manual_install_help
 		else
 			echo "nvcc not found and no NVIDIA GPU detected; installing without libshibudb_gpudist.so."
 		fi
