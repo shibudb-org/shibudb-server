@@ -18,6 +18,7 @@ import (
 	"github.com/google/btree"
 	"github.com/shibudb.org/shibudb-server/internal/logger"
 	"github.com/shibudb.org/shibudb-server/internal/maintenance"
+	"github.com/shibudb.org/shibudb-server/internal/storage/gpudist"
 	"github.com/shibudb.org/shibudb-server/internal/wal"
 )
 
@@ -667,6 +668,14 @@ type flatMetaPair struct {
 
 func (e *FlatMetaVectorEngine) scoreCandidatesLocked(query []float32, candidates *roaring64.Bitmap, useRadius bool, radius float32) []flatMetaPair {
 	ids := candidates.ToArray()
+	if len(ids) == 0 {
+		return nil
+	}
+
+	if pairs, ok := e.scoreCandidatesGPULocked(query, ids, useRadius, radius); ok {
+		return pairs
+	}
+
 	pairs := make([]flatMetaPair, 0, len(ids))
 	for _, u := range ids {
 		id := int64(u)
@@ -681,6 +690,46 @@ func (e *FlatMetaVectorEngine) scoreCandidatesLocked(query []float32, candidates
 		pairs = append(pairs, flatMetaPair{id: id, dist: dist})
 	}
 	return pairs
+}
+
+// scoreCandidatesGPULocked packs live candidate vectors and scores them on GPU
+// when CUDA support is compiled in and a device is available. Returns ok=false
+// to fall back to the CPU loop.
+func (e *FlatMetaVectorEngine) scoreCandidatesGPULocked(query []float32, ids []uint64, useRadius bool, radius float32) ([]flatMetaPair, bool) {
+	if !gpudist.Available() || len(ids) < gpudist.MinCandidatesFromEnv() {
+		return nil, false
+	}
+
+	liveIDs := make([]int64, 0, len(ids))
+	matrix := make([]float32, 0, len(ids)*e.dim)
+	for _, u := range ids {
+		id := int64(u)
+		vec, ok := e.liveVectorLocked(id)
+		if !ok || len(vec) != e.dim {
+			continue
+		}
+		liveIDs = append(liveIDs, id)
+		matrix = append(matrix, vec...)
+	}
+	n := len(liveIDs)
+	if n < gpudist.MinCandidatesFromEnv() {
+		return nil, false
+	}
+
+	dists := make([]float32, n)
+	if !gpudist.BatchDistances(e.metric, query, matrix, n, e.dim, dists) {
+		return nil, false
+	}
+
+	pairs := make([]flatMetaPair, 0, n)
+	for i, id := range liveIDs {
+		dist := dists[i]
+		if useRadius && !withinRadius(e.metric, dist, radius) {
+			continue
+		}
+		pairs = append(pairs, flatMetaPair{id: id, dist: dist})
+	}
+	return pairs, true
 }
 
 func splitPairs(pairs []flatMetaPair) ([]int64, []float32, error) {

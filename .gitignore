@@ -44,4 +44,8 @@ test-data/
 testdata/
 
 #build file
-build
+build/
+
+# Optional FlatMeta CUDA library (built by make build-gpudist-cuda)
+internal/storage/gpudist/cuda/libshibudb_gpudist.so
+internal/storage/gpudist/cuda/*.o

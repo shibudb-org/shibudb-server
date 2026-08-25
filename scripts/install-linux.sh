@@ -8,6 +8,8 @@ PREFIX="${SHIBUDB_PREFIX:-/usr/local}"
 SKIP_DEPS="${SHIBUDB_SKIP_DEPS:-0}"
 KEEP_BUILD_DIR="${SHIBUDB_KEEP_BUILD_DIR:-0}"
 GO_VERSION="${SHIBUDB_GO_VERSION:-1.24.0}"
+# auto | 1 | 0  — auto enables FlatMeta GPU scoring when nvcc + CUDA runtime exist
+WITH_CUDA="${SHIBUDB_WITH_CUDA:-auto}"
 
 usage() {
 	cat <<EOF
@@ -23,6 +25,8 @@ Options:
   --source <path>        Build from an existing source checkout.
   --skip-deps            Do not install OS build dependencies.
   --keep-build-dir       Keep the temporary build directory for debugging.
+  --with-cuda            Build FlatMeta GPU scoring (requires nvcc + CUDA).
+  --without-cuda         Skip FlatMeta GPU scoring even if CUDA is present.
   -h, --help             Show this help.
 
 Environment:
@@ -32,10 +36,14 @@ Environment:
   SHIBUDB_SKIP_DEPS=1    Same as --skip-deps.
   SHIBUDB_KEEP_BUILD_DIR=1
   SHIBUDB_GO_VERSION     Go version used if a suitable go command is not found.
+  SHIBUDB_WITH_CUDA      auto (default), 1/--with-cuda, or 0/--without-cuda.
 EOF
 }
 
 SOURCE_DIR=""
+CUDA_ENABLED=0
+CUDA_LIB_DIR=""
+GPUDIST_LIB=""
 
 while [[ $# -gt 0 ]]; do
 	case "$1" in
@@ -57,6 +65,14 @@ while [[ $# -gt 0 ]]; do
 			;;
 		--keep-build-dir)
 			KEEP_BUILD_DIR=1
+			shift
+			;;
+		--with-cuda)
+			WITH_CUDA=1
+			shift
+			;;
+		--without-cuda)
+			WITH_CUDA=0
 			shift
 			;;
 		-h|--help)
@@ -269,6 +285,76 @@ prepare_source() {
 	fi
 }
 
+find_cuda_lib_dir() {
+	local candidate
+	for candidate in \
+		"${CUDA_HOME:-}/lib64" \
+		"${CUDA_PATH:-}/lib64" \
+		/usr/local/cuda/lib64 \
+		/usr/lib/x86_64-linux-gnu \
+		/usr/lib/aarch64-linux-gnu \
+		/usr/lib64; do
+		[[ -n "$candidate" ]] || continue
+		if [[ -e "$candidate/libcudart.so" || -e "$candidate/libcudart.so.12" || -e "$candidate/libcudart.so.11" ]]; then
+			echo "$candidate"
+			return 0
+		fi
+	done
+	return 1
+}
+
+detect_cuda() {
+	CUDA_ENABLED=0
+	CUDA_LIB_DIR=""
+	GPUDIST_LIB=""
+
+	case "$WITH_CUDA" in
+		0|false|no|off)
+			echo "FlatMeta GPU scoring disabled (--without-cuda)."
+			return 0
+			;;
+	esac
+
+	if ! command -v nvcc >/dev/null 2>&1; then
+		if [[ "$WITH_CUDA" == "1" || "$WITH_CUDA" == "true" || "$WITH_CUDA" == "yes" || "$WITH_CUDA" == "on" ]]; then
+			echo "CUDA was requested (--with-cuda) but nvcc was not found." >&2
+			exit 1
+		fi
+		echo "nvcc not found; building FlatMeta with CPU scoring only."
+		return 0
+	fi
+
+	if ! CUDA_LIB_DIR="$(find_cuda_lib_dir)"; then
+		if [[ "$WITH_CUDA" == "1" || "$WITH_CUDA" == "true" || "$WITH_CUDA" == "yes" || "$WITH_CUDA" == "on" ]]; then
+			echo "CUDA was requested (--with-cuda) but libcudart was not found." >&2
+			exit 1
+		fi
+		echo "CUDA runtime library not found; building FlatMeta with CPU scoring only."
+		return 0
+	fi
+
+	CUDA_ENABLED=1
+	echo "CUDA detected (nvcc=$(command -v nvcc), cudart=$CUDA_LIB_DIR); enabling FlatMeta GPU scoring."
+}
+
+build_gpudist_cuda() {
+	local cuda_dir="$SOURCE_DIR/internal/storage/gpudist/cuda"
+	local out="$cuda_dir/libshibudb_gpudist.so"
+	local arch_flags="${SHIBUDB_CUDA_ARCH:--arch=native}"
+
+	if [[ ! -f "$cuda_dir/distances.cu" ]]; then
+		echo "Missing FlatMeta CUDA sources at $cuda_dir/distances.cu" >&2
+		exit 1
+	fi
+
+	echo "Building FlatMeta GPU distance library..."
+	# shellcheck disable=SC2086
+	nvcc -shared -Xcompiler -fPIC -O3 $arch_flags \
+		-o "$out" \
+		"$cuda_dir/distances.cu"
+	GPUDIST_LIB="$out"
+}
+
 install_files() {
 	local build_bin="$WORK_DIR/$APP_NAME"
 	local faiss_lib_dir="$SOURCE_DIR/resources/lib/linux/$LIB_ARCH"
@@ -277,6 +363,9 @@ install_files() {
 	$SUDO install -m 0755 "$build_bin" "$BIN_DIR/$APP_NAME"
 	$SUDO install -m 0755 "$faiss_lib_dir/libfaiss.so" "$LIB_DIR/libfaiss.so"
 	$SUDO install -m 0755 "$faiss_lib_dir/libfaiss_c.so" "$LIB_DIR/libfaiss_c.so"
+	if [[ "$CUDA_ENABLED" == "1" && -n "$GPUDIST_LIB" && -f "$GPUDIST_LIB" ]]; then
+		$SUDO install -m 0755 "$GPUDIST_LIB" "$LIB_DIR/libshibudb_gpudist.so"
+	fi
 	$SUDO cp -R "$SOURCE_DIR/resources" "$SHARE_DIR/" 2>/dev/null || true
 	$SUDO install -m 0644 "$SOURCE_DIR/LICENSE" "$SHARE_DIR/LICENSE" 2>/dev/null || true
 	$SUDO install -m 0644 "$SOURCE_DIR/README.md" "$SHARE_DIR/README.md" 2>/dev/null || true
@@ -327,6 +416,11 @@ EOF
 
 	if "$ldconfig_bin" -p | grep -q '\blibfaiss\.so\b' && \
 		"$ldconfig_bin" -p | grep -q '\blibfaiss_c\.so\b'; then
+		if [[ "$CUDA_ENABLED" == "1" ]]; then
+			if ! "$ldconfig_bin" -p | grep -q '\blibshibudb_gpudist\.so\b'; then
+				echo "Warning: libshibudb_gpudist.so is installed in $LIB_DIR but not yet visible to ldconfig." >&2
+			fi
+		fi
 		return
 	fi
 
@@ -383,6 +477,9 @@ EOF
 build_shibudb() {
 	local faiss_lib_dir="$SOURCE_DIR/resources/lib/linux/$LIB_ARCH"
 	local version build_time rpath_flags openblas_ldflag
+	local build_tags="faiss"
+	local cuda_ldflags=""
+	local gpudist_dir="$SOURCE_DIR/internal/storage/gpudist/cuda"
 
 	cd "$SOURCE_DIR"
 	if [[ -x "./scripts/get_version.sh" ]]; then
@@ -402,12 +499,19 @@ build_shibudb() {
 		echo "OpenBLAS development symlink not found; relying on bundled FAISS runtime dependency."
 	fi
 
-	echo "Building ShibuDB $version for linux/$LIB_ARCH..."
+	if [[ "$CUDA_ENABLED" == "1" ]]; then
+		build_gpudist_cuda
+		build_tags="faiss,cuda"
+		cuda_ldflags="-L$gpudist_dir -lshibudb_gpudist -L$CUDA_LIB_DIR -lcudart -Wl,-rpath-link,$gpudist_dir -Wl,-rpath,$CUDA_LIB_DIR"
+		rpath_flags="$rpath_flags -Wl,-rpath-link,$CUDA_LIB_DIR"
+	fi
+
+	echo "Building ShibuDB $version for linux/$LIB_ARCH (tags=$build_tags)..."
 	CGO_ENABLED=1 \
 	CGO_CFLAGS="-I$SOURCE_DIR/resources/lib/include" \
 	CGO_CXXFLAGS="-I$SOURCE_DIR/resources/lib/include" \
-	CGO_LDFLAGS="-L$faiss_lib_dir -lfaiss -lfaiss_c -lstdc++ -lm -lgomp $openblas_ldflag $rpath_flags" \
-		go build -tags faiss \
+	CGO_LDFLAGS="-L$faiss_lib_dir -lfaiss -lfaiss_c -lstdc++ -lm -lgomp $openblas_ldflag $cuda_ldflags $rpath_flags" \
+		go build -tags "$build_tags" \
 		-buildvcs=false \
 		-ldflags "-s -w -X main.Version=$version -X main.BuildTime=$build_time" \
 		-o "$WORK_DIR/$APP_NAME" .
@@ -428,6 +532,7 @@ need_cmd curl
 need_cmd tar
 prepare_go
 prepare_source
+detect_cuda
 build_shibudb
 install_files
 
@@ -435,5 +540,10 @@ echo
 echo "ShibuDB installed successfully:"
 echo "  Binary: $BIN_DIR/$APP_NAME"
 echo "  FAISS libraries: $LIB_DIR"
+if [[ "$CUDA_ENABLED" == "1" ]]; then
+	echo "  FlatMeta GPU scoring: enabled ($LIB_DIR/libshibudb_gpudist.so)"
+else
+	echo "  FlatMeta GPU scoring: disabled (CPU only)"
+fi
 echo
 "$BIN_DIR/$APP_NAME" --version
