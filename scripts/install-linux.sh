@@ -8,8 +8,9 @@ PREFIX="${SHIBUDB_PREFIX:-/usr/local}"
 SKIP_DEPS="${SHIBUDB_SKIP_DEPS:-0}"
 KEEP_BUILD_DIR="${SHIBUDB_KEEP_BUILD_DIR:-0}"
 GO_VERSION="${SHIBUDB_GO_VERSION:-1.24.0}"
-# auto | 1 | 0  — auto enables FlatMeta GPU scoring when nvcc + CUDA runtime exist
-WITH_CUDA="${SHIBUDB_WITH_CUDA:-auto}"
+# 1 (default) builds FlatMeta GPU library when CUDA toolkit is present.
+# 0 skips building/installing libshibudb_gpudist.so.
+WITH_CUDA="${SHIBUDB_WITH_CUDA:-1}"
 
 usage() {
 	cat <<EOF
@@ -25,9 +26,12 @@ Options:
   --source <path>        Build from an existing source checkout.
   --skip-deps            Do not install OS build dependencies.
   --keep-build-dir       Keep the temporary build directory for debugging.
-  --with-cuda            Build FlatMeta GPU scoring (requires nvcc + CUDA).
-  --without-cuda         Skip FlatMeta GPU scoring even if CUDA is present.
+  --without-cuda         Do not build/install FlatMeta GPU library (CPU only).
   -h, --help             Show this help.
+
+The binary always includes FlatMeta GPU support. When CUDA toolkit (nvcc) is
+available, this installer also builds libshibudb_gpudist.so. At runtime ShibuDB
+uses the GPU if that library and a CUDA device are present; otherwise CPU.
 
 Environment:
   SHIBUDB_VERSION        Same as --version.
@@ -36,7 +40,7 @@ Environment:
   SHIBUDB_SKIP_DEPS=1    Same as --skip-deps.
   SHIBUDB_KEEP_BUILD_DIR=1
   SHIBUDB_GO_VERSION     Go version used if a suitable go command is not found.
-  SHIBUDB_WITH_CUDA      auto (default), 1/--with-cuda, or 0/--without-cuda.
+  SHIBUDB_WITH_CUDA=0    Same as --without-cuda.
 EOF
 }
 
@@ -68,6 +72,7 @@ while [[ $# -gt 0 ]]; do
 			shift
 			;;
 		--with-cuda)
+			# Accepted for compatibility; GPU library install is already the default.
 			WITH_CUDA=1
 			shift
 			;;
@@ -310,31 +315,23 @@ detect_cuda() {
 
 	case "$WITH_CUDA" in
 		0|false|no|off)
-			echo "FlatMeta GPU scoring disabled (--without-cuda)."
+			echo "Skipping FlatMeta GPU library build (--without-cuda)."
 			return 0
 			;;
 	esac
 
 	if ! command -v nvcc >/dev/null 2>&1; then
-		if [[ "$WITH_CUDA" == "1" || "$WITH_CUDA" == "true" || "$WITH_CUDA" == "yes" || "$WITH_CUDA" == "on" ]]; then
-			echo "CUDA was requested (--with-cuda) but nvcc was not found." >&2
-			exit 1
-		fi
-		echo "nvcc not found; building FlatMeta with CPU scoring only."
+		echo "nvcc not found; installing without libshibudb_gpudist.so (CPU until library is added)."
 		return 0
 	fi
 
 	if ! CUDA_LIB_DIR="$(find_cuda_lib_dir)"; then
-		if [[ "$WITH_CUDA" == "1" || "$WITH_CUDA" == "true" || "$WITH_CUDA" == "yes" || "$WITH_CUDA" == "on" ]]; then
-			echo "CUDA was requested (--with-cuda) but libcudart was not found." >&2
-			exit 1
-		fi
-		echo "CUDA runtime library not found; building FlatMeta with CPU scoring only."
+		echo "CUDA runtime library not found; installing without libshibudb_gpudist.so."
 		return 0
 	fi
 
 	CUDA_ENABLED=1
-	echo "CUDA detected (nvcc=$(command -v nvcc), cudart=$CUDA_LIB_DIR); enabling FlatMeta GPU scoring."
+	echo "CUDA toolkit detected (nvcc=$(command -v nvcc), cudart=$CUDA_LIB_DIR); building FlatMeta GPU library."
 }
 
 build_gpudist_cuda() {
@@ -477,9 +474,6 @@ EOF
 build_shibudb() {
 	local faiss_lib_dir="$SOURCE_DIR/resources/lib/linux/$LIB_ARCH"
 	local version build_time rpath_flags openblas_ldflag
-	local build_tags="faiss"
-	local cuda_ldflags=""
-	local gpudist_dir="$SOURCE_DIR/internal/storage/gpudist/cuda"
 
 	cd "$SOURCE_DIR"
 	if [[ -x "./scripts/get_version.sh" ]]; then
@@ -499,19 +493,18 @@ build_shibudb() {
 		echo "OpenBLAS development symlink not found; relying on bundled FAISS runtime dependency."
 	fi
 
+	# Always build/install the FlatMeta GPU library when CUDA toolkit is present.
+	# The binary loads it via dlopen at runtime and falls back to CPU if missing.
 	if [[ "$CUDA_ENABLED" == "1" ]]; then
 		build_gpudist_cuda
-		build_tags="faiss,cuda"
-		cuda_ldflags="-L$gpudist_dir -lshibudb_gpudist -L$CUDA_LIB_DIR -lcudart -Wl,-rpath-link,$gpudist_dir -Wl,-rpath,$CUDA_LIB_DIR"
-		rpath_flags="$rpath_flags -Wl,-rpath-link,$CUDA_LIB_DIR"
 	fi
 
-	echo "Building ShibuDB $version for linux/$LIB_ARCH (tags=$build_tags)..."
+	echo "Building ShibuDB $version for linux/$LIB_ARCH..."
 	CGO_ENABLED=1 \
 	CGO_CFLAGS="-I$SOURCE_DIR/resources/lib/include" \
 	CGO_CXXFLAGS="-I$SOURCE_DIR/resources/lib/include" \
-	CGO_LDFLAGS="-L$faiss_lib_dir -lfaiss -lfaiss_c -lstdc++ -lm -lgomp $openblas_ldflag $cuda_ldflags $rpath_flags" \
-		go build -tags "$build_tags" \
+	CGO_LDFLAGS="-L$faiss_lib_dir -lfaiss -lfaiss_c -lstdc++ -lm -lgomp $openblas_ldflag $rpath_flags" \
+		go build -tags faiss \
 		-buildvcs=false \
 		-ldflags "-s -w -X main.Version=$version -X main.BuildTime=$build_time" \
 		-o "$WORK_DIR/$APP_NAME" .
@@ -541,9 +534,10 @@ echo "ShibuDB installed successfully:"
 echo "  Binary: $BIN_DIR/$APP_NAME"
 echo "  FAISS libraries: $LIB_DIR"
 if [[ "$CUDA_ENABLED" == "1" ]]; then
-	echo "  FlatMeta GPU scoring: enabled ($LIB_DIR/libshibudb_gpudist.so)"
+	echo "  FlatMeta GPU library: installed ($LIB_DIR/libshibudb_gpudist.so)"
+	echo "  FlatMeta GPU usage: automatic when a CUDA device is available"
 else
-	echo "  FlatMeta GPU scoring: disabled (CPU only)"
+	echo "  FlatMeta GPU library: not installed (CPU scoring; add lib later if needed)"
 fi
 echo
 "$BIN_DIR/$APP_NAME" --version

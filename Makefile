@@ -185,21 +185,9 @@ build-gpudist-cuda: ## Build libshibudb_gpudist.so (requires nvcc)
 	@chmod +x scripts/build-gpudist-cuda.sh
 	@./scripts/build-gpudist-cuda.sh
 
-build-cuda: build-gpudist-cuda ## Build server with FlatMeta GPU scoring (-tags cuda)
-	@echo "Building $(BINARY_NAME) with CUDA FlatMeta scoring..."
-	@if [ "$(shell uname -s)" != "Linux" ]; then \
-		echo "error: CUDA FlatMeta build is supported on Linux only" >&2; \
-		exit 1; \
-	fi
-	@ARCH=$$(uname -m); \
-	if [ "$$ARCH" = "x86_64" ]; then LIB_DIR=amd64; \
-	elif [ "$$ARCH" = "aarch64" ]; then LIB_DIR=arm64; \
-	else echo "Unsupported arch: $$ARCH" >&2; exit 1; fi; \
-	CGO_ENABLED=1 \
-	CGO_CFLAGS="-I$$(pwd)/resources/lib/include" \
-	CGO_CXXFLAGS="-I$$(pwd)/resources/lib/include" \
-	CGO_LDFLAGS="-L$$(pwd)/resources/lib/linux/$$LIB_DIR -lfaiss -lfaiss_c -lstdc++ -lm -lgomp -lopenblas" \
-	go build -tags cuda $(LDFLAGS) -o $(BINARY_NAME) .
+build-cuda: build-gpudist-cuda ## Build FlatMeta GPU library (binary always has GPU support via dlopen)
+	@echo "Built FlatMeta GPU library. Install it next to FAISS libs (e.g. /usr/local/lib)."
+	@echo "The normal ShibuDB binary loads it at runtime when a CUDA device is available."
 
 # Test FAISS paths
 test-paths: ## Test FAISS paths and environment

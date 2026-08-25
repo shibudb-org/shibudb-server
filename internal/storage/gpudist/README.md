@@ -1,12 +1,15 @@
-# FlatMeta GPU distance (optional)
+# FlatMeta GPU distance (optional runtime)
 
-Optional CUDA acceleration for the in-house Flat metadata vector engine
-(`FlatMetaVectorEngine`). This is **not** FAISS-GPU. It only speeds up the
-brute-force distance loop used after metadata filtering.
+ShibuDB always ships FlatMeta GPU **support** in the Linux binary. Distance
+scoring uses an NVIDIA GPU at runtime when:
+
+1. `libshibudb_gpudist.so` is installed (built during Linux install when CUDA
+   toolkit is present), and
+2. a usable CUDA device is available.
+
+Otherwise FlatMeta falls back to CPU automatically. This is **not** FAISS-GPU.
 
 ## Supported metrics
-
-All FlatMeta metrics are implemented on GPU:
 
 | Metric | FAISS id | Notes |
 |--------|----------|-------|
@@ -22,34 +25,35 @@ All FlatMeta metrics are implemented on GPU:
 GPU math uses **float32**. CPU FlatMeta uses float64, so tiny numeric
 differences are expected.
 
-## Build (Linux + NVIDIA)
+## Install (Linux)
 
-Preferred: enable during the Linux source install (auto when `nvcc` + CUDA
-runtime are present):
+One installer. No separate GPU package:
 
 ```bash
 ./scripts/install-linux.sh --source .
-# force on / off:
-./scripts/install-linux.sh --source . --with-cuda
+```
+
+- If `nvcc` + CUDA runtime are present → builds and installs
+  `libshibudb_gpudist.so` next to FAISS libs.
+- Binary always includes GPU support (loads the library via `dlopen`).
+- At runtime: GPU if library + device available, else CPU.
+
+Skip building the GPU library (CPU-only install of the .so):
+
+```bash
 ./scripts/install-linux.sh --source . --without-cuda
 ```
 
-Manual:
+Manual library build:
 
 ```bash
 make build-gpudist-cuda
-make build-cuda
 ```
-
-Requires `nvcc` and a working NVIDIA driver/GPU.
-
-Default builds (no `-tags cuda`) stay CPU-only and do not need CUDA.
 
 ## Runtime controls
 
 | Env var | Effect |
 |---------|--------|
-| `SHIBUDB_FLAT_META_GPU=0` | Force CPU even when CUDA is compiled in |
-| `SHIBUDB_FLAT_META_GPU_MIN=N` | Min candidate count before using GPU (default 256) |
-
-If CUDA is unavailable at runtime, FlatMeta automatically falls back to CPU.
+| `SHIBUDB_FLAT_META_GPU=0` | Force CPU |
+| `SHIBUDB_FLAT_META_GPU_MIN=N` | Min candidates before GPU (default 256) |
+| `SHIBUDB_GPUDIST_LIB=/path/to/libshibudb_gpudist.so` | Explicit library path |

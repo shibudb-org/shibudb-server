@@ -3,13 +3,14 @@
 #
 # Prerequisites:
 #   - nvcc (CUDA toolkit)
-#   - NVIDIA driver with a usable GPU
+#   - NVIDIA driver with a usable GPU (for runtime use)
 #
 # Output:
 #   internal/storage/gpudist/cuda/libshibudb_gpudist.so
 #
-# Then rebuild the server with:
-#   make build-cuda
+# The normal ShibuDB binary always includes GPU support and loads this library
+# via dlopen when present. Prefer:
+#   ./scripts/install-linux.sh --source .
 
 set -euo pipefail
 

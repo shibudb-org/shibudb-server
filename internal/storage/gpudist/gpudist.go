@@ -1,6 +1,3 @@
-// Package gpudist provides optional GPU batch distance computation for the
-// in-house Flat metadata vector engine. When built without CUDA support, or
-// when no usable GPU is present at runtime, callers fall back to CPU scoring.
 package gpudist
 
 import (
@@ -33,10 +30,18 @@ var (
 
 // Available reports whether GPU distance scoring should be used.
 func Available() bool {
+	if gpuForcedOff() {
+		return false
+	}
 	initOnce.Do(func() {
 		enabled = probeGPU()
 	})
 	return enabled
+}
+
+func gpuForcedOff() bool {
+	v := os.Getenv("SHIBUDB_FLAT_META_GPU")
+	return v == "0" || v == "false" || v == "off"
 }
 
 // MinCandidatesFromEnv returns the configured minimum candidate count for GPU.
