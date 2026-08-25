@@ -164,6 +164,15 @@ install_deps() {
 			libstdc++6 \
 			make \
 			tar
+		# FlatMeta GPU library needs nvcc. Prefer Debian's toolkit when an
+		# NVIDIA GPU is present (or when CUDA was explicitly requested).
+		if should_install_cuda_toolkit; then
+			echo "Installing CUDA toolkit (nvcc) for FlatMeta GPU library..."
+			$SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y \
+				nvidia-cuda-toolkit \
+				nvidia-cuda-dev || \
+				echo "Warning: could not install nvidia-cuda-toolkit from apt; install CUDA toolkit manually if you need GPU scoring." >&2
+		fi
 	elif command -v dnf >/dev/null 2>&1; then
 		$SUDO dnf install -y dnf-plugins-core || true
 		$SUDO dnf config-manager --set-enabled powertools || true
@@ -191,6 +200,12 @@ install_deps() {
 			$SUDO dnf install -y --allowerasing git || true
 		$SUDO dnf install -y openblas-devel || \
 			$SUDO dnf install -y --nobest openblas-devel || true
+		if should_install_cuda_toolkit; then
+			echo "Installing CUDA toolkit (nvcc) for FlatMeta GPU library..."
+			$SUDO dnf install -y cuda-nvcc cuda-cudart-devel || \
+				$SUDO dnf install -y nvidia-cuda-toolkit || \
+				echo "Warning: could not install CUDA toolkit from dnf; install it manually if you need GPU scoring." >&2
+		fi
 	elif command -v yum >/dev/null 2>&1; then
 		if command -v amazon-linux-extras >/dev/null 2>&1; then
 			$SUDO amazon-linux-extras install epel -y || true
@@ -207,10 +222,57 @@ install_deps() {
 			tar
 		$SUDO yum install -y git || true
 		$SUDO yum install -y openblas-devel || true
+		if should_install_cuda_toolkit; then
+			echo "Installing CUDA toolkit (nvcc) for FlatMeta GPU library..."
+			$SUDO yum install -y cuda-nvcc cuda-cudart-devel || \
+				echo "Warning: could not install CUDA toolkit from yum; install it manually if you need GPU scoring." >&2
+		fi
 	else
 		echo "Unsupported Linux package manager. Install build tools, Go, OpenBLAS, libgomp, and libstdc++ manually, then rerun with --skip-deps." >&2
 		exit 1
 	fi
+}
+
+should_install_cuda_toolkit() {
+	case "$WITH_CUDA" in
+		0|false|no|off) return 1 ;;
+	esac
+	if command -v nvcc >/dev/null 2>&1; then
+		return 1
+	fi
+	# Install toolkit when an NVIDIA GPU/driver is present, or user forced CUDA.
+	if has_nvidia_gpu; then
+		return 0
+	fi
+	case "$WITH_CUDA" in
+		1|true|yes|on) return 0 ;;
+	esac
+	return 1
+}
+
+has_nvidia_gpu() {
+	if command -v nvidia-smi >/dev/null 2>&1; then
+		nvidia-smi -L >/dev/null 2>&1 && return 0
+	fi
+	[[ -e /dev/nvidia0 ]] && return 0
+	return 1
+}
+
+ensure_nvcc_on_path() {
+	if command -v nvcc >/dev/null 2>&1; then
+		return 0
+	fi
+	local candidate
+	for candidate in \
+		/usr/local/cuda/bin/nvcc \
+		/usr/lib/nvidia-cuda-toolkit/bin/nvcc \
+		/usr/bin/nvcc; do
+		if [[ -x "$candidate" ]]; then
+			export PATH="$(dirname "$candidate"):$PATH"
+			return 0
+		fi
+	done
+	return 1
 }
 
 version_at_least() {
@@ -298,13 +360,27 @@ find_cuda_lib_dir() {
 		/usr/local/cuda/lib64 \
 		/usr/lib/x86_64-linux-gnu \
 		/usr/lib/aarch64-linux-gnu \
-		/usr/lib64; do
+		/usr/lib/nvidia-cuda-toolkit/lib \
+		/usr/lib64 \
+		/usr/lib; do
 		[[ -n "$candidate" ]] || continue
 		if [[ -e "$candidate/libcudart.so" || -e "$candidate/libcudart.so.12" || -e "$candidate/libcudart.so.11" ]]; then
 			echo "$candidate"
 			return 0
 		fi
 	done
+	# Debian's nvidia-cuda-toolkit often ships versioned sonames only.
+	local match
+	match="$(ls /usr/lib/x86_64-linux-gnu/libcudart.so* 2>/dev/null | head -n1 || true)"
+	if [[ -n "$match" ]]; then
+		echo "$(dirname "$match")"
+		return 0
+	fi
+	match="$(ls /usr/lib/aarch64-linux-gnu/libcudart.so* 2>/dev/null | head -n1 || true)"
+	if [[ -n "$match" ]]; then
+		echo "$(dirname "$match")"
+		return 0
+	fi
 	return 1
 }
 
@@ -320,13 +396,31 @@ detect_cuda() {
 			;;
 	esac
 
+	ensure_nvcc_on_path || true
+
 	if ! command -v nvcc >/dev/null 2>&1; then
-		echo "nvcc not found; installing without libshibudb_gpudist.so (CPU until library is added)."
+		if has_nvidia_gpu; then
+			cat <<EOF
+NVIDIA GPU detected, but nvcc (CUDA toolkit) is still missing.
+Install the toolkit, then re-run this installer (or only rebuild the GPU library):
+
+  # Debian/Ubuntu:
+  sudo apt-get install -y nvidia-cuda-toolkit nvidia-cuda-dev
+
+  # Then rebuild just the GPU library from a source checkout:
+  make build-gpudist-cuda
+  sudo install -m 0755 internal/storage/gpudist/cuda/libshibudb_gpudist.so $LIB_DIR/
+  sudo ldconfig
+
+EOF
+		else
+			echo "nvcc not found and no NVIDIA GPU detected; installing without libshibudb_gpudist.so."
+		fi
 		return 0
 	fi
 
 	if ! CUDA_LIB_DIR="$(find_cuda_lib_dir)"; then
-		echo "CUDA runtime library not found; installing without libshibudb_gpudist.so."
+		echo "CUDA runtime library (libcudart) not found; installing without libshibudb_gpudist.so."
 		return 0
 	fi
 
@@ -346,9 +440,14 @@ build_gpudist_cuda() {
 
 	echo "Building FlatMeta GPU distance library..."
 	# shellcheck disable=SC2086
-	nvcc -shared -Xcompiler -fPIC -O3 $arch_flags \
+	if ! nvcc -shared -Xcompiler -fPIC -O3 $arch_flags \
 		-o "$out" \
-		"$cuda_dir/distances.cu"
+		"$cuda_dir/distances.cu"; then
+		echo "nvcc -arch=native failed; retrying with sm_75 (Turing / T4)..."
+		nvcc -shared -Xcompiler -fPIC -O3 -gencode arch=compute_75,code=sm_75 \
+			-o "$out" \
+			"$cuda_dir/distances.cu"
+	fi
 	GPUDIST_LIB="$out"
 }
 
