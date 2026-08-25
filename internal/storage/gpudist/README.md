@@ -50,6 +50,17 @@ Manual library build:
 make build-gpudist-cuda
 ```
 
+## Verify
+
+```bash
+shibudb check-gpu
+shibudb check-gpu --json
+shibudb check-gpu --smoke=false
+```
+
+Exit code `0` means FlatMeta GPU scoring is ready. Exit code `1` means it will
+fall back to CPU (see printed hints).
+
 ## Runtime controls
 
 | Env var | Effect |

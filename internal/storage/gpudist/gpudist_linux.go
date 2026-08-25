@@ -64,21 +64,36 @@ import "C"
 import (
 	"os"
 	"path/filepath"
+	"sync"
 	"unsafe"
 )
+
+var (
+	loadedPathMu sync.Mutex
+	loadedPath   string
+)
+
+func platformSupportsGPU() bool { return true }
 
 func probeGPU() bool {
 	if gpuForcedOff() {
 		return false
 	}
-	if !loadGPULibrary() {
+	if _, ok := loadGPULibraryPath(); !ok {
+		return false
+	}
+	return gpuDeviceAvailable()
+}
+
+func gpuDeviceAvailable() bool {
+	if _, ok := loadGPULibraryPath(); !ok {
 		return false
 	}
 	return C.shibudb_gpu_available() != 0
 }
 
 func batchDistancesGPU(metric int, query []float32, matrix []float32, n, dim int, out []float32) bool {
-	if !loadGPULibrary() {
+	if _, ok := loadGPULibraryPath(); !ok {
 		return false
 	}
 	rc := C.shibudb_gpu_batch_call(
@@ -93,15 +108,26 @@ func batchDistancesGPU(metric int, query []float32, matrix []float32, n, dim int
 }
 
 func loadGPULibrary() bool {
+	_, ok := loadGPULibraryPath()
+	return ok
+}
+
+func loadGPULibraryPath() (string, bool) {
+	loadedPathMu.Lock()
+	defer loadedPathMu.Unlock()
+	if loadedPath != "" {
+		return loadedPath, true
+	}
 	for _, path := range candidateLibraryPaths() {
 		cpath := C.CString(path)
 		ok := C.shibudb_gpu_load(cpath) != 0
 		C.free(unsafe.Pointer(cpath))
 		if ok {
-			return true
+			loadedPath = path
+			return loadedPath, true
 		}
 	}
-	return false
+	return "", false
 }
 
 func candidateLibraryPaths() []string {

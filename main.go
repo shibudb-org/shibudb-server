@@ -44,6 +44,7 @@ import (
 	"github.com/shibudb.org/shibudb-server/internal/logger"
 	"github.com/shibudb.org/shibudb-server/internal/models"
 	"github.com/shibudb.org/shibudb-server/internal/spaces"
+	"github.com/shibudb.org/shibudb-server/internal/storage/gpudist"
 )
 
 type runtimePaths struct {
@@ -142,13 +143,35 @@ func isServerRunning(pidFilePath string) (bool, int) {
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Println("Usage: shibudb [start [flags] | stop | connect [flags] | manager [flags] <command> | rebuild-index [flags] <space_name> | dump [flags] | restore [flags] | --version | --help]")
+		fmt.Println("Usage: shibudb [start [flags] | stop | connect [flags] | manager [flags] <command> | rebuild-index [flags] <space_name> | dump [flags] | restore [flags] | check-gpu [flags] | --version | --help]")
 		return
 	}
 
 	switch os.Args[1] {
 	case "--version":
 		printVersion()
+
+	case "check-gpu":
+		fs := flag.NewFlagSet("check-gpu", flag.ExitOnError)
+		smoke := fs.Bool("smoke", true, "run a tiny CUDA distance smoke test when a device is available")
+		jsonOut := fs.Bool("json", false, "print machine-readable JSON status")
+		fs.Parse(os.Args[2:]) //nolint
+		if len(fs.Args()) != 0 {
+			fmt.Println("Usage: shibudb check-gpu [--smoke=true|false] [--json]")
+			os.Exit(2)
+		}
+		st := gpudist.Check(*smoke)
+		if *jsonOut {
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			_ = enc.Encode(st)
+		} else {
+			fmt.Print(gpudist.FormatStatus(st))
+		}
+		if st.Ready {
+			os.Exit(0)
+		}
+		os.Exit(1)
 
 	case "start":
 		fs := flag.NewFlagSet("start", flag.ExitOnError)
@@ -423,6 +446,7 @@ Usage:
   shibudb rebuild-index [flags] <space_name>   Rebuild one space index from on-disk data
   shibudb dump [flags]                         Export database spaces to a JSONL dump file
   shibudb restore [flags]                      Restore database spaces from a JSONL dump file
+  shibudb check-gpu [flags]                    Check FlatMeta GPU library/device readiness
   shibudb --version                            Show version information
   shibudb --help                               Show this help message
 
@@ -466,6 +490,11 @@ Dump & Restore (offline, server must be stopped):
     --data-dir <path>       Data directory root (default: ~/.shibudb)
     --input <file>          Input dump file (default: stdin)
     --mode overwrite|merge  overwrite (default): replace existing; merge: overlay
+
+FlatMeta GPU:
+  check-gpu [--smoke] [--json]
+                            Verify libshibudb_gpudist.so + CUDA device (and optional smoke test)
+                            Exit 0 when ready, 1 when not ready
 
 Examples:
   shibudb start                        # Default port %s, default connection limit

@@ -2,11 +2,19 @@ package gpudist
 
 import "testing"
 
-func TestAvailableWithoutLibrary(t *testing.T) {
+func TestCheckForcedOff(t *testing.T) {
 	t.Setenv("SHIBUDB_FLAT_META_GPU", "0")
-	// Force re-init is not possible after Available() once; this env is checked
-	// inside probeGPU on first Available() call. Use a fresh process semantics:
-	// without CUDA library / with GPU forced off, BatchDistances must fail.
+	st := Check(false)
+	if st.Ready {
+		t.Fatalf("expected not ready when forced off")
+	}
+	if !st.ForcedOff {
+		t.Fatalf("expected ForcedOff=true")
+	}
+}
+
+func TestBatchDistancesFallsBackWhenForcedOff(t *testing.T) {
+	t.Setenv("SHIBUDB_FLAT_META_GPU", "0")
 	query := []float32{1, 2}
 	matrix := []float32{1, 2, 3, 4}
 	out := make([]float32, 2)
@@ -23,5 +31,18 @@ func TestMinCandidatesFromEnv(t *testing.T) {
 	t.Setenv("SHIBUDB_FLAT_META_GPU_MIN", "1024")
 	if got := MinCandidatesFromEnv(); got != 1024 {
 		t.Fatalf("override min: got %d want 1024", got)
+	}
+}
+
+func TestFormatStatus(t *testing.T) {
+	st := Status{
+		PlatformSupported: true,
+		Ready:             false,
+		Message:           "missing library",
+		Hints:             []string{"install lib"},
+	}
+	out := FormatStatus(st)
+	if out == "" {
+		t.Fatal("empty format")
 	}
 }
