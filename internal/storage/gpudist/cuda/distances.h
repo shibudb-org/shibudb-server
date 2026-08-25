@@ -9,6 +9,12 @@ extern "C" {
 int shibudb_gpudist_available(void);
 
 /*
+ * Copies the last CUDA/library diagnostic message into buf (NUL-terminated).
+ * Returns bytes written (excluding NUL), or -1 if buf is NULL / buflen < 1.
+ */
+int shibudb_gpudist_last_error(char* buf, int buflen);
+
+/*
  * Compute distances between query[dim] and each of n row-major vectors in
  * matrix[n * dim]. Writes n float distances into out.
  *

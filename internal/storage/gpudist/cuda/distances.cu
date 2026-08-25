@@ -4,6 +4,7 @@
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 enum {
     METRIC_INNER_PRODUCT = 0,
@@ -15,6 +16,26 @@ enum {
     METRIC_BRAYCURTIS = 21,
     METRIC_JENSENSHANNON = 22
 };
+
+static char g_last_error[512] = "";
+
+static void set_last_error(const char* msg) {
+    if (!msg) {
+        g_last_error[0] = '\0';
+        return;
+    }
+    snprintf(g_last_error, sizeof(g_last_error), "%s", msg);
+}
+
+static void set_cuda_error(const char* what, cudaError_t err) {
+    snprintf(
+        g_last_error,
+        sizeof(g_last_error),
+        "%s: %s (%d)",
+        what,
+        cudaGetErrorString(err),
+        (int)err);
+}
 
 __device__ inline float dist_one(
     int metric,
@@ -119,14 +140,38 @@ __global__ void batch_distances_kernel(
     out[idx] = dist_one(metric, query, matrix + (size_t)idx * (size_t)dim, dim);
 }
 
+extern "C" int shibudb_gpudist_last_error(char* buf, int buflen) {
+    if (!buf || buflen < 1) {
+        return -1;
+    }
+    snprintf(buf, (size_t)buflen, "%s", g_last_error);
+    return (int)strlen(buf);
+}
+
 extern "C" int shibudb_gpudist_available(void) {
+    set_last_error("");
     int count = 0;
     cudaError_t err = cudaGetDeviceCount(&count);
-    if (err != cudaSuccess || count <= 0) {
+    if (err != cudaSuccess) {
+        set_cuda_error("cudaGetDeviceCount", err);
+        return 0;
+    }
+    if (count <= 0) {
+        set_last_error("cudaGetDeviceCount returned 0 devices");
         return 0;
     }
     err = cudaSetDevice(0);
-    return err == cudaSuccess ? 1 : 0;
+    if (err != cudaSuccess) {
+        set_cuda_error("cudaSetDevice(0)", err);
+        return 0;
+    }
+    /* Touch the runtime to surface insufficient-driver / bad-cudart early. */
+    err = cudaFree(0);
+    if (err != cudaSuccess) {
+        set_cuda_error("cudaFree(0)", err);
+        return 0;
+    }
+    return 1;
 }
 
 extern "C" int shibudb_gpudist_batch(
@@ -136,7 +181,9 @@ extern "C" int shibudb_gpudist_batch(
     int n,
     int dim,
     float* out) {
+    set_last_error("");
     if (!query || !matrix || !out || n <= 0 || dim <= 0) {
+        set_last_error("invalid arguments to shibudb_gpudist_batch");
         return 1;
     }
 
@@ -151,15 +198,18 @@ extern "C" int shibudb_gpudist_batch(
     cudaError_t err;
     err = cudaMalloc((void**)&d_query, q_bytes);
     if (err != cudaSuccess) {
+        set_cuda_error("cudaMalloc(query)", err);
         return 2;
     }
     err = cudaMalloc((void**)&d_matrix, m_bytes);
     if (err != cudaSuccess) {
+        set_cuda_error("cudaMalloc(matrix)", err);
         cudaFree(d_query);
         return 2;
     }
     err = cudaMalloc((void**)&d_out, o_bytes);
     if (err != cudaSuccess) {
+        set_cuda_error("cudaMalloc(out)", err);
         cudaFree(d_query);
         cudaFree(d_matrix);
         return 2;
@@ -168,11 +218,13 @@ extern "C" int shibudb_gpudist_batch(
     int rc = 0;
     err = cudaMemcpy(d_query, query, q_bytes, cudaMemcpyHostToDevice);
     if (err != cudaSuccess) {
+        set_cuda_error("cudaMemcpy(query H2D)", err);
         rc = 3;
         goto cleanup;
     }
     err = cudaMemcpy(d_matrix, matrix, m_bytes, cudaMemcpyHostToDevice);
     if (err != cudaSuccess) {
+        set_cuda_error("cudaMemcpy(matrix H2D)", err);
         rc = 3;
         goto cleanup;
     }
@@ -183,11 +235,13 @@ extern "C" int shibudb_gpudist_batch(
         batch_distances_kernel<<<blocks, threads>>>(metric, d_query, d_matrix, n, dim, d_out);
         err = cudaGetLastError();
         if (err != cudaSuccess) {
+            set_cuda_error("batch_distances_kernel launch", err);
             rc = 4;
             goto cleanup;
         }
         err = cudaDeviceSynchronize();
         if (err != cudaSuccess) {
+            set_cuda_error("cudaDeviceSynchronize", err);
             rc = 4;
             goto cleanup;
         }
@@ -195,6 +249,7 @@ extern "C" int shibudb_gpudist_batch(
 
     err = cudaMemcpy(out, d_out, o_bytes, cudaMemcpyDeviceToHost);
     if (err != cudaSuccess) {
+        set_cuda_error("cudaMemcpy(out D2H)", err);
         rc = 5;
     }
 

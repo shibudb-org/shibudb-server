@@ -15,10 +15,12 @@ typedef int (*shibudb_batch_fn)(
     int n,
     int dim,
     float* out);
+typedef int (*shibudb_err_fn)(char* buf, int buflen);
 
 static void* shibudb_gpu_handle;
 static shibudb_avail_fn shibudb_gpu_avail;
 static shibudb_batch_fn shibudb_gpu_batch;
+static shibudb_err_fn shibudb_gpu_err;
 
 static int shibudb_gpu_load(const char* path) {
 	if (shibudb_gpu_handle != NULL) {
@@ -30,11 +32,13 @@ static int shibudb_gpu_load(const char* path) {
 	}
 	shibudb_gpu_avail = (shibudb_avail_fn)dlsym(shibudb_gpu_handle, "shibudb_gpudist_available");
 	shibudb_gpu_batch = (shibudb_batch_fn)dlsym(shibudb_gpu_handle, "shibudb_gpudist_batch");
+	shibudb_gpu_err = (shibudb_err_fn)dlsym(shibudb_gpu_handle, "shibudb_gpudist_last_error");
 	if (shibudb_gpu_avail == NULL || shibudb_gpu_batch == NULL) {
 		dlclose(shibudb_gpu_handle);
 		shibudb_gpu_handle = NULL;
 		shibudb_gpu_avail = NULL;
 		shibudb_gpu_batch = NULL;
+		shibudb_gpu_err = NULL;
 		return 0;
 	}
 	return 1;
@@ -58,6 +62,17 @@ static int shibudb_gpu_batch_call(
 		return -1;
 	}
 	return shibudb_gpu_batch(metric, query, matrix, n, dim, out);
+}
+
+static int shibudb_gpu_last_error(char* buf, int buflen) {
+	if (shibudb_gpu_err == NULL) {
+		if (!buf || buflen < 1) {
+			return -1;
+		}
+		buf[0] = '\0';
+		return 0;
+	}
+	return shibudb_gpu_err(buf, buflen);
 }
 */
 import "C"
@@ -90,6 +105,18 @@ func gpuDeviceAvailable() bool {
 		return false
 	}
 	return C.shibudb_gpu_available() != 0
+}
+
+func gpuLastError() string {
+	if _, ok := loadGPULibraryPath(); !ok {
+		return ""
+	}
+	buf := make([]byte, 512)
+	n := C.shibudb_gpu_last_error((*C.char)(unsafe.Pointer(&buf[0])), C.int(len(buf)))
+	if n <= 0 {
+		return ""
+	}
+	return C.GoString((*C.char)(unsafe.Pointer(&buf[0])))
 }
 
 func batchDistancesGPU(metric int, query []float32, matrix []float32, n, dim int, out []float32) bool {

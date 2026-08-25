@@ -32,16 +32,17 @@ var (
 
 // Status is a diagnostic snapshot of FlatMeta GPU readiness.
 type Status struct {
-	PlatformSupported bool   `json:"platform_supported"`
-	ForcedOff         bool   `json:"forced_off"`
-	LibraryLoaded     bool   `json:"library_loaded"`
-	LibraryPath       string `json:"library_path,omitempty"`
-	DeviceAvailable   bool   `json:"device_available"`
-	Ready             bool   `json:"ready"`
-	MinCandidates     int    `json:"min_candidates"`
-	SmokeOK           bool   `json:"smoke_ok,omitempty"`
-	SmokeRan          bool   `json:"smoke_ran,omitempty"`
-	Message           string `json:"message"`
+	PlatformSupported bool     `json:"platform_supported"`
+	ForcedOff         bool     `json:"forced_off"`
+	LibraryLoaded     bool     `json:"library_loaded"`
+	LibraryPath       string   `json:"library_path,omitempty"`
+	DeviceAvailable   bool     `json:"device_available"`
+	DeviceError       string   `json:"device_error,omitempty"`
+	Ready             bool     `json:"ready"`
+	MinCandidates     int      `json:"min_candidates"`
+	SmokeOK           bool     `json:"smoke_ok,omitempty"`
+	SmokeRan          bool     `json:"smoke_ran,omitempty"`
+	Message           string   `json:"message"`
 	Hints             []string `json:"hints,omitempty"`
 }
 
@@ -123,10 +124,16 @@ func Check(runSmoke bool) Status {
 
 	st.DeviceAvailable = gpuDeviceAvailable()
 	if !st.DeviceAvailable {
+		st.DeviceError = gpuLastError()
 		st.Message = "GPU library loaded, but no usable CUDA device was detected"
+		if st.DeviceError != "" {
+			st.Message = st.Message + ": " + st.DeviceError
+		}
 		st.Hints = []string{
 			"Check nvidia-smi and that the NVIDIA driver is installed",
-			"Confirm libcudart is resolvable: ldd $(SHIBUDB_GPUDIST_LIB or /usr/local/lib/libshibudb_gpudist.so)",
+			"Confirm libcudart is resolvable: ldd /usr/local/lib/libshibudb_gpudist.so",
+			"Rebuild the GPU library with a CUDA toolkit <= the driver CUDA version shown by nvidia-smi (e.g. driver CUDA 12.4 → cuda-nvcc-12-4)",
+			"Example: sudo apt-get install -y cuda-nvcc-12-4 cuda-cudart-dev-12-4 && make build-gpudist-cuda && sudo install -m 0755 internal/storage/gpudist/cuda/libshibudb_gpudist.so /usr/local/lib/ && sudo ldconfig",
 		}
 		return st
 	}
@@ -163,6 +170,9 @@ func FormatStatus(st Status) string {
 		fmt.Fprintf(&b, "  library_path:      %s\n", st.LibraryPath)
 	}
 	fmt.Fprintf(&b, "  device_available:  %v\n", st.DeviceAvailable)
+	if st.DeviceError != "" {
+		fmt.Fprintf(&b, "  device_error:      %s\n", st.DeviceError)
+	}
 	fmt.Fprintf(&b, "  min_candidates:    %d\n", st.MinCandidates)
 	if st.SmokeRan {
 		fmt.Fprintf(&b, "  smoke_test:        %v\n", st.SmokeOK)
