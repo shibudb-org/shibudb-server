@@ -29,9 +29,11 @@ Options:
   --without-cuda         Do not build/install FlatMeta GPU library (CPU only).
   -h, --help             Show this help.
 
-The binary always includes FlatMeta GPU support. When CUDA toolkit (nvcc) is
-available, this installer also builds libshibudb_gpudist.so. At runtime ShibuDB
-uses the GPU if that library and a CUDA device are present; otherwise CPU.
+The binary always includes FlatMeta GPU support. When an NVIDIA GPU/driver is
+present, this installer installs a CUDA toolkit <= the driver CUDA version
+(from nvidia-smi), builds libshibudb_gpudist.so, and validates with
+"shibudb check-gpu". At runtime ShibuDB uses the GPU if that library and a
+CUDA device are present; otherwise CPU.
 
 Environment:
   SHIBUDB_VERSION        Same as --version.
@@ -41,6 +43,8 @@ Environment:
   SHIBUDB_KEEP_BUILD_DIR=1
   SHIBUDB_GO_VERSION     Go version used if a suitable go command is not found.
   SHIBUDB_WITH_CUDA=0    Same as --without-cuda.
+  SHIBUDB_NVCC           Absolute path to nvcc (must be <= driver CUDA version).
+  SHIBUDB_CUDA_ARCH      nvcc arch flags (default: -arch=native).
 EOF
 }
 
@@ -48,6 +52,8 @@ SOURCE_DIR=""
 CUDA_ENABLED=0
 CUDA_LIB_DIR=""
 GPUDIST_LIB=""
+NVCC_BIN=""
+DRIVER_CUDA=""
 
 while [[ $# -gt 0 ]]; do
 	case "$1" in
@@ -229,11 +235,127 @@ install_deps() {
 	fi
 }
 
+version_le() {
+	# Returns success if $1 <= $2 (dotted versions like 12.4).
+	[[ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -n1)" == "$1" ]]
+}
+
+driver_cuda_version() {
+	if ! command -v nvidia-smi >/dev/null 2>&1; then
+		return 1
+	fi
+	nvidia-smi 2>/dev/null | sed -n 's/.*CUDA Version: \([0-9]\+\.[0-9]\+\).*/\1/p' | head -n1
+}
+
+nvcc_release_version() {
+	local bin="$1"
+	[[ -x "$bin" ]] || return 1
+	"$bin" --version 2>/dev/null | sed -n 's/.*release \([0-9]\+\.[0-9]\+\).*/\1/p' | head -n1
+}
+
+nvcc_compatible_with_driver() {
+	local bin="$1"
+	local rel driver
+	rel="$(nvcc_release_version "$bin" || true)"
+	[[ -n "$rel" ]] || return 1
+	driver="$(driver_cuda_version || true)"
+	# No driver report (CPU-only / no nvidia-smi): accept any nvcc for build.
+	if [[ -z "$driver" ]]; then
+		return 0
+	fi
+	version_le "$rel" "$driver"
+}
+
+has_nvidia_gpu() {
+	if command -v nvidia-smi >/dev/null 2>&1; then
+		nvidia-smi -L >/dev/null 2>&1 && return 0
+	fi
+	[[ -e /dev/nvidia0 ]] && return 0
+	return 1
+}
+
+# Resolve an nvcc that is <= the driver CUDA version. Sets NVCC_BIN and prepends
+# its directory to PATH. Prefers versioned /usr/local/cuda-X.Y installs over a
+# newer /usr/local/cuda symlink (avoids CUDA error 35 at runtime).
+select_compatible_nvcc() {
+	NVCC_BIN=""
+	local driver candidate rel best_bin best_rel
+	driver="$(driver_cuda_version || true)"
+	DRIVER_CUDA="$driver"
+
+	if [[ -n "${SHIBUDB_NVCC:-}" ]]; then
+		if [[ -x "$SHIBUDB_NVCC" ]] && nvcc_compatible_with_driver "$SHIBUDB_NVCC"; then
+			NVCC_BIN="$SHIBUDB_NVCC"
+			export PATH="$(dirname "$NVCC_BIN"):$PATH"
+			return 0
+		fi
+		echo "Warning: SHIBUDB_NVCC=$SHIBUDB_NVCC is missing or newer than driver CUDA ${driver:-unknown}; ignoring." >&2
+	fi
+
+	best_bin=""
+	best_rel=""
+	# Prefer exact driver-matched toolkit paths first.
+	if [[ -n "$driver" ]]; then
+		for candidate in \
+			"/usr/local/cuda-${driver}/bin/nvcc" \
+			"/usr/local/cuda-${driver/./-}/bin/nvcc"; do
+			if [[ -x "$candidate" ]] && nvcc_compatible_with_driver "$candidate"; then
+				NVCC_BIN="$candidate"
+				export PATH="$(dirname "$NVCC_BIN"):$PATH"
+				return 0
+			fi
+		done
+	fi
+
+	# Scan installed toolkits; pick highest release still <= driver.
+	local found=()
+	while IFS= read -r candidate; do
+		found+=("$candidate")
+	done < <(ls -1d /usr/local/cuda-*/bin/nvcc 2>/dev/null || true)
+	for candidate in \
+		"${found[@]}" \
+		/usr/local/cuda/bin/nvcc \
+		/usr/lib/nvidia-cuda-toolkit/bin/nvcc \
+		/usr/bin/nvcc; do
+		[[ -x "$candidate" ]] || continue
+		rel="$(nvcc_release_version "$candidate" || true)"
+		[[ -n "$rel" ]] || continue
+		if [[ -n "$driver" ]] && ! version_le "$rel" "$driver"; then
+			echo "Ignoring nvcc at $candidate (release $rel > driver CUDA $driver)."
+			continue
+		fi
+		# Keep the newest compatible toolkit.
+		if [[ -z "$best_rel" ]] || version_le "$best_rel" "$rel"; then
+			best_bin="$candidate"
+			best_rel="$rel"
+		fi
+	done
+
+	if [[ -n "$best_bin" ]]; then
+		NVCC_BIN="$best_bin"
+		export PATH="$(dirname "$NVCC_BIN"):$PATH"
+		return 0
+	fi
+
+	# PATH nvcc as last resort when no driver constraint.
+	if command -v nvcc >/dev/null 2>&1; then
+		candidate="$(command -v nvcc)"
+		if nvcc_compatible_with_driver "$candidate"; then
+			NVCC_BIN="$candidate"
+			return 0
+		fi
+		rel="$(nvcc_release_version "$candidate" || true)"
+		echo "PATH nvcc ($candidate, release ${rel:-unknown}) is newer than driver CUDA ${driver:-unknown}."
+	fi
+	return 1
+}
+
 should_install_cuda_toolkit() {
 	case "$WITH_CUDA" in
 		0|false|no|off) return 1 ;;
 	esac
-	if command -v nvcc >/dev/null 2>&1; then
+	# Already have a driver-compatible nvcc.
+	if select_compatible_nvcc; then
 		return 1
 	fi
 	# Install toolkit when an NVIDIA GPU/driver is present, or user forced CUDA.
@@ -246,92 +368,9 @@ should_install_cuda_toolkit() {
 	return 1
 }
 
-has_nvidia_gpu() {
-	if command -v nvidia-smi >/dev/null 2>&1; then
-		nvidia-smi -L >/dev/null 2>&1 && return 0
-	fi
-	[[ -e /dev/nvidia0 ]] && return 0
-	return 1
-}
-
-ensure_nvcc_on_path() {
-	if command -v nvcc >/dev/null 2>&1; then
-		return 0
-	fi
-	local candidate
-	for candidate in \
-		/usr/local/cuda/bin/nvcc \
-		/usr/lib/nvidia-cuda-toolkit/bin/nvcc \
-		/usr/bin/nvcc; do
-		if [[ -x "$candidate" ]]; then
-			export PATH="$(dirname "$candidate"):$PATH"
-			return 0
-		fi
-	done
-	return 1
-}
-
-# Install nvcc + cudart headers/libs via apt. Distro packages are preferred;
-# GCP/minimal Debian images often lack nvidia-cuda-toolkit, so fall back to
-# NVIDIA's cuda-keyring repository.
-install_cuda_toolkit_apt() {
-	echo "Installing CUDA toolkit (nvcc) for FlatMeta GPU library..."
-
-	if $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y \
-		nvidia-cuda-toolkit \
-		nvidia-cuda-dev; then
-		ensure_nvcc_on_path || true
-		return 0
-	fi
-
-	echo "Distro CUDA packages unavailable; trying NVIDIA CUDA apt repository..."
-	if ! install_nvidia_cuda_repo_apt; then
-		print_cuda_manual_install_help
-		return 1
-	fi
-
-	# Prefer a compact compiler + runtime-dev set over the full toolkit meta package.
-	local candidates=()
-	mapfile -t candidates < <(apt-cache search --names-only '^cuda-nvcc-[0-9]+-[0-9]+$' 2>/dev/null | awk '{print $1}' | sort -V)
-	if [[ ${#candidates[@]} -eq 0 ]]; then
-		# Fallback list for when apt-cache search is empty/odd.
-		candidates=(cuda-nvcc-12-8 cuda-nvcc-12-6 cuda-nvcc-12-4 cuda-nvcc-12-2 cuda-nvcc-11-8)
-	fi
-
-	# Try newest first.
-	local nvcc_pkg cudart_pkg
-	local i
-	for ((i=${#candidates[@]}-1; i>=0; i--)); do
-		nvcc_pkg="${candidates[$i]}"
-		cudart_pkg="${nvcc_pkg/cuda-nvcc-/cuda-cudart-dev-}"
-		echo "Trying $nvcc_pkg + $cudart_pkg ..."
-		if $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y "$nvcc_pkg" "$cudart_pkg"; then
-			# NVIDIA installs nvcc under /usr/local/cuda/bin
-			export PATH="/usr/local/cuda/bin:$PATH"
-			if ensure_nvcc_on_path && command -v nvcc >/dev/null 2>&1; then
-				echo "Installed CUDA toolkit via NVIDIA repo: $(nvcc --version | tail -n1)"
-				return 0
-			fi
-		fi
-	done
-
-	# Last resort: larger meta package.
-	if $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y cuda-toolkit-12-6 || \
-		$SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y cuda-toolkit-12-4 || \
-		$SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y cuda-toolkit; then
-		export PATH="/usr/local/cuda/bin:$PATH"
-		if ensure_nvcc_on_path && command -v nvcc >/dev/null 2>&1; then
-			echo "Installed CUDA toolkit meta package: $(nvcc --version | tail -n1)"
-			return 0
-		fi
-	fi
-
-	print_cuda_manual_install_help
-	return 1
-}
-
-install_nvidia_cuda_repo_apt() {
-	local id version_id arch repo_distro keyring_url keyring_deb
+cuda_repo_distro_arch() {
+	# Prints "distro arch" for NVIDIA CUDA apt repos, e.g. "debian12 x86_64".
+	local id version_id arch repo_distro
 	if [[ ! -f /etc/os-release ]]; then
 		return 1
 	fi
@@ -341,77 +380,204 @@ install_nvidia_cuda_repo_apt() {
 	version_id="${VERSION_ID:-}"
 	case "$(uname -m)" in
 		x86_64) arch="x86_64" ;;
-		aarch64|arm64) arch="sbsa" ;; # NVIDIA arm64 server repo
-		*) echo "Unsupported arch for NVIDIA CUDA repo: $(uname -m)" >&2; return 1 ;;
+		aarch64|arm64) arch="sbsa" ;;
+		*) return 1 ;;
 	esac
 
 	case "$id" in
 		debian)
 			case "$version_id" in
-				12*) repo_distro="debian12" ;;
+				12*|13*) repo_distro="debian12" ;;
 				11*) repo_distro="debian11" ;;
-				*)
-					echo "Unsupported Debian version for NVIDIA CUDA repo: $version_id" >&2
-					return 1
-					;;
+				*) return 1 ;;
 			esac
 			;;
 		ubuntu)
 			case "$version_id" in
-				24.04*) repo_distro="ubuntu2404" ;;
+				24.04*|24.10*|25.*) repo_distro="ubuntu2404" ;;
 				22.04*) repo_distro="ubuntu2204" ;;
 				20.04*) repo_distro="ubuntu2004" ;;
-				*)
-					echo "Unsupported Ubuntu version for NVIDIA CUDA repo: $version_id" >&2
-					return 1
-					;;
+				*) return 1 ;;
 			esac
-			# Ubuntu arm64 uses arm64/cross repo naming; keep x86_64 path for amd64 VMs.
-			if [[ "$arch" == "sbsa" && "$id" == "ubuntu" ]]; then
+			if [[ "$arch" == "sbsa" ]]; then
 				arch="arm64"
 			fi
 			;;
 		*)
-			echo "NVIDIA CUDA apt repo auto-setup supports Debian/Ubuntu only (got ID=$id)." >&2
 			return 1
 			;;
 	esac
+	echo "$repo_distro $arch"
+}
+
+# Install nvcc + cudart headers/libs via apt.
+# Always prefers toolkit packages <= nvidia-smi "CUDA Version" (avoids error 35).
+# GCP/minimal images lack nvidia-cuda-toolkit; use NVIDIA cuda-keyring instead.
+install_cuda_toolkit_apt() {
+	echo "Installing CUDA toolkit (nvcc) for FlatMeta GPU library..."
+
+	if select_compatible_nvcc; then
+		echo "Compatible CUDA toolkit already present: $NVCC_BIN ($(nvcc_release_version "$NVCC_BIN"))"
+		return 0
+	fi
+
+	local driver_cuda
+	driver_cuda="$(driver_cuda_version || true)"
+	DRIVER_CUDA="$driver_cuda"
+	if [[ -n "$driver_cuda" ]]; then
+		echo "NVIDIA driver reports CUDA Version: $driver_cuda (toolkit must be <= this)."
+	fi
+
+	# Prefer NVIDIA versioned packages matching the driver (reliable on GCP).
+	if install_nvidia_cuda_repo_apt; then
+		if install_cuda_nvcc_packages_apt "$driver_cuda"; then
+			return 0
+		fi
+	fi
+
+	# Distro packages (often missing on minimal GCP images).
+	echo "Trying distro nvidia-cuda-toolkit packages..."
+	if $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y \
+		nvidia-cuda-toolkit \
+		nvidia-cuda-dev 2>/dev/null; then
+		if select_compatible_nvcc; then
+			echo "Installed distro CUDA toolkit: $NVCC_BIN ($(nvcc_release_version "$NVCC_BIN"))"
+			return 0
+		fi
+		echo "Distro nvidia-cuda-toolkit is newer than driver CUDA ${driver_cuda:-unknown}; ignoring for FlatMeta GPU build."
+	fi
+
+	print_cuda_manual_install_help
+	return 1
+}
+
+install_cuda_nvcc_packages_apt() {
+	local driver_cuda="${1:-}"
+	local candidates=()
+	mapfile -t candidates < <(apt-cache search --names-only '^cuda-nvcc-[0-9]+-[0-9]+$' 2>/dev/null | awk '{print $1}' | sort -V)
+	if [[ ${#candidates[@]} -eq 0 ]]; then
+		candidates=(cuda-nvcc-12-8 cuda-nvcc-12-6 cuda-nvcc-12-4 cuda-nvcc-12-2 cuda-nvcc-11-8)
+	fi
+	if [[ -n "$driver_cuda" ]]; then
+		echo "Selecting CUDA toolkit packages <= driver CUDA $driver_cuda ..."
+		local filtered=()
+		local pkg ver
+		for pkg in "${candidates[@]}"; do
+			ver="${pkg#cuda-nvcc-}"
+			ver="${ver/-/.}"
+			if version_le "$ver" "$driver_cuda"; then
+				filtered+=("$pkg")
+			fi
+		done
+		if [[ ${#filtered[@]} -eq 0 ]]; then
+			echo "No cuda-nvcc packages <= driver CUDA $driver_cuda found in apt." >&2
+			return 1
+		fi
+		candidates=("${filtered[@]}")
+	fi
+
+	# Try newest compatible first.
+	local nvcc_pkg cudart_pkg i ver_dir
+	for ((i=${#candidates[@]}-1; i>=0; i--)); do
+		nvcc_pkg="${candidates[$i]}"
+		cudart_pkg="${nvcc_pkg/cuda-nvcc-/cuda-cudart-dev-}"
+		echo "Trying $nvcc_pkg + $cudart_pkg ..."
+		if $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y "$nvcc_pkg" "$cudart_pkg"; then
+			ver_dir="${nvcc_pkg#cuda-nvcc-}"
+			ver_dir="${ver_dir/-/.}"
+			export PATH="/usr/local/cuda-${ver_dir}/bin:/usr/local/cuda/bin:$PATH"
+			if select_compatible_nvcc; then
+				echo "Installed CUDA toolkit via NVIDIA repo: $NVCC_BIN ($(nvcc_release_version "$NVCC_BIN"))"
+				return 0
+			fi
+		fi
+	done
+
+	# Last resort: toolkit meta package matching driver when possible.
+	local meta_pkgs=()
+	if [[ -n "$driver_cuda" ]]; then
+		meta_pkgs+=("cuda-toolkit-${driver_cuda/./-}")
+	fi
+	meta_pkgs+=(cuda-toolkit-12-4 cuda-toolkit-12-2 cuda-toolkit-11-8 cuda-toolkit)
+	local meta
+	for meta in "${meta_pkgs[@]}"; do
+		echo "Trying meta package $meta ..."
+		if $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y "$meta"; then
+			export PATH="/usr/local/cuda/bin:$PATH"
+			if select_compatible_nvcc; then
+				echo "Installed CUDA toolkit meta package: $NVCC_BIN ($(nvcc_release_version "$NVCC_BIN"))"
+				return 0
+			fi
+		fi
+	done
+	return 1
+}
+
+install_nvidia_cuda_repo_apt() {
+	local repo_distro arch keyring_url keyring_deb dest
+	local parsed
+	if ! parsed="$(cuda_repo_distro_arch)"; then
+		echo "NVIDIA CUDA apt repo auto-setup supports Debian 11/12 and Ubuntu 20.04/22.04/24.04." >&2
+		return 1
+	fi
+	repo_distro="${parsed%% *}"
+	arch="${parsed##* }"
+
+	# Already configured?
+	if [[ -f /etc/apt/sources.list.d/cuda-debian12-x86_64.list ]] || \
+		[[ -f /etc/apt/sources.list.d/cuda-ubuntu2204-x86_64.list ]] || \
+		[[ -f /etc/apt/sources.list.d/cuda-${repo_distro}-${arch}.list ]] || \
+		compgen -G "/etc/apt/sources.list.d/cuda*.list" >/dev/null 2>&1; then
+		echo "NVIDIA CUDA apt repository already present."
+		$SUDO apt-get update || true
+		return 0
+	fi
 
 	keyring_deb="cuda-keyring_1.1-1_all.deb"
 	keyring_url="https://developer.download.nvidia.com/compute/cuda/repos/${repo_distro}/${arch}/${keyring_deb}"
+	dest="${WORK_DIR:-/tmp}/$keyring_deb"
 	echo "Adding NVIDIA CUDA apt repo ($repo_distro/$arch)..."
-	if ! curl -fsSL "$keyring_url" -o "$WORK_DIR/$keyring_deb"; then
-		# Some arm Ubuntu repos use x86_64 keyring package path differently; retry common alt.
-		if [[ "$arch" == "arm64" ]]; then
+	if ! curl -fsSL "$keyring_url" -o "$dest"; then
+		if [[ "$arch" == "arm64" || "$arch" == "sbsa" ]]; then
 			keyring_url="https://developer.download.nvidia.com/compute/cuda/repos/${repo_distro}/arm64/${keyring_deb}"
-			curl -fsSL "$keyring_url" -o "$WORK_DIR/$keyring_deb" || return 1
+			curl -fsSL "$keyring_url" -o "$dest" || return 1
 		else
+			echo "Failed to download $keyring_url" >&2
 			return 1
 		fi
 	fi
-	$SUDO dpkg -i "$WORK_DIR/$keyring_deb"
+	$SUDO dpkg -i "$dest"
 	$SUDO apt-get update
 	return 0
 }
 
 print_cuda_manual_install_help() {
+	local driver_cuda repo_hint pkg_ver
+	driver_cuda="$(driver_cuda_version || true)"
+	[[ -n "$driver_cuda" ]] || driver_cuda="12.4"
+	pkg_ver="${driver_cuda/./-}"
+	repo_hint="debian12/x86_64"
+	local parsed
+	if parsed="$(cuda_repo_distro_arch 2>/dev/null)"; then
+		repo_hint="${parsed%% *}/${parsed##* }"
+	fi
 	cat >&2 <<EOF
-Warning: could not install CUDA toolkit automatically.
+Warning: could not install a CUDA toolkit compatible with driver CUDA $driver_cuda.
 
-On this GCP/Debian image, install NVIDIA's toolkit, then re-run the installer:
+Install a matching toolkit (NOT newer than the driver), then rebuild:
 
   curl -fsSL -o /tmp/cuda-keyring.deb \\
-    https://developer.download.nvidia.com/compute/cuda/repos/debian12/x86_64/cuda-keyring_1.1-1_all.deb
+    https://developer.download.nvidia.com/compute/cuda/repos/${repo_hint}/cuda-keyring_1.1-1_all.deb
   sudo dpkg -i /tmp/cuda-keyring.deb
   sudo apt-get update
-  sudo apt-get install -y cuda-nvcc-12-6 cuda-cudart-dev-12-6
-  export PATH=/usr/local/cuda/bin:\$PATH
+  sudo apt-get install -y cuda-nvcc-${pkg_ver} cuda-cudart-dev-${pkg_ver}
+  export PATH=/usr/local/cuda-${driver_cuda}/bin:/usr/local/cuda/bin:\$PATH
   nvcc --version
 
-  # Then rebuild/install only the FlatMeta GPU library:
   make build-gpudist-cuda
   sudo install -m 0755 internal/storage/gpudist/cuda/libshibudb_gpudist.so $LIB_DIR/
   sudo ldconfig
+  shibudb check-gpu
 
 EOF
 }
@@ -494,16 +660,31 @@ prepare_source() {
 }
 
 find_cuda_lib_dir() {
-	local candidate
-	for candidate in \
-		"${CUDA_HOME:-}/lib64" \
-		"${CUDA_PATH:-}/lib64" \
-		/usr/local/cuda/lib64 \
-		/usr/lib/x86_64-linux-gnu \
-		/usr/lib/aarch64-linux-gnu \
-		/usr/lib/nvidia-cuda-toolkit/lib \
-		/usr/lib64 \
-		/usr/lib; do
+	local candidate driver
+	driver="$(driver_cuda_version || true)"
+	local candidates=()
+	if [[ -n "$driver" ]]; then
+		candidates+=(
+			"/usr/local/cuda-${driver}/lib64"
+			"/usr/local/cuda-${driver/./-}/lib64"
+		)
+	fi
+	candidates+=(
+		"${CUDA_HOME:-}/lib64"
+		"${CUDA_PATH:-}/lib64"
+		/usr/local/cuda/lib64
+		/usr/lib/x86_64-linux-gnu
+		/usr/lib/aarch64-linux-gnu
+		/usr/lib/nvidia-cuda-toolkit/lib
+		/usr/lib64
+		/usr/lib
+	)
+	# Also scan versioned CUDA installs.
+	while IFS= read -r candidate; do
+		candidates+=("$candidate")
+	done < <(ls -1d /usr/local/cuda-*/lib64 2>/dev/null || true)
+
+	for candidate in "${candidates[@]}"; do
 		[[ -n "$candidate" ]] || continue
 		if [[ -e "$candidate/libcudart.so" || -e "$candidate/libcudart.so.12" || -e "$candidate/libcudart.so.11" ]]; then
 			echo "$candidate"
@@ -529,6 +710,7 @@ detect_cuda() {
 	CUDA_ENABLED=0
 	CUDA_LIB_DIR=""
 	GPUDIST_LIB=""
+	NVCC_BIN=""
 
 	case "$WITH_CUDA" in
 		0|false|no|off)
@@ -537,9 +719,16 @@ detect_cuda() {
 			;;
 	esac
 
-	ensure_nvcc_on_path || true
+	# If deps were skipped but a compatible toolkit is missing, try installing it
+	# when an NVIDIA GPU is present (common on GCP after a partial install).
+	if ! select_compatible_nvcc; then
+		if has_nvidia_gpu && command -v apt-get >/dev/null 2>&1; then
+			echo "No driver-compatible nvcc found; attempting CUDA toolkit install..."
+			install_cuda_toolkit_apt || true
+		fi
+	fi
 
-	if ! command -v nvcc >/dev/null 2>&1; then
+	if ! select_compatible_nvcc; then
 		if has_nvidia_gpu; then
 			print_cuda_manual_install_help
 		else
@@ -554,13 +743,16 @@ detect_cuda() {
 	fi
 
 	CUDA_ENABLED=1
-	echo "CUDA toolkit detected (nvcc=$(command -v nvcc), cudart=$CUDA_LIB_DIR); building FlatMeta GPU library."
+	local nvcc_rel
+	nvcc_rel="$(nvcc_release_version "$NVCC_BIN")"
+	echo "CUDA toolkit OK (nvcc=$NVCC_BIN release=$nvcc_rel, driver_cuda=${DRIVER_CUDA:-unknown}, cudart=$CUDA_LIB_DIR)"
+	echo "Building FlatMeta GPU library with this toolkit (must be <= driver to avoid CUDA error 35)."
 }
 
 build_gpudist_cuda() {
 	local cuda_dir="$SOURCE_DIR/internal/storage/gpudist/cuda"
 	local out="$cuda_dir/libshibudb_gpudist.so"
-	local arch_flags="${SHIBUDB_CUDA_ARCH:--arch=native}"
+	local build_script="$SOURCE_DIR/scripts/build-gpudist-cuda.sh"
 
 	if [[ ! -f "$cuda_dir/distances.cu" ]]; then
 		echo "Missing FlatMeta CUDA sources at $cuda_dir/distances.cu" >&2
@@ -568,16 +760,85 @@ build_gpudist_cuda() {
 	fi
 
 	echo "Building FlatMeta GPU distance library..."
-	# shellcheck disable=SC2086
-	if ! nvcc -shared -Xcompiler -fPIC -O3 $arch_flags \
-		-o "$out" \
-		"$cuda_dir/distances.cu"; then
-		echo "nvcc -arch=native failed; retrying with sm_75 (Turing / T4)..."
-		nvcc -shared -Xcompiler -fPIC -O3 -gencode arch=compute_75,code=sm_75 \
+	# Prefer the shared build script (driver/nvcc version checks).
+	if [[ -x "$build_script" ]] || [[ -f "$build_script" ]]; then
+		chmod +x "$build_script" 2>/dev/null || true
+		if ! SHIBUDB_NVCC="$NVCC_BIN" "$build_script"; then
+			echo "Failed to build FlatMeta GPU library with $NVCC_BIN" >&2
+			exit 1
+		fi
+	else
+		local arch_flags="${SHIBUDB_CUDA_ARCH:--arch=native}"
+		# shellcheck disable=SC2086
+		if ! "$NVCC_BIN" -shared -Xcompiler -fPIC -O3 $arch_flags \
 			-o "$out" \
-			"$cuda_dir/distances.cu"
+			"$cuda_dir/distances.cu"; then
+			echo "nvcc -arch=native failed; retrying with sm_75 (Turing / T4)..."
+			"$NVCC_BIN" -shared -Xcompiler -fPIC -O3 -gencode arch=compute_75,code=sm_75 \
+				-o "$out" \
+				"$cuda_dir/distances.cu"
+		fi
+	fi
+
+	if [[ ! -f "$out" ]]; then
+		echo "FlatMeta GPU library was not produced at $out" >&2
+		exit 1
+	fi
+
+	# Validate the .so links against cudart and report which one.
+	echo "GPU library link check:"
+	ldd "$out" | grep -E 'cudart|not found' || true
+	if ldd "$out" 2>/dev/null | grep -q 'not found'; then
+		echo "error: libshibudb_gpudist.so has unresolved libraries" >&2
+		ldd "$out" >&2 || true
+		exit 1
 	fi
 	GPUDIST_LIB="$out"
+}
+
+validate_gpu_runtime() {
+	local bin="$BIN_DIR/$APP_NAME"
+	local lib="$LIB_DIR/libshibudb_gpudist.so"
+	local json
+
+	case "$WITH_CUDA" in
+		0|false|no|off) return 0 ;;
+	esac
+
+	if [[ "$CUDA_ENABLED" != "1" || ! -f "$lib" ]]; then
+		return 0
+	fi
+
+	echo
+	echo "Validating FlatMeta GPU runtime (shibudb check-gpu)..."
+	json="$("$bin" check-gpu --json 2>/dev/null || true)"
+	if [[ -z "$json" ]]; then
+		# Older binaries without --json: best-effort.
+		if "$bin" check-gpu >/dev/null 2>&1; then
+			echo "FlatMeta GPU validation: ready"
+			return 0
+		fi
+		echo "Warning: could not run '$bin check-gpu'; library installed at $lib." >&2
+		return 0
+	fi
+
+	echo "$json"
+	if echo "$json" | grep -q '"ready"[[:space:]]*:[[:space:]]*true'; then
+		echo "FlatMeta GPU validation: ready"
+		return 0
+	fi
+
+	cat >&2 <<EOF
+
+Warning: libshibudb_gpudist.so is installed, but check-gpu reports not ready.
+Common cause: toolkit newer than the NVIDIA driver (CUDA error 35).
+  nvidia-smi   # note "CUDA Version"
+  ldd $lib | grep cudart
+  # Rebuild with toolkit <= driver CUDA version, e.g. cuda-nvcc-12-4
+
+EOF
+	# Do not fail the overall install: CPU fallback still works.
+	return 0
 }
 
 install_files() {
@@ -756,6 +1017,7 @@ prepare_source
 detect_cuda
 build_shibudb
 install_files
+validate_gpu_runtime
 
 echo
 echo "ShibuDB installed successfully:"
@@ -763,7 +1025,11 @@ echo "  Binary: $BIN_DIR/$APP_NAME"
 echo "  FAISS libraries: $LIB_DIR"
 if [[ "$CUDA_ENABLED" == "1" ]]; then
 	echo "  FlatMeta GPU library: installed ($LIB_DIR/libshibudb_gpudist.so)"
-	echo "  FlatMeta GPU usage: automatic when a CUDA device is available"
+	echo "  CUDA nvcc used: $NVCC_BIN ($(nvcc_release_version "$NVCC_BIN" 2>/dev/null || echo unknown))"
+	if [[ -n "${DRIVER_CUDA:-}" ]]; then
+		echo "  NVIDIA driver CUDA Version: $DRIVER_CUDA"
+	fi
+	echo "  Verify anytime: $BIN_DIR/$APP_NAME check-gpu --json"
 else
 	echo "  FlatMeta GPU library: not installed (CPU scoring; add lib later if needed)"
 fi
